@@ -1,0 +1,4 @@
+.specstory/
+.temporary/
+.venv/
+*.log
