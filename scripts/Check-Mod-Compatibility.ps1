@@ -1,8 +1,69 @@
-# * Detects incompatible Minecraft mods from a Fabric/TLauncher log and moves them out of active folders.
-# !
-# ! This script MOVES files (does not delete by default). Use -DeleteFromGameMods to delete from the game mods folder.
-# !
-# ? Why log-based: Fabric loader and Mixin errors contain "from mod <id>" which is reliable for identifying the culprit.
+<#
+.SYNOPSIS
+Detects incompatible Minecraft mods from Fabric/TLauncher logs.
+
+.DESCRIPTION
+Reads the latest tl-logger*.txt or a specified log file, extracts mod IDs from Fabric/Mixin errors,
+and removes the offending jars from the game mods folder. By default, removed mods are moved into
+a legacy folder inside the storage directory. Use -GameLegacy to also keep a legacy copy inside
+the game mods folder. Use -NoLegacy to delete removed mods instead of moving them to legacy.
+Compatibility logs (legacy.log and compat-report-*.json) are written only when -Verbose is used.
+
+.PARAMETER LogPath
+Path to tl-logger*.txt or a Fabric log file. Leave empty to auto-pick the latest temp log.
+
+.PARAMETER GameModsDir
+Active mods folder used by the launcher/game.
+
+.PARAMETER StorageModsDir
+Main mods storage (the "source of truth").
+
+.PARAMETER StorageLegacyFolderName
+Subfolder name inside StorageModsDir where legacy jars are placed.
+
+.PARAMETER GameLegacyFolderName
+Subfolder name inside GameModsDir where removed jars are placed when -GameLegacy is used.
+
+.PARAMETER NoLegacy
+If set, does not keep legacy copies. Removed mods are deleted from game and storage.
+
+.PARAMETER GameLegacy
+If set, also keeps legacy copies inside the game mods folder. Without this flag, the game mods
+copy is deleted and only the storage legacy is kept (unless -NoLegacy is used).
+
+.PARAMETER DeleteFromGameMods
+If set, deletes from GameModsDir instead of moving to GameLegacyFolderName.
+
+.PARAMETER TreatNonFabricAsIncompatible
+If set, treats "Found N non-fabric mods" list as incompatible (moves/deletes by jar filename).
+
+.PARAMETER DryRun
+If set, performs no file operations (prints what would happen).
+
+.PARAMETER IncludeWarnMixinsAsIncompatible
+If set, also flags WARN "from mod" lines as incompatible (not recommended).
+
+.PARAMETER LogReadRetryCount
+Retry count when reading a log that may still be writing.
+
+.PARAMETER LogReadRetryDelayMs
+Delay between log read retries.
+
+.PARAMETER Help
+Show detailed help for this script and exit.
+
+.EXAMPLE
+.\Check-Mod-Compatibility.ps1
+
+.EXAMPLE
+.\Check-Mod-Compatibility.ps1 -LogPath "C:\Temp\tl-logger123.txt" -Verbose
+
+.EXAMPLE
+.\Check-Mod-Compatibility.ps1 -GameLegacy -Verbose
+
+.EXAMPLE
+.\Check-Mod-Compatibility.ps1 -NoLegacy
+#>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -26,7 +87,15 @@ param(
   [Parameter(Mandatory = $false)]
   [string]$GameLegacyFolderName = "legacy",
 
-  # * If set, deletes from GameModsDir instead of moving to GameLegacyFolderName.
+  # * If set, deletes legacy copies (no legacy storage or game).
+  [Parameter(Mandatory = $false)]
+  [switch]$NoLegacy,
+
+  # * If set, also keeps legacy copies inside the game mods folder.
+  [Parameter(Mandatory = $false)]
+  [switch]$GameLegacy,
+
+  # * If set, deletes from GameModsDir instead of moving to GameLegacyFolderName (when enabled).
   [Parameter(Mandatory = $false)]
   [switch]$DeleteFromGameMods,
 
@@ -48,11 +117,22 @@ param(
 
   # * Delay between log read retries.
   [Parameter(Mandatory = $false)]
-  [int]$LogReadRetryDelayMs = 500
+  [int]$LogReadRetryDelayMs = 500,
+
+  # * Show detailed help and exit.
+  [Parameter(Mandatory = $false)]
+  [switch]$Help
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($Help) {
+  Get-Help -Full -Name $PSCommandPath
+  return
+}
+
+$compatLogsEnabled = $PSBoundParameters.ContainsKey("Verbose")
 
 function Get-LatestTLauncherLogPath {
   param(
@@ -407,8 +487,10 @@ Write-Host ("Minecraft: {0}" -f $mcVersion)
 $evidenceByModId = Get-IncompatibleModEvidenceFromLog -Lines $logLines -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
 $nonFabricJarNames = Get-NonFabricJarNamesFromLog -Lines $logLines
 
-$legacyLogPath = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
-Write-LegacyLog -EvidenceByModId $evidenceByModId -LogPath $legacyLogPath
+if ($compatLogsEnabled) {
+  $legacyLogPath = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
+  Write-LegacyLog -EvidenceByModId $evidenceByModId -LogPath $legacyLogPath
+}
 
 if ($evidenceByModId.Count -eq 0 -and (-not $TreatNonFabricAsIncompatible)) {
   Write-Host "No incompatible mods detected from current log patterns."
@@ -422,10 +504,20 @@ if (-not (Test-Path -LiteralPath $StorageModsDir)) {
   throw ("StorageModsDir not found: {0}" -f $StorageModsDir)
 }
 
-$storageLegacyDir = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-$storageLegacyVersionDir = Join-Path -Path $storageLegacyDir -ChildPath $mcVersion
-$gameLegacyDir = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-$gameLegacyVersionDir = Join-Path -Path $gameLegacyDir -ChildPath $mcVersion
+$deleteFromGame = [bool]$NoLegacy -or [bool]$DeleteFromGameMods -or (-not [bool]$GameLegacy)
+$deleteFromStorage = [bool]$NoLegacy
+
+$storageLegacyVersionDir = $null
+if (-not $deleteFromStorage) {
+  $storageLegacyDir = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
+  $storageLegacyVersionDir = Join-Path -Path $storageLegacyDir -ChildPath $mcVersion
+}
+
+$gameLegacyVersionDir = $null
+if (-not $deleteFromGame) {
+  $gameLegacyDir = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
+  $gameLegacyVersionDir = Join-Path -Path $gameLegacyDir -ChildPath $mcVersion
+}
 
 # * Build mod id -> jar mapping for game mods dir.
 $gameIdToJars = Build-ModIdToJarMap -DirPath $GameModsDir
@@ -466,10 +558,10 @@ foreach ($modId in ($evidenceByModId.Keys | Sort-Object)) {
       $storageJarPath = $storageIdToJars[$modId][0]
     }
 
-    $gameResult = Move-OrDelete -SourcePath $gameJarPath -DestDir $gameLegacyVersionDir -DoDelete ([bool]$DeleteFromGameMods) -IsDryRun ([bool]$DryRun)
+    $gameResult = Move-OrDelete -SourcePath $gameJarPath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun ([bool]$DryRun)
     $storageResult = $null
     if ($storageJarPath) {
-      $storageResult = Move-OrDelete -SourcePath $storageJarPath -DestDir $storageLegacyVersionDir -DoDelete $false -IsDryRun ([bool]$DryRun)
+      $storageResult = Move-OrDelete -SourcePath $storageJarPath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun ([bool]$DryRun)
     } else {
       $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
     }
@@ -491,14 +583,14 @@ if ($TreatNonFabricAsIncompatible -and $nonFabricJarNames -and $nonFabricJarName
 
     $gameResult = $null
     if (Test-Path -LiteralPath $gamePath) {
-      $gameResult = Move-OrDelete -SourcePath $gamePath -DestDir $gameLegacyVersionDir -DoDelete ([bool]$DeleteFromGameMods) -IsDryRun ([bool]$DryRun)
+      $gameResult = Move-OrDelete -SourcePath $gamePath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun ([bool]$DryRun)
     } else {
       $gameResult = ("not present in game mods: {0}" -f $jarName)
     }
 
     $storageResult = $null
     if (Test-Path -LiteralPath $storagePath) {
-      $storageResult = Move-OrDelete -SourcePath $storagePath -DestDir $storageLegacyVersionDir -DoDelete $false -IsDryRun ([bool]$DryRun)
+      $storageResult = Move-OrDelete -SourcePath $storagePath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun ([bool]$DryRun)
     } else {
       $storageResult = ("not present in storage root: {0}" -f $jarName)
     }
@@ -519,19 +611,28 @@ $report = [pscustomobject]@{
   log = $resolvedLogPath
   dryRun = [bool]$DryRun
   deleteFromGameMods = [bool]$DeleteFromGameMods
+  noLegacy = [bool]$NoLegacy
+  gameLegacy = [bool]$GameLegacy
+  effectiveDeleteFromGameMods = [bool]$deleteFromGame
+  effectiveDeleteFromStorageMods = [bool]$deleteFromStorage
   treatNonFabricAsIncompatible = [bool]$TreatNonFabricAsIncompatible
   includeWarnMixinsAsIncompatible = [bool]$IncludeWarnMixinsAsIncompatible
   count = $actions.Count
   items = $actions
 }
 
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$outPath = Join-Path -Path $PSScriptRoot -ChildPath ("compat-report-{0}.json" -f $timestamp)
-$report | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $outPath -Encoding UTF8
+if ($compatLogsEnabled) {
+  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $outPath = Join-Path -Path $PSScriptRoot -ChildPath ("compat-report-{0}.json" -f $timestamp)
+  $report | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $outPath -Encoding UTF8
 
-Write-Host ""
-Write-Host ("Report: {0}" -f $outPath)
-Write-Host ("Items: {0}" -f $actions.Count)
+  Write-Host ""
+  Write-Host ("Report: {0}" -f $outPath)
+  Write-Host ("Items: {0}" -f $actions.Count)
+} else {
+  Write-Host ""
+  Write-Host ("Items: {0}" -f $actions.Count)
+}
 
 # * Compact console summary (mod ids only).
 $handled = $actions | Where-Object { $_.status -eq "handled" } | Select-Object -ExpandProperty modId -Unique

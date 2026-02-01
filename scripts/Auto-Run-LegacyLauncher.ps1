@@ -1,8 +1,103 @@
-# * Automates Legacy Launcher run attempts and triggers mod cleanup on crash dialog.
-# !
-# ! This script relies on window titles. Adjust patterns if your launcher language differs.
-# !
-# ? It looks for the crash dialog "Что-то сломалось..." and runs Check-Mod-Compatibility.ps1 -DeleteFromGameMods.
+<#
+.SYNOPSIS
+Automates Legacy Launcher runs and triggers mod cleanup on crash dialog.
+
+.DESCRIPTION
+Starts or attaches to Legacy Launcher, clicks Play, waits for crash/fabric dialogs, and runs
+Check-Mod-Compatibility.ps1 when a crash dialog is detected. Use -CheckScriptArguments to pass
+flags to the compatibility checker (for example, -NoLegacy or -GameLegacy). When -Verbose is used
+on this script, -Verbose is forwarded to the checker to enable compatibility logs.
+
+.PARAMETER LauncherExePath
+Optional path to Legacy Launcher executable. If empty, attaches to a running launcher window.
+
+.PARAMETER LauncherArguments
+Additional launcher CLI arguments.
+
+.PARAMETER UseAutoLaunch
+If set, appends --launch to enable auto-start.
+
+.PARAMETER LauncherWindowTitlePattern
+Partial title of the launcher main window.
+
+.PARAMETER PlayButtonNames
+Button names to start the game.
+
+.PARAMETER PlayClickOffsetX
+Optional click offset (pixels) relative to the top-left of the launcher window.
+
+.PARAMETER PlayClickOffsetY
+Optional click offset (pixels) relative to the top-left of the launcher window.
+
+.PARAMETER UseEnterFallback
+If true, sends ENTER when play element is not found.
+
+.PARAMETER PrintCursorOffset
+If set, prints current mouse offsets relative to the launcher window and uses them for click.
+
+.PARAMETER DeleteFromGameMods
+If set, passes -DeleteFromGameMods to compatibility checker.
+
+.PARAMETER NoLegacy
+If set, passes -NoLegacy to compatibility checker.
+
+.PARAMETER GameLegacy
+If set, passes -GameLegacy to compatibility checker.
+
+.PARAMETER CheckScriptArguments
+Additional arguments to pass to Check-Mod-Compatibility.ps1.
+
+.PARAMETER CrashCloseClickOffsetX
+Optional click offset for closing crash dialog (relative to crash window).
+
+.PARAMETER CrashCloseClickOffsetY
+Optional click offset for closing crash dialog (relative to crash window).
+
+.PARAMETER CrashWindowTitlePatterns
+Crash dialog title fragments.
+
+.PARAMETER FabricWindowTitlePatterns
+Fabric error dialog title fragments.
+
+.PARAMETER CheckScriptPath
+Path to compatibility script.
+
+.PARAMETER LogPath
+Optional log path to pass into Check-Mod-Compatibility.ps1.
+
+.PARAMETER MaxAttempts
+Deprecated: attempts are unlimited. Kept for compatibility.
+
+.PARAMETER LauncherWindowTimeoutSeconds
+Wait time to find launcher window after start.
+
+.PARAMETER OutcomeTimeoutSeconds
+Time window to detect outcomes after clicking Play.
+
+.PARAMETER PollIntervalSeconds
+Polling interval.
+
+.PARAMETER SuccessGraceSeconds
+Seconds a Minecraft process must live to consider launch successful.
+
+.PARAMETER CrashCloseDelaySeconds
+Delay before closing crash dialog automatically.
+
+.PARAMETER DryRun
+If set, does not click or run cleanup; prints what would happen.
+
+.PARAMETER Help
+Show detailed help for this script and exit.
+
+.EXAMPLE
+.\Auto-Run-LegacyLauncher.ps1
+
+.EXAMPLE
+.\Auto-Run-LegacyLauncher.ps1 -LauncherExePath "C:\Path\LegacyLauncher.exe" -UseAutoLaunch
+
+.EXAMPLE
+.\Auto-Run-LegacyLauncher.ps1 -NoLegacy -CheckScriptArguments @("-Verbose")
+#>
 
 [CmdletBinding()]
 param(
@@ -47,6 +142,14 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$DeleteFromGameMods,
 
+  # * If set, passes -NoLegacy to compatibility checker.
+  [Parameter(Mandatory = $false)]
+  [switch]$NoLegacy,
+
+  # * If set, passes -GameLegacy to compatibility checker.
+  [Parameter(Mandatory = $false)]
+  [switch]$GameLegacy,
+
   # * Optional click offsets for closing crash dialog (relative to crash window).
   [Parameter(Mandatory = $false)]
   [int]$CrashCloseClickOffsetX = -1,
@@ -65,6 +168,10 @@ param(
   # * Path to compatibility script.
   [Parameter(Mandatory = $false)]
   [string]$CheckScriptPath = "",
+
+  # * Additional arguments to pass to Check-Mod-Compatibility.ps1.
+  [Parameter(Mandatory = $false)]
+  [string[]]$CheckScriptArguments = @(),
 
   # * Optional log path to pass into Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
@@ -96,11 +203,20 @@ param(
 
   # * If set, does not click or run cleanup; prints what would happen.
   [Parameter(Mandatory = $false)]
-  [switch]$DryRun
+  [switch]$DryRun,
+
+  # * Show detailed help and exit.
+  [Parameter(Mandatory = $false)]
+  [switch]$Help
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($Help) {
+  Get-Help -Full -Name $PSCommandPath
+  return
+}
 
 if ([string]::IsNullOrWhiteSpace($CheckScriptPath)) {
   $CheckScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Check-Mod-Compatibility.ps1"
@@ -113,7 +229,8 @@ if (-not (Test-Path -LiteralPath $CheckScriptPath)) {
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName System.Windows.Forms
 
-Add-Type -TypeDefinition @"
+if (-not ("Win32" -as [type])) {
+  Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -169,6 +286,7 @@ public static class Win32 {
   public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 }
 "@
+}
 
 function Invoke-AltTabOnce {
   param(
@@ -645,13 +763,70 @@ while ($true) {
       if ($DeleteFromGameMods) {
         $compatArgs += @("-DeleteFromGameMods")
       }
+      if ($NoLegacy) {
+        $compatArgs += @("-NoLegacy")
+      }
+      if ($GameLegacy) {
+        $compatArgs += @("-GameLegacy")
+      }
       if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
         $compatArgs += @("-LogPath", $LogPath)
       }
+      if ($CheckScriptArguments) {
+        foreach ($arg in $CheckScriptArguments) {
+          if (-not [string]::IsNullOrWhiteSpace($arg)) {
+            $compatArgs += @($arg)
+          }
+        }
+      }
+      if ($PSBoundParameters.ContainsKey("Verbose")) {
+        $hasVerboseArg = $false
+        foreach ($arg in $compatArgs) {
+          if ($arg -ieq "-Verbose") {
+            $hasVerboseArg = $true
+            break
+          }
+        }
+        if (-not $hasVerboseArg) {
+          $compatArgs += @("-Verbose")
+        }
+      }
       & $CheckScriptPath @compatArgs
     } else {
+      $compatArgs = @()
       if ($DeleteFromGameMods) {
-        Write-Host ("DRYRUN would run: {0} -DeleteFromGameMods" -f $CheckScriptPath)
+        $compatArgs += @("-DeleteFromGameMods")
+      }
+      if ($NoLegacy) {
+        $compatArgs += @("-NoLegacy")
+      }
+      if ($GameLegacy) {
+        $compatArgs += @("-GameLegacy")
+      }
+      if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        $compatArgs += @("-LogPath", $LogPath)
+      }
+      if ($CheckScriptArguments) {
+        foreach ($arg in $CheckScriptArguments) {
+          if (-not [string]::IsNullOrWhiteSpace($arg)) {
+            $compatArgs += @($arg)
+          }
+        }
+      }
+      if ($PSBoundParameters.ContainsKey("Verbose")) {
+        $hasVerboseArg = $false
+        foreach ($arg in $compatArgs) {
+          if ($arg -ieq "-Verbose") {
+            $hasVerboseArg = $true
+            break
+          }
+        }
+        if (-not $hasVerboseArg) {
+          $compatArgs += @("-Verbose")
+        }
+      }
+      if ($compatArgs.Count -gt 0) {
+        Write-Host ("DRYRUN would run: {0} {1}" -f $CheckScriptPath, ($compatArgs -join " "))
       } else {
         Write-Host ("DRYRUN would run: {0}" -f $CheckScriptPath)
       }
