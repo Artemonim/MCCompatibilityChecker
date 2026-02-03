@@ -288,26 +288,6 @@ public static class Win32 {
 "@
 }
 
-function Invoke-AltTabOnce {
-  param(
-    [Parameter(Mandatory = $true)]
-    [bool]$IsDryRun
-  )
-
-  if ($IsDryRun) {
-    Write-Host "DRYRUN would send Alt+Tab."
-    return
-  }
-
-  try {
-    [System.Windows.Forms.SendKeys]::SendWait("%{TAB}")
-  } catch {
-    Write-Host ("Alt+Tab failed: {0}" -f $_.Exception.Message)
-  }
-}
-
-Invoke-AltTabOnce -IsDryRun ([bool]$DryRun)
-
 function Get-CursorOffsetRelativeToWindow {
   param(
     [Parameter(Mandatory = $true)]
@@ -632,34 +612,6 @@ function Invoke-WindowClose {
   [void][Win32]::SendMessage($Handle, $wmClose, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
-function Find-MinecraftProcess {
-  param(
-    [Parameter(Mandatory = $true)]
-    [datetime]$LaunchStart
-  )
-
-  $names = @("javaw", "java")
-  foreach ($name in $names) {
-    $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
-    foreach ($proc in $procs) {
-      $title = $proc.MainWindowTitle
-      if (-not [string]::IsNullOrWhiteSpace($title)) {
-        if ([regex]::IsMatch($title, "Minecraft", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
-          return $proc
-        }
-      }
-      try {
-        if ($proc.StartTime -ge $LaunchStart.AddSeconds(-5)) {
-          return $proc
-        }
-      } catch {
-        continue
-      }
-    }
-  }
-  return $null
-}
-
 function Wait-ForOutcome {
   param(
     [Parameter(Mandatory = $true)]
@@ -736,7 +688,12 @@ while ($true) {
 
   $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch ([bool]$UseAutoLaunch) -TimeoutSeconds $LauncherWindowTimeoutSeconds
   if ($null -eq $launcherWindow) {
-    Write-Host ("Launcher window not found. Retrying in {0}s." -f $PollIntervalSeconds)
+    $answer = Read-Host "Лаунчер не найден. Продолжить попытки? (y/n)"
+    if ($answer -notmatch "^(y|yes|д|да)$") {
+      Write-Host "Stopping by user choice."
+      exit 0
+    }
+    Write-Host ("Retrying in {0}s." -f $PollIntervalSeconds)
     Start-Sleep -Seconds $PollIntervalSeconds
     continue
   }
@@ -834,18 +791,15 @@ while ($true) {
 
     if ($null -ne $outcome.Window) {
       $lastCrashDialogHandleId = [long]$outcome.Window.Handle.ToInt64()
-      if ($CrashCloseClickOffsetX -lt 0 -or $CrashCloseClickOffsetY -lt 0) {
-        Write-Host "Удерживайте мышь на позиции кнопки закрытия диалога об ошибке и нажмите Enter."
-        [void](Read-Host "Нажмите Enter, когда курсор на кнопке закрытия")
-        $offsets = Get-CursorOffsetRelativeToWindow -Handle $outcome.Window.Handle
-        $CrashCloseClickOffsetX = $offsets.OffsetX
-        $CrashCloseClickOffsetY = $offsets.OffsetY
-        Write-Host ("Captured close offsets: X={0}, Y={1}" -f $CrashCloseClickOffsetX, $CrashCloseClickOffsetY)
+      if ($CrashCloseClickOffsetX -ge 0 -and $CrashCloseClickOffsetY -ge 0) {
+        Start-Sleep -Seconds $CrashCloseDelaySeconds
+        Invoke-ClickRelativeToWindow -Handle $outcome.Window.Handle -OffsetX $CrashCloseClickOffsetX -OffsetY $CrashCloseClickOffsetY -IsDryRun ([bool]$DryRun)
       }
-
-      Start-Sleep -Seconds $CrashCloseDelaySeconds
-      Invoke-ClickRelativeToWindow -Handle $outcome.Window.Handle -OffsetX $CrashCloseClickOffsetX -OffsetY $CrashCloseClickOffsetY -IsDryRun ([bool]$DryRun)
     }
+
+    # * Wait before retrying after a crash.
+    Write-Host "Waiting 5 seconds before retry..."
+    Start-Sleep -Seconds 5
     continue
   }
 
@@ -853,8 +807,8 @@ while ($true) {
   if ($outcome.FabricDetected) {
     Write-Host "Fabric Loader dialog was detected during the wait."
   }
-  $answer = Read-Host "Краш не обнаружен. Остановить скрипт? (y/n)"
-  if ($answer -match "^(y|yes|д|да)$") {
+  $answer = Read-Host "Краш не обнаружен. Продолжить попытки? (y/n)"
+  if ($answer -notmatch "^(y|yes|д|да)$") {
     Write-Host "Stopping by user choice."
     exit 0
   }
