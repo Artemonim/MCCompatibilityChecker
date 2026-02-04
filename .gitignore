@@ -2,3 +2,4 @@
 .temporary/
 .venv/
 *.log
+scripts/*.json

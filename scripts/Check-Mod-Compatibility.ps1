@@ -3,7 +3,8 @@
 Detects incompatible Minecraft mods from Fabric/TLauncher logs.
 
 .DESCRIPTION
-Reads the latest tl-logger*.txt or a specified log file, extracts mod IDs from Fabric/Mixin errors,
+Reads the latest tl-logger*.txt or a specified log file and can also scan recent game logs
+(latest.log/debug.log and the newest crash report) to extract mod IDs from Fabric/Mixin errors,
 and removes the offending jars from the game mods folder. By default, removed mods are moved into
 a legacy folder inside the storage directory. Use -GameLegacy to also keep a legacy copy inside
 the game mods folder. Use -NoLegacy to delete removed mods instead of moving them to legacy.
@@ -48,6 +49,13 @@ Retry count when reading a log that may still be writing.
 
 .PARAMETER LogReadRetryDelayMs
 Delay between log read retries.
+
+.PARAMETER LogMaxAgeMinutes
+Maximum age (minutes) for additional game logs (latest.log, debug.log, crash reports).
+Set to 0 to disable age filtering.
+
+.PARAMETER SkipGameLogs
+If set, skips scanning game logs when LogPath is empty.
 
 .PARAMETER Help
 Show detailed help for this script and exit.
@@ -119,6 +127,14 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$LogReadRetryDelayMs = 500,
 
+  # * Maximum age (minutes) for additional game logs (latest.log, crash reports).
+  [Parameter(Mandatory = $false)]
+  [int]$LogMaxAgeMinutes = 30,
+
+  # * If set, skips scanning game logs (latest.log, crash reports).
+  [Parameter(Mandatory = $false)]
+  [switch]$SkipGameLogs,
+
   # * Show detailed help and exit.
   [Parameter(Mandatory = $false)]
   [switch]$Help
@@ -151,6 +167,97 @@ function Get-LatestTLauncherLogPath {
     throw ("Could not find tl-logger*.txt in temp dir: {0}" -f $tempDir)
   }
   return $candidates[0].FullName
+}
+
+function Get-GameRootFromModsDir {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModsDir
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return $null }
+  $parent = Split-Path -Path $ModsDir -Parent
+  if ([string]::IsNullOrWhiteSpace($parent)) { return $null }
+  if (-not (Test-Path -LiteralPath $parent)) { return $null }
+  return $parent
+}
+
+function Get-AdditionalGameLogPaths {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$GameModsDir
+  )
+
+  $paths = New-Object System.Collections.Generic.List[string]
+  $gameRoot = Get-GameRootFromModsDir -ModsDir $GameModsDir
+  if (-not $gameRoot) { return $paths }
+
+  $logsDir = Join-Path -Path $gameRoot -ChildPath "logs"
+  foreach ($name in @("latest.log", "debug.log")) {
+    $candidate = Join-Path -Path $logsDir -ChildPath $name
+    if (Test-Path -LiteralPath $candidate) { $paths.Add($candidate) }
+  }
+
+  $crashDir = Join-Path -Path $gameRoot -ChildPath "crash-reports"
+  if (Test-Path -LiteralPath $crashDir) {
+    $latestCrash = Get-ChildItem -LiteralPath $crashDir -Filter "*.txt" -File -ErrorAction SilentlyContinue |
+      Sort-Object -Property LastWriteTime -Descending |
+      Select-Object -First 1
+    if ($latestCrash) { $paths.Add($latestCrash.FullName) }
+  }
+
+  return $paths
+}
+
+function Select-RecentLogPaths {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Paths,
+    [Parameter(Mandatory = $true)]
+    [int]$MaxAgeMinutes
+  )
+
+  if (-not $Paths -or $Paths.Count -eq 0) { return @() }
+  if ($MaxAgeMinutes -le 0) { return $Paths }
+
+  $cutoff = (Get-Date).AddMinutes(-$MaxAgeMinutes)
+  $recent = New-Object System.Collections.Generic.List[string]
+  foreach ($path in $Paths) {
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -ne $item -and $item.LastWriteTime -ge $cutoff) {
+      $recent.Add($path)
+    }
+  }
+  return $recent
+}
+
+function Resolve-LogPaths {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$PrimaryPath,
+    [Parameter(Mandatory = $false)]
+    [string[]]$AdditionalPaths = @()
+  )
+
+  $resolved = New-Object System.Collections.Generic.List[string]
+  $seen = @{}
+
+  if (-not [string]::IsNullOrWhiteSpace($PrimaryPath)) {
+    $resolved.Add($PrimaryPath)
+    $seen[$PrimaryPath.ToLowerInvariant()] = $true
+  }
+
+  foreach ($path in $AdditionalPaths) {
+    if ([string]::IsNullOrWhiteSpace($path)) { continue }
+    $key = $path.ToLowerInvariant()
+    if (-not $seen.ContainsKey($key)) {
+      $resolved.Add($path)
+      $seen[$key] = $true
+    }
+  }
+
+  return $resolved
 }
 
 function Read-AllLinesUtf8BestEffort {
@@ -317,6 +424,12 @@ function Get-IncompatibleModEvidenceFromLog {
   $requiresPattern1 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\s+requires\b"
   $requiresPattern2 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Could not find required mod:\s+(?<id>[a-z0-9_\-\.]+)\b"
 
+  # * Incompatible mod list patterns from Fabric loader.
+  $incompatibleDetailPattern = '(requires|required|incompatible|not compatible|depends|needs|was built for|requires version|requires minecraft|requires fabric|requires fabricloader|requires loader)'
+  $modNamedErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)\b(?<detail>.*)$'
+  $modNamedListPattern = '^\s*-\s+Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)\b(?<detail>.*)$'
+  $modBareErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\b(?<detail>.*)$'
+
   foreach ($line in $Lines) {
     $m = [regex]::Match($line, $mixinApplyPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
@@ -350,6 +463,33 @@ function Get-IncompatibleModEvidenceFromLog {
       continue
     }
 
+    $m = [regex]::Match($line, $modNamedErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $modBareErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $modNamedListPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $detail = $m.Groups["detail"].Value
+      if ($detail -match $incompatibleDetailPattern) {
+        $id = $m.Groups["id"].Value.ToLowerInvariant()
+        if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+        $evidence[$id].Add($line.Trim())
+        continue
+      }
+    }
+
     $m = [regex]::Match($line, $crashReportModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $id = $m.Groups["id"].Value.ToLowerInvariant()
@@ -370,7 +510,7 @@ function Get-IncompatibleModEvidenceFromLog {
   return $evidence
 }
 
-function Get-FabricModIdFromJar {
+function Get-FabricModIdsFromJar {
   param(
     [Parameter(Mandatory = $true)]
     [string]$JarPath
@@ -382,7 +522,7 @@ function Get-FabricModIdFromJar {
   try {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
     $entry = $zip.Entries | Where-Object { $_.FullName -eq "fabric.mod.json" } | Select-Object -First 1
-    if (-not $entry) { return $null }
+    if (-not $entry) { return @() }
     $sr = New-Object System.IO.StreamReader($entry.Open(), [System.Text.Encoding]::UTF8, $true)
     try {
       $jsonText = $sr.ReadToEnd()
@@ -390,10 +530,29 @@ function Get-FabricModIdFromJar {
       $sr.Dispose()
     }
     $obj = $jsonText | ConvertFrom-Json -ErrorAction Stop
-    if ($null -eq $obj.id -or [string]::IsNullOrWhiteSpace([string]$obj.id)) { return $null }
-    return ([string]$obj.id).ToLowerInvariant()
+    $ids = @{}
+    if ($null -ne $obj.id -and -not [string]::IsNullOrWhiteSpace([string]$obj.id)) {
+      $ids[[string]$obj.id.ToLowerInvariant()] = $true
+    }
+    if ($null -ne $obj.provides) {
+      if ($obj.provides -is [string]) {
+        $value = [string]$obj.provides
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+          $ids[$value.ToLowerInvariant()] = $true
+        }
+      } else {
+        foreach ($entryId in $obj.provides) {
+          $value = [string]$entryId
+          if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $ids[$value.ToLowerInvariant()] = $true
+          }
+        }
+      }
+    }
+    if ($ids.Count -eq 0) { return @() }
+    return @($ids.Keys)
   } catch {
-    return $null
+    return @()
   } finally {
     if ($zip) { $zip.Dispose() }
   }
@@ -413,10 +572,12 @@ function Build-ModIdToJarMap {
   $map = @{}
   $files = Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction Stop
   foreach ($f in $files) {
-    $id = Get-FabricModIdFromJar -JarPath $f.FullName
-    if (-not $id) { continue }
-    if (-not $map.ContainsKey($id)) { $map[$id] = New-Object System.Collections.Generic.List[string] }
-    $map[$id].Add($f.FullName)
+    $ids = Get-FabricModIdsFromJar -JarPath $f.FullName
+    if (-not $ids -or $ids.Count -eq 0) { continue }
+    foreach ($id in $ids) {
+      if (-not $map.ContainsKey($id)) { $map[$id] = New-Object System.Collections.Generic.List[string] }
+      $map[$id].Add($f.FullName)
+    }
   }
   return $map
 }
@@ -467,25 +628,59 @@ function Move-OrDelete {
   return ("moved: {0} -> {1}" -f $SourcePath, $destPath)
 }
 
-# * Resolve log path (supports "latest tl-logger*.txt" fallback).
-$resolvedLogPath = Get-LatestTLauncherLogPath -PreferredPath $LogPath
-$logLines = Read-LogLinesWithRetry -Path $resolvedLogPath -Retries $LogReadRetryCount -DelayMs $LogReadRetryDelayMs
-if ($logLines -is [string]) {
-  $logLines = @($logLines)
+# * Resolve log paths (supports "latest tl-logger*.txt" fallback).
+$primaryLogPath = Get-LatestTLauncherLogPath -PreferredPath $LogPath
+$additionalLogPaths = @()
+if (-not $SkipGameLogs -and [string]::IsNullOrWhiteSpace($LogPath)) {
+  $additionalLogPaths = Get-AdditionalGameLogPaths -GameModsDir $GameModsDir
+  $additionalLogPaths = Select-RecentLogPaths -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
 }
-$logLines = $logLines | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-$logLineCount = Get-LineCountSafe -Lines $logLines
+$resolvedLogPaths = Resolve-LogPaths -PrimaryPath $primaryLogPath -AdditionalPaths $additionalLogPaths
+$resolvedLogPaths = @($resolvedLogPaths)
+
+$logLinesBySource = @{}
+foreach ($logPath in $resolvedLogPaths) {
+  $lines = Read-LogLinesWithRetry -Path $logPath -Retries $LogReadRetryCount -DelayMs $LogReadRetryDelayMs
+  if ($lines -is [string]) {
+    $lines = @($lines)
+  }
+  if ($null -eq $lines) {
+    $lines = @()
+  }
+  $lines = $lines | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+  $logLinesBySource[$logPath] = $lines
+}
+
+$allLogLines = @()
+foreach ($logPath in $logLinesBySource.Keys) {
+  $allLogLines += $logLinesBySource[$logPath]
+}
+$logLineCount = Get-LineCountSafe -Lines $allLogLines
 if ($logLineCount -eq 0) {
-  Write-Host ("Log is empty or unreadable: {0}" -f $resolvedLogPath)
+  Write-Host ("Logs are empty or unreadable: {0}" -f ($resolvedLogPaths -join "; "))
   exit 2
 }
-$mcVersion = Get-MinecraftVersionFromLog -Lines $logLines
+$mcVersion = Get-MinecraftVersionFromLog -Lines $allLogLines
 
-Write-Host ("Log: {0}" -f $resolvedLogPath)
+Write-Host ("Log: {0}" -f $primaryLogPath)
+if ($resolvedLogPaths.Count -gt 1) {
+  $additionalList = @($resolvedLogPaths | Where-Object { $_ -ne $primaryLogPath })
+  if ($additionalList -and $additionalList.Count -gt 0) {
+    Write-Host ("Additional logs: {0}" -f ($additionalList -join "; "))
+  }
+}
 Write-Host ("Minecraft: {0}" -f $mcVersion)
 
-$evidenceByModId = Get-IncompatibleModEvidenceFromLog -Lines $logLines -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-$nonFabricJarNames = Get-NonFabricJarNamesFromLog -Lines $logLines
+$evidenceByModId = Get-IncompatibleModEvidenceFromLog -Lines $allLogLines -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+$nonFabricJarNames = Get-NonFabricJarNamesFromLog -Lines $allLogLines
+if ($null -eq $nonFabricJarNames) {
+  $nonFabricJarNames = @()
+} else {
+  $nonFabricJarNames = @($nonFabricJarNames)
+}
+if ($nonFabricJarNames.Count -gt 0) {
+  $nonFabricJarNames = @($nonFabricJarNames | Select-Object -Unique)
+}
 
 if ($compatLogsEnabled) {
   $legacyLogPath = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
@@ -608,7 +803,8 @@ if ($TreatNonFabricAsIncompatible -and $nonFabricJarNames -and $nonFabricJarName
 
 $report = [pscustomobject]@{
   minecraft = $mcVersion
-  log = $resolvedLogPath
+  log = $primaryLogPath
+  logs = $resolvedLogPaths
   dryRun = [bool]$DryRun
   deleteFromGameMods = [bool]$DeleteFromGameMods
   noLegacy = [bool]$NoLegacy
@@ -639,4 +835,22 @@ $handled = $actions | Where-Object { $_.status -eq "handled" } | Select-Object -
 if ($handled) {
   Write-Host ("Incompatible mods (handled): {0}" -f (($handled | Sort-Object) -join ", "))
 }
+
+$unresolved = $actions | Where-Object { $_.status -eq "unresolved_in_game_mods" } | Select-Object -ExpandProperty modId -Unique
+if ($unresolved) {
+  Write-Host ("Incompatible mods (unresolved in game mods): {0}" -f (($unresolved | Sort-Object) -join ", "))
+}
+
+$handledNonFabric = $actions | Where-Object { $_.status -eq "handled_non_fabric_by_filename" } | Select-Object -ExpandProperty jar -Unique
+if ($handledNonFabric) {
+  Write-Host ("Non-fabric mods (handled by filename): {0}" -f (($handledNonFabric | Sort-Object) -join ", "))
+}
+
+$handledActions = @($actions | Where-Object { $_.status -in @("handled", "handled_non_fabric_by_filename") })
+if ($actions.Count -gt 0 -and $handledActions.Count -eq 0) {
+  Write-Host "No removable mods found in game mods folder. Check missing dependencies or mod ids."
+  exit 3
+}
+
+exit 0
 

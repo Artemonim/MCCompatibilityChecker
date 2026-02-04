@@ -15,7 +15,11 @@ Optional path to Legacy Launcher executable. If empty, attaches to a running lau
 Additional launcher CLI arguments.
 
 .PARAMETER UseAutoLaunch
-If set, appends --launch to enable auto-start.
+If true (default), appends --launch to enable auto-start.
+Disable with -DisableAutoLaunch or -UseAutoLaunch:$false.
+
+.PARAMETER DisableAutoLaunch
+If set, disables the default auto-start (--launch) behavior.
 
 .PARAMETER LauncherWindowTitlePattern
 Partial title of the launcher main window.
@@ -32,11 +36,17 @@ Optional click offset (pixels) relative to the top-left of the launcher window.
 .PARAMETER UseEnterFallback
 If true, sends ENTER when play element is not found.
 
+.PARAMETER EnableBroadUiSearch
+If true, enables a broad UI Automation fallback search which can be slow on some launcher builds.
+Disabled by default to avoid hangs; prefer -PlayClickOffsetX/-PlayClickOffsetY or Enter fallback.
+
 .PARAMETER PrintCursorOffset
-If set, prints current mouse offsets relative to the launcher window and uses them for click.
+If set, captures current mouse offsets relative to the launcher window and prints them.
+If PlayClickOffsetX/Y are not set, uses the captured offsets for click.
 
 .PARAMETER DeleteFromGameMods
-If set, passes -DeleteFromGameMods to compatibility checker.
+If true (default), passes -DeleteFromGameMods to compatibility checker.
+Set to false to keep game-side legacy behavior (for example, -DeleteFromGameMods:$false).
 
 .PARAMETER NoLegacy
 If set, passes -NoLegacy to compatibility checker.
@@ -61,6 +71,20 @@ Fabric error dialog title fragments.
 
 .PARAMETER CheckScriptPath
 Path to compatibility script.
+
+.PARAMETER IsolateOnNoChanges
+If true (default), runs Isolate-Incompatible-Mod.ps1 when compatibility cleanup makes no changes
+(i.e., when Check-Mod-Compatibility.ps1 exits with code 3). Disable with -DisableIsolationOnNoChanges
+or -IsolateOnNoChanges:$false.
+
+.PARAMETER DisableIsolationOnNoChanges
+If set, disables the default isolation run when compatibility cleanup makes no changes.
+
+.PARAMETER IsolateScriptPath
+Path to isolation script.
+
+.PARAMETER IsolateScriptArguments
+Additional arguments to pass to Isolate-Incompatible-Mod.ps1.
 
 .PARAMETER LogPath
 Optional log path to pass into Check-Mod-Compatibility.ps1.
@@ -96,6 +120,9 @@ Show detailed help for this script and exit.
 .\Auto-Run-LegacyLauncher.ps1 -LauncherExePath "C:\Path\LegacyLauncher.exe" -UseAutoLaunch
 
 .EXAMPLE
+.\Auto-Run-LegacyLauncher.ps1 -DisableIsolationOnNoChanges -DeleteFromGameMods:$false -DisableAutoLaunch
+
+.EXAMPLE
 .\Auto-Run-LegacyLauncher.ps1 -NoLegacy -CheckScriptArguments @("-Verbose")
 #>
 
@@ -112,7 +139,11 @@ param(
   # * If set, appends --launch to enable auto-start.
   [Parameter(Mandatory = $false)]
   [Alias("Auto")]
-  [switch]$UseAutoLaunch,
+  [bool]$UseAutoLaunch = $true,
+
+  # * If set, disables the default auto-start (--launch) behavior.
+  [Parameter(Mandatory = $false)]
+  [switch]$DisableAutoLaunch,
 
   # * Partial title of the launcher main window.
   [Parameter(Mandatory = $false)]
@@ -134,13 +165,17 @@ param(
   [Parameter(Mandatory = $false)]
   [bool]$UseEnterFallback = $true,
 
+  # * Enables a broad UI Automation fallback search (can be slow).
+  [Parameter(Mandatory = $false)]
+  [bool]$EnableBroadUiSearch = $false,
+
   # * If set, prints current mouse offsets relative to the launcher window and uses them for click.
   [Parameter(Mandatory = $false)]
   [switch]$PrintCursorOffset,
 
   # * If set, passes -DeleteFromGameMods to compatibility checker.
   [Parameter(Mandatory = $false)]
-  [switch]$DeleteFromGameMods,
+  [bool]$DeleteFromGameMods = $true,
 
   # * If set, passes -NoLegacy to compatibility checker.
   [Parameter(Mandatory = $false)]
@@ -168,6 +203,22 @@ param(
   # * Path to compatibility script.
   [Parameter(Mandatory = $false)]
   [string]$CheckScriptPath = "",
+
+  # * If set, runs Isolate-Incompatible-Mod.ps1 when cleanup makes no changes.
+  [Parameter(Mandatory = $false)]
+  [bool]$IsolateOnNoChanges = $true,
+
+  # * If set, disables the default isolation run on "no changes".
+  [Parameter(Mandatory = $false)]
+  [switch]$DisableIsolationOnNoChanges,
+
+  # * Path to isolation script.
+  [Parameter(Mandatory = $false)]
+  [string]$IsolateScriptPath = "",
+
+  # * Additional arguments to pass to Isolate-Incompatible-Mod.ps1.
+  [Parameter(Mandatory = $false)]
+  [string[]]$IsolateScriptArguments = @(),
 
   # * Additional arguments to pass to Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
@@ -213,6 +264,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$effectiveAutoLaunch = ([bool]$UseAutoLaunch) -and (-not [bool]$DisableAutoLaunch)
+
 if ($Help) {
   Get-Help -Full -Name $PSCommandPath
   return
@@ -226,16 +279,26 @@ if (-not (Test-Path -LiteralPath $CheckScriptPath)) {
   throw ("Check script not found: {0}" -f $CheckScriptPath)
 }
 
+$effectiveIsolateOnNoChanges = ([bool]$IsolateOnNoChanges) -and (-not [bool]$DisableIsolationOnNoChanges)
+if ($effectiveIsolateOnNoChanges) {
+  if ([string]::IsNullOrWhiteSpace($IsolateScriptPath)) {
+    $IsolateScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Isolate-Incompatible-Mod.ps1"
+  }
+  if (-not (Test-Path -LiteralPath $IsolateScriptPath)) {
+    throw ("Isolation script not found: {0}" -f $IsolateScriptPath)
+  }
+}
+
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName System.Windows.Forms
 
-if (-not ("Win32" -as [type])) {
+if (-not ("MCCompatWin32" -as [type])) {
   Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public static class Win32 {
+public static class MCCompatWin32 {
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
   [DllImport("user32.dll")]
@@ -294,12 +357,12 @@ function Get-CursorOffsetRelativeToWindow {
     [IntPtr]$Handle
   )
 
-  $rect = New-Object Win32+RECT
-  if (-not [Win32]::GetWindowRect($Handle, [ref]$rect)) {
+  $rect = New-Object MCCompatWin32+RECT
+  if (-not [MCCompatWin32]::GetWindowRect($Handle, [ref]$rect)) {
     throw "Failed to read window rectangle."
   }
-  $point = New-Object Win32+POINT
-  if (-not [Win32]::GetCursorPos([ref]$point)) {
+  $point = New-Object MCCompatWin32+POINT
+  if (-not [MCCompatWin32]::GetCursorPos([ref]$point)) {
     throw "Failed to read cursor position."
   }
   return [pscustomobject]@{
@@ -320,8 +383,8 @@ function Invoke-ClickRelativeToWindow {
     [bool]$IsDryRun
   )
 
-  $rect = New-Object Win32+RECT
-  if (-not [Win32]::GetWindowRect($Handle, [ref]$rect)) {
+  $rect = New-Object MCCompatWin32+RECT
+  if (-not [MCCompatWin32]::GetWindowRect($Handle, [ref]$rect)) {
     throw "Failed to read window rectangle."
   }
   $targetX = $rect.Left + $OffsetX
@@ -330,28 +393,28 @@ function Invoke-ClickRelativeToWindow {
     Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY)
     return
   }
-  [void][Win32]::SetCursorPos($targetX, $targetY)
-  [Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-  [Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+  [void][MCCompatWin32]::SetCursorPos($targetX, $targetY)
+  [MCCompatWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+  [MCCompatWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 function Get-WindowList {
   $windows = New-Object System.Collections.Generic.List[object]
 
-  $callback = [Win32+EnumWindowsProc]{
+  $callback = [MCCompatWin32+EnumWindowsProc]{
     param([IntPtr]$hWnd, [IntPtr]$lParam)
 
-    if (-not [Win32]::IsWindowVisible($hWnd)) { return $true }
-    $length = [Win32]::GetWindowTextLength($hWnd)
+    if (-not [MCCompatWin32]::IsWindowVisible($hWnd)) { return $true }
+    $length = [MCCompatWin32]::GetWindowTextLength($hWnd)
     if ($length -le 0) { return $true }
 
     $builder = New-Object System.Text.StringBuilder ($length + 1)
-    [void][Win32]::GetWindowText($hWnd, $builder, $builder.Capacity)
+    [void][MCCompatWin32]::GetWindowText($hWnd, $builder, $builder.Capacity)
     $title = $builder.ToString()
     if ([string]::IsNullOrWhiteSpace($title)) { return $true }
 
     $processId = 0
-    [void][Win32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
+    [void][MCCompatWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
     $windows.Add([pscustomobject]@{
         Handle = $hWnd
         Title = $title
@@ -360,7 +423,7 @@ function Get-WindowList {
     return $true
   }
 
-  [void][Win32]::EnumWindows($callback, [IntPtr]::Zero)
+  [void][MCCompatWin32]::EnumWindows($callback, [IntPtr]::Zero)
   return $windows
 }
 
@@ -504,11 +567,33 @@ function Invoke-LauncherPlay {
     [Parameter(Mandatory = $true)]
     [int]$ClickOffsetY,
     [Parameter(Mandatory = $true)]
-    [bool]$EnableEnterFallback
+    [bool]$EnableEnterFallback,
+    [Parameter(Mandatory = $true)]
+    [bool]$AllowBroadSearch
   )
 
-  [void][Win32]::SetForegroundWindow($LauncherHandle)
+  [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
   Start-Sleep -Milliseconds 150
+
+  # * Prefer offset click to avoid UI Automation hangs.
+  if ($ClickOffsetX -ge 0 -and $ClickOffsetY -ge 0) {
+    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY)
+    $rect = New-Object MCCompatWin32+RECT
+    if (-not [MCCompatWin32]::GetWindowRect($LauncherHandle, [ref]$rect)) {
+      throw "Failed to read launcher window rectangle."
+    }
+    $targetX = $rect.Left + $ClickOffsetX
+    $targetY = $rect.Top + $ClickOffsetY
+    if (-not $DryRun) {
+      [void][MCCompatWin32]::SetCursorPos($targetX, $targetY)
+      [MCCompatWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+      [MCCompatWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    } else {
+      Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY)
+    }
+    return
+  }
+
   $root = [System.Windows.Automation.AutomationElement]::FromHandle($LauncherHandle)
   if ($null -eq $root) {
     throw "Failed to access launcher automation element."
@@ -542,54 +627,9 @@ function Invoke-LauncherPlay {
     }
   }
 
-  # * Fallback: any control with matching Name.
-  $allElements = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-  foreach ($element in $allElements) {
-    $name = $element.Current.Name
-    if ([string]::IsNullOrWhiteSpace($name)) { continue }
-    foreach ($buttonName in $ButtonNames) {
-      if (Test-TitleMatch -Title $name -Pattern $buttonName) {
-        $invokePattern = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern]
-        if ($null -ne $invokePattern) {
-          if (-not $DryRun) {
-            $invokePattern.Invoke()
-          } else {
-            Write-Host ("DRYRUN would click Play element: {0}" -f $name)
-          }
-          return
-        }
-        $legacyPattern = $element.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern) -as [System.Windows.Automation.LegacyIAccessiblePattern]
-        if ($null -ne $legacyPattern) {
-          if (-not $DryRun) {
-            $legacyPattern.DoDefaultAction()
-          } else {
-            Write-Host ("DRYRUN would activate element: {0}" -f $name)
-          }
-          return
-        }
-      }
-    }
-  }
-
-  if ($ClickOffsetX -ge 0 -and $ClickOffsetY -ge 0) {
-    $rect = New-Object Win32+RECT
-    if (-not [Win32]::GetWindowRect($LauncherHandle, [ref]$rect)) {
-      throw "Failed to read launcher window rectangle."
-    }
-    $targetX = $rect.Left + $ClickOffsetX
-    $targetY = $rect.Top + $ClickOffsetY
-    if (-not $DryRun) {
-      [void][Win32]::SetCursorPos($targetX, $targetY)
-      [Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-      [Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-    } else {
-      Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY)
-    }
-    return
-  }
-
   if ($EnableEnterFallback) {
-    [void][Win32]::SetForegroundWindow($LauncherHandle)
+    Write-Host "Play element not found via UI Automation. Using ENTER fallback."
+    [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
     Start-Sleep -Milliseconds 150
     if (-not $DryRun) {
       [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
@@ -597,6 +637,42 @@ function Invoke-LauncherPlay {
       Write-Host "DRYRUN would send ENTER to launcher window."
     }
     return
+  }
+
+  # * Optional broad fallback (can be slow on some launchers).
+  if ($AllowBroadSearch) {
+    Write-Host "Using broad UI Automation search fallback for Play element."
+    $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Button
+    )
+    $allButtons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+    foreach ($element in $allButtons) {
+      $name = $element.Current.Name
+      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+      foreach ($buttonName in $ButtonNames) {
+        if (Test-TitleMatch -Title $name -Pattern $buttonName) {
+          $invokePattern = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern]
+          if ($null -ne $invokePattern) {
+            if (-not $DryRun) {
+              $invokePattern.Invoke()
+            } else {
+              Write-Host ("DRYRUN would click Play element: {0}" -f $name)
+            }
+            return
+          }
+          $legacyPattern = $element.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern) -as [System.Windows.Automation.LegacyIAccessiblePattern]
+          if ($null -ne $legacyPattern) {
+            if (-not $DryRun) {
+              $legacyPattern.DoDefaultAction()
+            } else {
+              Write-Host ("DRYRUN would activate element: {0}" -f $name)
+            }
+            return
+          }
+        }
+      }
+    }
   }
 
   throw ("Play element not found. Set -PlayClickOffsetX/Y or enable Enter fallback. Names tried: {0}" -f ($ButtonNames -join ", "))
@@ -609,7 +685,7 @@ function Invoke-WindowClose {
   )
 
   $wmClose = 0x0010
-  [void][Win32]::SendMessage($Handle, $wmClose, [IntPtr]::Zero, [IntPtr]::Zero)
+  [void][MCCompatWin32]::SendMessage($Handle, $wmClose, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
 function Wait-ForOutcome {
@@ -655,29 +731,25 @@ Write-Host "Attempt limit: unlimited"
 $launcherWindow = $null
 $lastCrashDialogHandleId = 0
 
-if ($PrintCursorOffset) {
-  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch ([bool]$UseAutoLaunch) -TimeoutSeconds $LauncherWindowTimeoutSeconds
+# * Capture click offsets from current cursor position once, before the run, if not provided.
+if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset) {
+  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
   while ($null -eq $launcherWindow) {
     Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds)
     Start-Sleep -Seconds $PollIntervalSeconds
-    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch ([bool]$UseAutoLaunch) -TimeoutSeconds $LauncherWindowTimeoutSeconds
+    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
   }
-  $rect = New-Object Win32+RECT
-  if (-not [Win32]::GetWindowRect($launcherWindow.Handle, [ref]$rect)) {
-    throw "Failed to read launcher window rectangle."
-  }
-  $point = New-Object Win32+POINT
-  if (-not [Win32]::GetCursorPos([ref]$point)) {
-    throw "Failed to read cursor position."
-  }
-  $offsetX = $point.X - $rect.Left
-  $offsetY = $point.Y - $rect.Top
-  Write-Host ("Cursor offsets: X={0}, Y={1}" -f $offsetX, $offsetY)
+  [void][MCCompatWin32]::SetForegroundWindow($launcherWindow.Handle)
+  Start-Sleep -Milliseconds 150
 
+  $offsets = Get-CursorOffsetRelativeToWindow -Handle $launcherWindow.Handle
+  Write-Host ("Captured cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY)
   if ($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) {
-    $PlayClickOffsetX = $offsetX
-    $PlayClickOffsetY = $offsetY
-    Write-Host ("Using cursor offsets for click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY)
+    $PlayClickOffsetX = $offsets.OffsetX
+    $PlayClickOffsetY = $offsets.OffsetY
+    Write-Host ("Using captured offsets for Play click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY)
+  } else {
+    Write-Host ("Using provided Play click offsets: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY)
   }
 }
 
@@ -686,7 +758,7 @@ while ($true) {
   $attempt++
   Write-Host ("Attempt {0}" -f $attempt)
 
-  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch ([bool]$UseAutoLaunch) -TimeoutSeconds $LauncherWindowTimeoutSeconds
+  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
   if ($null -eq $launcherWindow) {
     $answer = Read-Host "Лаунчер не найден. Продолжить попытки? (y/n)"
     if ($answer -notmatch "^(y|yes|д|да)$") {
@@ -697,7 +769,7 @@ while ($true) {
     Start-Sleep -Seconds $PollIntervalSeconds
     continue
   }
-  Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle -ButtonNames $PlayButtonNames -ClickOffsetX $PlayClickOffsetX -ClickOffsetY $PlayClickOffsetY -EnableEnterFallback $UseEnterFallback
+  Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle -ButtonNames $PlayButtonNames -ClickOffsetX $PlayClickOffsetX -ClickOffsetY $PlayClickOffsetY -EnableEnterFallback $UseEnterFallback -AllowBroadSearch ([bool]$EnableBroadUiSearch)
 
   $launchStart = Get-Date
   $ignoreCrashIds = @()
@@ -736,19 +808,111 @@ while ($true) {
           }
         }
       }
-      if ($PSBoundParameters.ContainsKey("Verbose")) {
-        $hasVerboseArg = $false
-        foreach ($arg in $compatArgs) {
-          if ($arg -ieq "-Verbose") {
-            $hasVerboseArg = $true
-            break
-          }
-        }
-        if (-not $hasVerboseArg) {
-          $compatArgs += @("-Verbose")
-        }
+      $forwardVerbose = [bool]$PSBoundParameters.ContainsKey("Verbose")
+      $hasVerboseArg = $false
+      foreach ($arg in $compatArgs) {
+        if ($arg -ieq "-Verbose") { $hasVerboseArg = $true; break }
       }
-      & $CheckScriptPath @compatArgs
+      if ($hasVerboseArg) {
+        & $CheckScriptPath @compatArgs
+      } else {
+        & $CheckScriptPath @compatArgs -Verbose:$forwardVerbose
+      }
+      $compatExitCode = $LASTEXITCODE
+      if ($compatExitCode -ne 0) {
+        if ($compatExitCode -eq 3) {
+          if ($effectiveIsolateOnNoChanges) {
+            Write-Host "Compatibility cleanup made no changes. Running isolation."
+            $isolateParams = @{}
+            if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
+              $isolateParams["LauncherExePath"] = $LauncherExePath
+            }
+            if ($LauncherArguments -and $LauncherArguments.Count -gt 0) {
+              $isolateParams["LauncherArguments"] = $LauncherArguments
+            }
+            if ($effectiveAutoLaunch) {
+              $isolateParams["UseAutoLaunch"] = $true
+            }
+            if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) {
+              $isolateParams["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern
+            }
+            if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) {
+              $isolateParams["PlayButtonNames"] = $PlayButtonNames
+            }
+            if ($PlayClickOffsetX -ge 0) {
+              $isolateParams["PlayClickOffsetX"] = $PlayClickOffsetX
+            }
+            if ($PlayClickOffsetY -ge 0) {
+              $isolateParams["PlayClickOffsetY"] = $PlayClickOffsetY
+            }
+            if (-not $UseEnterFallback) {
+              $isolateParams["UseEnterFallback"] = $false
+            }
+            if ($EnableBroadUiSearch) {
+              $isolateParams["EnableBroadUiSearch"] = $true
+            }
+            if ($PrintCursorOffset) {
+              $isolateParams["PrintCursorOffset"] = $true
+            }
+            if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
+              $isolateParams["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
+            }
+            if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) {
+              $isolateParams["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns
+            }
+            if ($CrashCloseClickOffsetX -ge 0) {
+              $isolateParams["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX
+            }
+            if ($CrashCloseClickOffsetY -ge 0) {
+              $isolateParams["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY
+            }
+            if ($CrashCloseDelaySeconds -gt 0) {
+              $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
+            }
+            if ($LauncherWindowTimeoutSeconds -gt 0) {
+              $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
+            }
+            if ($OutcomeTimeoutSeconds -gt 0) {
+              $isolateParams["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds
+            }
+            if ($PollIntervalSeconds -gt 0) {
+              $isolateParams["PollIntervalSeconds"] = $PollIntervalSeconds
+            }
+            if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+              $isolateParams["LogPath"] = $LogPath
+            }
+            if ($PSBoundParameters.ContainsKey("Verbose")) {
+              $isolateParams["Verbose"] = $true
+            }
+            if ($GameLegacy) {
+              $isolateParams["KeepCulpritInGameLegacy"] = $true
+            }
+
+            $isolateExtraArgs = @()
+            if ($IsolateScriptArguments) {
+              foreach ($arg in $IsolateScriptArguments) {
+                if (-not [string]::IsNullOrWhiteSpace($arg)) {
+                  $isolateExtraArgs += @($arg)
+                }
+              }
+            }
+
+            & $IsolateScriptPath @isolateParams @isolateExtraArgs
+            $isolateExitCode = $LASTEXITCODE
+            if ($isolateExitCode -ne 0) {
+              Write-Host ("Isolation failed with exit code {0}. Stopping." -f $isolateExitCode)
+              exit $isolateExitCode
+            }
+            Write-Host "Isolation completed. Returning to main loop."
+            Start-Sleep -Seconds 2
+            continue
+          }
+          Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop."
+          exit 3
+        }
+        Write-Host ("Compatibility cleanup failed with exit code {0}. Stopping." -f $compatExitCode)
+        exit $compatExitCode
+      }
     } else {
       $compatArgs = @()
       if ($DeleteFromGameMods) {
@@ -770,22 +934,97 @@ while ($true) {
           }
         }
       }
-      if ($PSBoundParameters.ContainsKey("Verbose")) {
-        $hasVerboseArg = $false
-        foreach ($arg in $compatArgs) {
-          if ($arg -ieq "-Verbose") {
-            $hasVerboseArg = $true
-            break
-          }
-        }
-        if (-not $hasVerboseArg) {
-          $compatArgs += @("-Verbose")
-        }
-      }
       if ($compatArgs.Count -gt 0) {
         Write-Host ("DRYRUN would run: {0} {1}" -f $CheckScriptPath, ($compatArgs -join " "))
       } else {
         Write-Host ("DRYRUN would run: {0}" -f $CheckScriptPath)
+      }
+      if ($effectiveIsolateOnNoChanges) {
+        $isolateParams = @{}
+        if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
+          $isolateParams["LauncherExePath"] = $LauncherExePath
+        }
+        if ($LauncherArguments -and $LauncherArguments.Count -gt 0) {
+          $isolateParams["LauncherArguments"] = $LauncherArguments
+        }
+        if ($effectiveAutoLaunch) {
+          $isolateParams["UseAutoLaunch"] = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) {
+          $isolateParams["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern
+        }
+        if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) {
+          $isolateParams["PlayButtonNames"] = $PlayButtonNames
+        }
+        if ($PlayClickOffsetX -ge 0) {
+          $isolateParams["PlayClickOffsetX"] = $PlayClickOffsetX
+        }
+        if ($PlayClickOffsetY -ge 0) {
+          $isolateParams["PlayClickOffsetY"] = $PlayClickOffsetY
+        }
+        if (-not $UseEnterFallback) {
+          $isolateParams["UseEnterFallback"] = $false
+        }
+        if ($EnableBroadUiSearch) {
+          $isolateParams["EnableBroadUiSearch"] = $true
+        }
+        if ($PrintCursorOffset) {
+          $isolateParams["PrintCursorOffset"] = $true
+        }
+        if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
+          $isolateParams["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
+        }
+        if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) {
+          $isolateParams["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns
+        }
+        if ($CrashCloseClickOffsetX -ge 0) {
+          $isolateParams["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX
+        }
+        if ($CrashCloseClickOffsetY -ge 0) {
+          $isolateParams["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY
+        }
+        if ($CrashCloseDelaySeconds -gt 0) {
+          $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
+        }
+        if ($LauncherWindowTimeoutSeconds -gt 0) {
+          $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
+        }
+        if ($OutcomeTimeoutSeconds -gt 0) {
+          $isolateParams["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds
+        }
+        if ($PollIntervalSeconds -gt 0) {
+          $isolateParams["PollIntervalSeconds"] = $PollIntervalSeconds
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+          $isolateParams["LogPath"] = $LogPath
+        }
+        if ($PSBoundParameters.ContainsKey("Verbose")) {
+          $isolateParams["Verbose"] = $true
+        }
+
+        $isolateExtraArgs = @()
+        if ($IsolateScriptArguments) {
+          foreach ($arg in $IsolateScriptArguments) {
+            if (-not [string]::IsNullOrWhiteSpace($arg)) {
+              $isolateExtraArgs += @($arg)
+            }
+          }
+        }
+
+        $prettyParams = @()
+        foreach ($key in ($isolateParams.Keys | Sort-Object)) {
+          $value = $isolateParams[$key]
+          if ($value -is [System.Array]) {
+            $prettyParams += @(("-{0} [{1}]" -f $key, (($value | ForEach-Object { "'{0}'" -f $_ }) -join ", ")))
+          } else {
+            $prettyParams += @(("-{0} '{1}'" -f $key, $value))
+          }
+        }
+        if ($isolateExtraArgs.Count -gt 0) {
+          Write-Host ("DRYRUN would run (on no changes): {0} {1} {2}" -f $IsolateScriptPath, ($prettyParams -join " "), ($isolateExtraArgs -join " "))
+        } else {
+          Write-Host ("DRYRUN would run (on no changes): {0} {1}" -f $IsolateScriptPath, ($prettyParams -join " "))
+        }
       }
     }
 
@@ -794,6 +1033,22 @@ while ($true) {
       if ($CrashCloseClickOffsetX -ge 0 -and $CrashCloseClickOffsetY -ge 0) {
         Start-Sleep -Seconds $CrashCloseDelaySeconds
         Invoke-ClickRelativeToWindow -Handle $outcome.Window.Handle -OffsetX $CrashCloseClickOffsetX -OffsetY $CrashCloseClickOffsetY -IsDryRun ([bool]$DryRun)
+      }
+    }
+
+    # * Fabric can show its own incompatibility dialog alongside the generic crash dialog.
+    # * Close it to keep automation continuous and allow launcher to return.
+    $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    if ($null -ne $fabricWindow) {
+      Write-Host "Closing Fabric Loader dialog."
+      if (-not $DryRun) {
+        Invoke-WindowClose -Handle $fabricWindow.Handle
+        Start-Sleep -Milliseconds 250
+        [void][MCCompatWin32]::SetForegroundWindow($fabricWindow.Handle)
+        Start-Sleep -Milliseconds 150
+        [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
+      } else {
+        Write-Host "DRYRUN would close Fabric Loader dialog."
       }
     }
 
