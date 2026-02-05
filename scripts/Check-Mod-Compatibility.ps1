@@ -81,11 +81,11 @@ param(
 
   # * Active mods folder used by the launcher/game.
   [Parameter(Mandatory = $false)]
-  [string]$GameModsDir = "C:\Users\Artem\AppData\Roaming\.tlauncher\legacy\Minecraft\game\mods",
+  [string]$GameModsDir = "",
 
   # * Main mods storage (the "source of truth").
   [Parameter(Mandatory = $false)]
-  [string]$StorageModsDir = "D:\Установщики игр\MineCraft 1.21\Mods",
+  [string]$StorageModsDir = "",
 
   # * Subfolder name inside StorageModsDir where legacy jars will be placed.
   [Parameter(Mandatory = $false)]
@@ -149,6 +149,41 @@ if ($Help) {
 }
 
 $compatLogsEnabled = $PSBoundParameters.ContainsKey("Verbose")
+
+# * Load shared config helpers.
+$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
+if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
+  throw ("Shared config helpers not found: {0}" -f $sharedConfigPath)
+}
+. $sharedConfigPath
+
+$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
+if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
+  Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
+}
+$configIni = $projectConfig.Ini
+
+$defaultGameModsDir = Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods'
+if (-not $PSBoundParameters.ContainsKey("GameModsDir")) {
+  $cfgGameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default ""
+  if (-not [string]::IsNullOrWhiteSpace($cfgGameModsDir)) {
+    $GameModsDir = $cfgGameModsDir
+  }
+}
+if ([string]::IsNullOrWhiteSpace($GameModsDir)) {
+  $GameModsDir = $defaultGameModsDir
+}
+
+if (-not $PSBoundParameters.ContainsKey("StorageModsDir")) {
+  $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
+}
+if ([string]::IsNullOrWhiteSpace($StorageModsDir)) {
+  $StorageModsDir = $GameModsDir
+}
+
+if (-not $PSBoundParameters.ContainsKey("LogPath")) {
+  $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
+}
 
 # * Load shared log helpers.
 $sharedLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LogTools.ps1"

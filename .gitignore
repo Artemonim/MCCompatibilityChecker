@@ -3,3 +3,4 @@
 .venv/
 *.log
 scripts/*.json
+config.local.ini

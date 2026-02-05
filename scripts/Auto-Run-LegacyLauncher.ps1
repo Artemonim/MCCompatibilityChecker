@@ -305,6 +305,26 @@ if ($Help) {
   return
 }
 
+# * Load shared config helpers.
+$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
+if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
+  throw ("Shared config helpers not found: {0}" -f $sharedConfigPath)
+}
+. $sharedConfigPath
+
+$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
+if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
+  Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
+}
+$configIni = $projectConfig.Ini
+
+if (-not $PSBoundParameters.ContainsKey("LauncherExePath")) {
+  $LauncherExePath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LauncherExePath" -Default ""
+}
+if (-not $PSBoundParameters.ContainsKey("LogPath")) {
+  $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
+}
+
 # * Load shared UI helpers.
 $sharedUiPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LauncherUi.ps1"
 if (-not (Test-Path -LiteralPath $sharedUiPath)) {
