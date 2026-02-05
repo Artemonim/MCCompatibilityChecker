@@ -305,6 +305,13 @@ if ($Help) {
   return
 }
 
+# * Load shared UI helpers.
+$sharedUiPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LauncherUi.ps1"
+if (-not (Test-Path -LiteralPath $sharedUiPath)) {
+  throw ("Shared UI helpers not found: {0}" -f $sharedUiPath)
+}
+. $sharedUiPath
+
 if ([string]::IsNullOrWhiteSpace($CheckScriptPath)) {
   $CheckScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Check-Mod-Compatibility.ps1"
 }
@@ -323,445 +330,172 @@ if ($effectiveIsolateOnNoChanges) {
   }
 }
 
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName System.Windows.Forms
-
-if (-not ("MCCompatWin32" -as [type])) {
-  Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class MCCompatWin32 {
-  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-  [DllImport("user32.dll")]
-  public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-  [DllImport("user32.dll")]
-  public static extern int GetWindowTextLength(IntPtr hWnd);
-
-  [DllImport("user32.dll")]
-  public static extern bool IsWindowVisible(IntPtr hWnd);
-
-  [DllImport("user32.dll")]
-  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-  [DllImport("user32.dll")]
-  public static extern bool SetForegroundWindow(IntPtr hWnd);
-
-  [DllImport("user32.dll")]
-  public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct RECT {
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
+function New-CompatibilityArgs {
+  $compatArgs = @()
+  if ($DeleteFromGameMods) {
+    $compatArgs += @("-DeleteFromGameMods")
   }
-
-  [DllImport("user32.dll")]
-  public static extern bool GetCursorPos(out POINT pt);
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct POINT {
-    public int X;
-    public int Y;
+  if ($NoLegacy) {
+    $compatArgs += @("-NoLegacy")
   }
-
-  [DllImport("user32.dll")]
-  public static extern bool SetCursorPos(int X, int Y);
-
-  [DllImport("user32.dll")]
-  public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-
-  [DllImport("user32.dll")]
-  public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-}
-"@
+  if ($GameLegacy) {
+    $compatArgs += @("-GameLegacy")
+  }
+  if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+    $compatArgs += @("-LogPath", $LogPath)
+  }
+  if ($CheckScriptArguments) {
+    foreach ($arg in $CheckScriptArguments) {
+      if (-not [string]::IsNullOrWhiteSpace($arg)) {
+        $compatArgs += @($arg)
+      }
+    }
+  }
+  return $compatArgs
 }
 
-function Get-CursorOffsetRelativeToWindow {
+function Get-IsolationExtraArgs {
+  $isolateExtraArgs = @()
+  if ($IsolateScriptArguments) {
+    foreach ($arg in $IsolateScriptArguments) {
+      if (-not [string]::IsNullOrWhiteSpace($arg)) {
+        $isolateExtraArgs += @($arg)
+      }
+    }
+  }
+  return $isolateExtraArgs
+}
+
+function New-IsolationParams {
   param(
-    [Parameter(Mandatory = $true)]
-    [IntPtr]$Handle
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeEmitResultObject = $false,
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeFastForward = $false,
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeKeepCulpritInGameLegacy = $false
   )
 
-  $rect = New-Object MCCompatWin32+RECT
-  if (-not [MCCompatWin32]::GetWindowRect($Handle, [ref]$rect)) {
-    throw "Failed to read window rectangle."
+  $isolateParams = @{}
+  if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
+    $isolateParams["LauncherExePath"] = $LauncherExePath
   }
-  $point = New-Object MCCompatWin32+POINT
-  if (-not [MCCompatWin32]::GetCursorPos([ref]$point)) {
-    throw "Failed to read cursor position."
+  if ($LauncherArguments -and $LauncherArguments.Count -gt 0) {
+    $isolateParams["LauncherArguments"] = $LauncherArguments
   }
-  return [pscustomobject]@{
-    OffsetX = $point.X - $rect.Left
-    OffsetY = $point.Y - $rect.Top
+  if ($effectiveAutoLaunch) {
+    $isolateParams["UseAutoLaunch"] = $true
   }
+  if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) {
+    $isolateParams["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern
+  }
+  if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) {
+    $isolateParams["PlayButtonNames"] = $PlayButtonNames
+  }
+  if ($PlayClickOffsetX -ge 0) {
+    $isolateParams["PlayClickOffsetX"] = $PlayClickOffsetX
+  }
+  if ($PlayClickOffsetY -ge 0) {
+    $isolateParams["PlayClickOffsetY"] = $PlayClickOffsetY
+  }
+  if (-not $UseEnterFallback) {
+    $isolateParams["UseEnterFallback"] = $false
+  }
+  if ($EnableBroadUiSearch) {
+    $isolateParams["EnableBroadUiSearch"] = $true
+  }
+  if ($PrintCursorOffset) {
+    $isolateParams["PrintCursorOffset"] = $true
+  }
+  if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
+    $isolateParams["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
+  }
+  if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) {
+    $isolateParams["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns
+  }
+  if ($CrashCloseClickOffsetX -ge 0) {
+    $isolateParams["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX
+  }
+  if ($CrashCloseClickOffsetY -ge 0) {
+    $isolateParams["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY
+  }
+  if ($CrashCloseDelaySeconds -gt 0) {
+    $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
+  }
+  if ($UseLinearIsolation) {
+    $isolateParams["UseLinearIsolation"] = $true
+  }
+  if ($BinaryLinearThreshold -gt 0) {
+    $isolateParams["BinaryLinearThreshold"] = $BinaryLinearThreshold
+  }
+  if ($LauncherWindowTimeoutSeconds -gt 0) {
+    $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
+  }
+  if ($OutcomeTimeoutSeconds -gt 0) {
+    $isolateParams["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds
+  }
+  if ($PollIntervalSeconds -gt 0) {
+    $isolateParams["PollIntervalSeconds"] = $PollIntervalSeconds
+  }
+  if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+    $isolateParams["LogPath"] = $LogPath
+  }
+  if ($PSBoundParameters.ContainsKey("Verbose")) {
+    $isolateParams["Verbose"] = $true
+  }
+  if ($IncludeKeepCulpritInGameLegacy -and $GameLegacy) {
+    $isolateParams["KeepCulpritInGameLegacy"] = $true
+  }
+  if ($IncludeEmitResultObject) {
+    $isolateParams["EmitResultObject"] = $true
+  }
+  if ($IncludeFastForward -and $sessionIsolationFastForwardJarNames -and $sessionIsolationFastForwardJarNames.Count -gt 0) {
+    Write-Host ("Fast-forward isolation enabled (previously tested mods: {0})." -f $sessionIsolationFastForwardJarNames.Count) -ForegroundColor Gray
+    $isolateParams["PreIsolateJarNames"] = $sessionIsolationFastForwardJarNames
+    if (-not [string]::IsNullOrWhiteSpace($sessionIsolationFastForwardEvidenceKey)) {
+      $isolateParams["PreIsolateBaselineEvidenceKey"] = $sessionIsolationFastForwardEvidenceKey
+    }
+  }
+  return $isolateParams
 }
 
-function Invoke-ClickRelativeToWindow {
+function Format-IsolationParamsForDisplay {
   param(
     [Parameter(Mandatory = $true)]
-    [IntPtr]$Handle,
+    [hashtable]$Params
+  )
+
+  $prettyParams = @()
+  foreach ($key in ($Params.Keys | Sort-Object)) {
+    $value = $Params[$key]
+    if ($value -is [System.Array]) {
+      $prettyParams += @(("-{0} [{1}]" -f $key, (($value | ForEach-Object { "'{0}'" -f $_ }) -join ", ")))
+    } else {
+      $prettyParams += @(("-{0} '{1}'" -f $key, $value))
+    }
+  }
+  return $prettyParams
+}
+
+function Close-FabricDialogWindow {
+  param(
     [Parameter(Mandatory = $true)]
-    [int]$OffsetX,
-    [Parameter(Mandatory = $true)]
-    [int]$OffsetY,
+    $Window,
     [Parameter(Mandatory = $true)]
     [bool]$IsDryRun
   )
 
-  $rect = New-Object MCCompatWin32+RECT
-  if (-not [MCCompatWin32]::GetWindowRect($Handle, [ref]$rect)) {
-    throw "Failed to read window rectangle."
-  }
-  $targetX = $rect.Left + $OffsetX
-  $targetY = $rect.Top + $OffsetY
+  if ($null -eq $Window) { return }
+  Write-Host "Closing Fabric Loader dialog." -ForegroundColor Gray
   if ($IsDryRun) {
-    Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY) -ForegroundColor Gray
+    Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
     return
   }
-  [void][MCCompatWin32]::SetCursorPos($targetX, $targetY)
-  [MCCompatWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-  [MCCompatWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-}
-
-function Get-WindowList {
-  $windows = New-Object System.Collections.Generic.List[object]
-
-  $callback = [MCCompatWin32+EnumWindowsProc]{
-    param([IntPtr]$hWnd, [IntPtr]$lParam)
-
-    $null = $lParam
-    if (-not [MCCompatWin32]::IsWindowVisible($hWnd)) { return $true }
-    $length = [MCCompatWin32]::GetWindowTextLength($hWnd)
-    if ($length -le 0) { return $true }
-
-    $builder = New-Object System.Text.StringBuilder ($length + 1)
-    [void][MCCompatWin32]::GetWindowText($hWnd, $builder, $builder.Capacity)
-    $title = $builder.ToString()
-    if ([string]::IsNullOrWhiteSpace($title)) { return $true }
-
-    $processId = 0
-    [void][MCCompatWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
-    $windows.Add([pscustomobject]@{
-        Handle = $hWnd
-        Title = $title
-        ProcessId = $processId
-      })
-    return $true
-  }
-
-  [void][MCCompatWin32]::EnumWindows($callback, [IntPtr]::Zero)
-  return $windows
-}
-
-function Test-TitleMatch {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Title,
-    [Parameter(Mandatory = $true)]
-    [string]$Pattern
-  )
-
-  $escaped = [regex]::Escape($Pattern)
-  return [regex]::IsMatch($Title, $escaped, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-}
-
-function Get-RecentProcessesByName {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Names,
-    [Parameter(Mandatory = $true)]
-    [datetime]$StartedAfter
-  )
-
-  $set = @{}
-  foreach ($name in $Names) {
-    if (-not [string]::IsNullOrWhiteSpace($name)) {
-      $set[$name.ToLowerInvariant()] = $true
-    }
-  }
-  if ($set.Count -eq 0) { return @() }
-
-  $recent = New-Object System.Collections.Generic.List[object]
-  $all = Get-Process -ErrorAction SilentlyContinue
-  foreach ($p in $all) {
-    if (-not $p -or [string]::IsNullOrWhiteSpace($p.Name)) { continue }
-    $key = $p.Name.ToLowerInvariant()
-    if (-not $set.ContainsKey($key)) { continue }
-    try {
-      $startTime = $p.StartTime
-    } catch {
-      continue
-    }
-    if ($startTime -ge $StartedAfter) {
-      $recent.Add($p)
-    }
-  }
-  # ! PowerShell 7.5 can throw "Argument types do not match" when expanding a generic List via @(...).
-  # ! Return a native array to avoid the enumerable binder bug.
-  # ! Use unary comma to prevent single-element array unwrapping (which would lose .Count property).
-  return ,$recent.ToArray()
-}
-
-function Select-WindowByTitlePatterns {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Patterns,
-    [Parameter(Mandatory = $false)]
-    [long[]]$ExcludeHandleIds = @()
-  )
-
-  $excludeSet = @{}
-  foreach ($id in $ExcludeHandleIds) {
-    if ($null -eq $id -or $id -eq 0) { continue }
-    $excludeSet[[long]$id] = $true
-  }
-
-  $windows = Get-WindowList
-  foreach ($window in $windows) {
-    if ($excludeSet.Count -gt 0) {
-      $handleId = [long]$window.Handle.ToInt64()
-      if ($excludeSet.ContainsKey($handleId)) { continue }
-    }
-    foreach ($pattern in $Patterns) {
-      if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
-      if (Test-TitleMatch -Title $window.Title -Pattern $pattern) {
-        return $window
-      }
-    }
-  }
-  return $null
-}
-
-function Wait-ForLauncherWindow {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$TitlePattern,
-    [Parameter(Mandatory = $true)]
-    [int]$TimeoutSeconds
-  )
-
-  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  while ((Get-Date) -lt $deadline) {
-    $window = Select-WindowByTitlePatterns -Patterns @($TitlePattern)
-    if ($null -ne $window) { return $window }
-    Start-Sleep -Seconds 1
-  }
-  return $null
-}
-
-function Start-LauncherIfNeeded {
-  [CmdletBinding(SupportsShouldProcess = $true)]
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$TitlePattern,
-    [Parameter(Mandatory = $false)]
-    [string]$ExePath,
-    [Parameter(Mandatory = $false)]
-    [string[]]$ExeArguments,
-    [Parameter(Mandatory = $false)]
-    [bool]$AppendAutoLaunch,
-    [Parameter(Mandatory = $true)]
-    [int]$TimeoutSeconds
-  )
-
-  $existing = Select-WindowByTitlePatterns -Patterns @($TitlePattern)
-  if ($null -ne $existing) { return $existing }
-
-  if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    Write-Host "Launcher window not found. Waiting for it to appear..." -ForegroundColor Cyan
-    $waited = Wait-ForLauncherWindow -TitlePattern $TitlePattern -TimeoutSeconds $TimeoutSeconds
-    if ($null -eq $waited) {
-      Write-Host ("Launcher window not found after {0}s." -f $TimeoutSeconds) -ForegroundColor Yellow
-    }
-    return $waited
-  }
-  if (-not (Test-Path -LiteralPath $ExePath)) {
-    throw ("LauncherExePath not found: {0}" -f $ExePath)
-  }
-
-  $startArgs = New-Object System.Collections.Generic.List[string]
-  foreach ($arg in $ExeArguments) {
-    if (-not [string]::IsNullOrWhiteSpace($arg)) {
-      $startArgs.Add($arg)
-    }
-  }
-  if ($AppendAutoLaunch) {
-    $hasLaunch = $false
-    foreach ($arg in $startArgs) {
-      if ($arg -ieq "--launch") {
-        $hasLaunch = $true
-        break
-      }
-    }
-    if (-not $hasLaunch) {
-      $startArgs.Add("--launch")
-    }
-  }
-
-  Write-Host ("Starting launcher: {0}" -f $ExePath) -ForegroundColor Cyan
-  if (-not $DryRun) {
-    if (-not $PSCmdlet.ShouldProcess($ExePath, "Start-Process")) {
-      return $null
-    }
-    if ($startArgs.Count -gt 0) {
-      Start-Process -FilePath $ExePath -ArgumentList $startArgs | Out-Null
-    } else {
-      Start-Process -FilePath $ExePath | Out-Null
-    }
-  } else {
-    if ($startArgs.Count -gt 0) {
-      Write-Host ("DRYRUN would start: {0} {1}" -f $ExePath, ($startArgs -join " ")) -ForegroundColor Gray
-    } else {
-      Write-Host ("DRYRUN would start: {0}" -f $ExePath) -ForegroundColor Gray
-    }
-  }
-
-  $started = Wait-ForLauncherWindow -TitlePattern $TitlePattern -TimeoutSeconds $TimeoutSeconds
-  if ($null -eq $started) {
-    throw ("Launcher window not found after {0}s." -f $TimeoutSeconds)
-  }
-  return $started
-}
-
-function Invoke-LauncherPlay {
-  param(
-    [Parameter(Mandatory = $true)]
-    [IntPtr]$LauncherHandle,
-    [Parameter(Mandatory = $true)]
-    [string[]]$ButtonNames,
-    [Parameter(Mandatory = $true)]
-    [int]$ClickOffsetX,
-    [Parameter(Mandatory = $true)]
-    [int]$ClickOffsetY,
-    [Parameter(Mandatory = $true)]
-    [bool]$EnableEnterFallback,
-    [Parameter(Mandatory = $true)]
-    [bool]$AllowBroadSearch
-  )
-
-  [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
+  Invoke-WindowClose -Handle $Window.Handle
+  Start-Sleep -Milliseconds 250
+  [void][MCCompatWin32]::SetForegroundWindow($Window.Handle)
   Start-Sleep -Milliseconds 150
-
-  # * Prefer offset click to avoid UI Automation hangs.
-  if ($ClickOffsetX -ge 0 -and $ClickOffsetY -ge 0) {
-    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY) -ForegroundColor Cyan
-    $rect = New-Object MCCompatWin32+RECT
-    if (-not [MCCompatWin32]::GetWindowRect($LauncherHandle, [ref]$rect)) {
-      throw "Failed to read launcher window rectangle."
-    }
-    $targetX = $rect.Left + $ClickOffsetX
-    $targetY = $rect.Top + $ClickOffsetY
-    if (-not $DryRun) {
-      [void][MCCompatWin32]::SetCursorPos($targetX, $targetY)
-      [MCCompatWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-      [MCCompatWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-    } else {
-      Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY) -ForegroundColor Gray
-    }
-    return
-  }
-
-  $root = [System.Windows.Automation.AutomationElement]::FromHandle($LauncherHandle)
-  if ($null -eq $root) {
-    throw "Failed to access launcher automation element."
-  }
-
-  # * Strict search: Button control type + exact Name.
-  foreach ($buttonName in $ButtonNames) {
-    if ([string]::IsNullOrWhiteSpace($buttonName)) { continue }
-    $condition = New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Button
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        $buttonName
-      ))
-    )
-
-    $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-    if ($null -ne $button) {
-      $invokePattern = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern]
-      if ($null -ne $invokePattern) {
-        if (-not $DryRun) {
-          $invokePattern.Invoke()
-        } else {
-          Write-Host ("DRYRUN would click Play button: {0}" -f $buttonName) -ForegroundColor Gray
-        }
-        return
-      }
-    }
-  }
-
-  if ($EnableEnterFallback) {
-    Write-Host "Play element not found via UI Automation. Using ENTER fallback." -ForegroundColor Cyan
-    [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
-    Start-Sleep -Milliseconds 150
-    if (-not $DryRun) {
-      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-    } else {
-      Write-Host "DRYRUN would send ENTER to launcher window." -ForegroundColor Gray
-    }
-    return
-  }
-
-  # * Optional broad fallback (can be slow on some launchers).
-  if ($AllowBroadSearch) {
-    Write-Host "Using broad UI Automation search fallback for Play element." -ForegroundColor Cyan
-    $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Button
-    )
-    $allButtons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
-    foreach ($element in $allButtons) {
-      $name = $element.Current.Name
-      if ([string]::IsNullOrWhiteSpace($name)) { continue }
-      foreach ($buttonName in $ButtonNames) {
-        if (Test-TitleMatch -Title $name -Pattern $buttonName) {
-          $invokePattern = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern]
-          if ($null -ne $invokePattern) {
-            if (-not $DryRun) {
-              $invokePattern.Invoke()
-            } else {
-              Write-Host ("DRYRUN would click Play element: {0}" -f $name) -ForegroundColor Gray
-            }
-            return
-          }
-          $legacyPattern = $element.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern) -as [System.Windows.Automation.LegacyIAccessiblePattern]
-          if ($null -ne $legacyPattern) {
-            if (-not $DryRun) {
-              $legacyPattern.DoDefaultAction()
-            } else {
-              Write-Host ("DRYRUN would activate element: {0}" -f $name) -ForegroundColor Gray
-            }
-            return
-          }
-        }
-      }
-    }
-  }
-
-  throw ("Play element not found. Set -PlayClickOffsetX/Y or enable Enter fallback. Names tried: {0}" -f ($ButtonNames -join ", "))
-}
-
-function Invoke-WindowClose {
-  param(
-    [Parameter(Mandatory = $true)]
-    [IntPtr]$Handle
-  )
-
-  $wmClose = 0x0010
-  [void][MCCompatWin32]::SendMessage($Handle, $wmClose, [IntPtr]::Zero, [IntPtr]::Zero)
+  [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
 }
 
 function Wait-ForOutcome {
@@ -935,11 +669,23 @@ $lastCrashDialogHandleId = 0
 
 # * Capture click offsets from current cursor position once, before the run, if not provided.
 if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset) {
-  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
+  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
+    -ExePath $LauncherExePath `
+    -ExeArguments $LauncherArguments `
+    -AppendAutoLaunch $effectiveAutoLaunch `
+    -TimeoutSeconds $LauncherWindowTimeoutSeconds `
+    -IsDryRun ([bool]$DryRun) `
+    -ShowWaitMessage $true
   while ($null -eq $launcherWindow) {
     Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds) -ForegroundColor Yellow
     Start-Sleep -Seconds $PollIntervalSeconds
-    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
+    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
+      -ExePath $LauncherExePath `
+      -ExeArguments $LauncherArguments `
+      -AppendAutoLaunch $effectiveAutoLaunch `
+      -TimeoutSeconds $LauncherWindowTimeoutSeconds `
+      -IsDryRun ([bool]$DryRun) `
+      -ShowWaitMessage $true
   }
   [void][MCCompatWin32]::SetForegroundWindow($launcherWindow.Handle)
   Start-Sleep -Milliseconds 150
@@ -964,7 +710,13 @@ while ($true) {
   $attempt++
   Write-Host ("Attempt {0}" -f $attempt) -ForegroundColor Cyan
 
-  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
+  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
+    -ExePath $LauncherExePath `
+    -ExeArguments $LauncherArguments `
+    -AppendAutoLaunch $effectiveAutoLaunch `
+    -TimeoutSeconds $LauncherWindowTimeoutSeconds `
+    -IsDryRun ([bool]$DryRun) `
+    -ShowWaitMessage $true
   if ($null -eq $launcherWindow) {
     $answer = Read-Host "Лаунчер не найден. Продолжить попытки? (y/n)"
     if ($answer -notmatch "^(y|yes|д|да)$") {
@@ -975,7 +727,13 @@ while ($true) {
     Start-Sleep -Seconds $PollIntervalSeconds
     continue
   }
-  Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle -ButtonNames $PlayButtonNames -ClickOffsetX $PlayClickOffsetX -ClickOffsetY $PlayClickOffsetY -EnableEnterFallback $UseEnterFallback -AllowBroadSearch ([bool]$EnableBroadUiSearch)
+  Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
+    -ButtonNames $PlayButtonNames `
+    -ClickOffsetX $PlayClickOffsetX `
+    -ClickOffsetY $PlayClickOffsetY `
+    -EnableEnterFallback $UseEnterFallback `
+    -AllowBroadSearch ([bool]$EnableBroadUiSearch) `
+    -IsDryRun ([bool]$DryRun)
 
   $launchStart = Get-Date
   $ignoreCrashIds = @()
@@ -995,26 +753,7 @@ while ($true) {
     Write-Host "Outcome: crash dialog detected. Running compatibility cleanup." -ForegroundColor Yellow
 
     if (-not $DryRun) {
-      $compatArgs = @()
-      if ($DeleteFromGameMods) {
-        $compatArgs += @("-DeleteFromGameMods")
-      }
-      if ($NoLegacy) {
-        $compatArgs += @("-NoLegacy")
-      }
-      if ($GameLegacy) {
-        $compatArgs += @("-GameLegacy")
-      }
-      if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
-        $compatArgs += @("-LogPath", $LogPath)
-      }
-      if ($CheckScriptArguments) {
-        foreach ($arg in $CheckScriptArguments) {
-          if (-not [string]::IsNullOrWhiteSpace($arg)) {
-            $compatArgs += @($arg)
-          }
-        }
-      }
+      $compatArgs = New-CompatibilityArgs
       $forwardVerbose = [bool]$PSBoundParameters.ContainsKey("Verbose")
       $hasVerboseArg = $false
       foreach ($arg in $compatArgs) {
@@ -1030,93 +769,8 @@ while ($true) {
         if ($compatExitCode -eq 3) {
           if ($effectiveIsolateOnNoChanges) {
             Write-Host "Compatibility cleanup made no changes. Running isolation." -ForegroundColor Cyan
-            $isolateParams = @{}
-            if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
-              $isolateParams["LauncherExePath"] = $LauncherExePath
-            }
-            if ($LauncherArguments -and $LauncherArguments.Count -gt 0) {
-              $isolateParams["LauncherArguments"] = $LauncherArguments
-            }
-            if ($effectiveAutoLaunch) {
-              $isolateParams["UseAutoLaunch"] = $true
-            }
-            if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) {
-              $isolateParams["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern
-            }
-            if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) {
-              $isolateParams["PlayButtonNames"] = $PlayButtonNames
-            }
-            if ($PlayClickOffsetX -ge 0) {
-              $isolateParams["PlayClickOffsetX"] = $PlayClickOffsetX
-            }
-            if ($PlayClickOffsetY -ge 0) {
-              $isolateParams["PlayClickOffsetY"] = $PlayClickOffsetY
-            }
-            if (-not $UseEnterFallback) {
-              $isolateParams["UseEnterFallback"] = $false
-            }
-            if ($EnableBroadUiSearch) {
-              $isolateParams["EnableBroadUiSearch"] = $true
-            }
-            if ($PrintCursorOffset) {
-              $isolateParams["PrintCursorOffset"] = $true
-            }
-            if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
-              $isolateParams["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
-            }
-            if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) {
-              $isolateParams["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns
-            }
-            if ($CrashCloseClickOffsetX -ge 0) {
-              $isolateParams["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX
-            }
-            if ($CrashCloseClickOffsetY -ge 0) {
-              $isolateParams["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY
-            }
-            if ($CrashCloseDelaySeconds -gt 0) {
-              $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
-            }
-            if ($UseLinearIsolation) {
-              $isolateParams["UseLinearIsolation"] = $true
-            }
-            if ($BinaryLinearThreshold -gt 0) {
-              $isolateParams["BinaryLinearThreshold"] = $BinaryLinearThreshold
-            }
-            if ($LauncherWindowTimeoutSeconds -gt 0) {
-              $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
-            }
-            if ($OutcomeTimeoutSeconds -gt 0) {
-              $isolateParams["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds
-            }
-            if ($PollIntervalSeconds -gt 0) {
-              $isolateParams["PollIntervalSeconds"] = $PollIntervalSeconds
-            }
-            if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
-              $isolateParams["LogPath"] = $LogPath
-            }
-            if ($PSBoundParameters.ContainsKey("Verbose")) {
-              $isolateParams["Verbose"] = $true
-            }
-            if ($GameLegacy) {
-              $isolateParams["KeepCulpritInGameLegacy"] = $true
-            }
-            $isolateParams["EmitResultObject"] = $true
-            if ($sessionIsolationFastForwardJarNames -and $sessionIsolationFastForwardJarNames.Count -gt 0) {
-              Write-Host ("Fast-forward isolation enabled (previously tested mods: {0})." -f $sessionIsolationFastForwardJarNames.Count) -ForegroundColor Gray
-              $isolateParams["PreIsolateJarNames"] = $sessionIsolationFastForwardJarNames
-              if (-not [string]::IsNullOrWhiteSpace($sessionIsolationFastForwardEvidenceKey)) {
-                $isolateParams["PreIsolateBaselineEvidenceKey"] = $sessionIsolationFastForwardEvidenceKey
-              }
-            }
-
-            $isolateExtraArgs = @()
-            if ($IsolateScriptArguments) {
-              foreach ($arg in $IsolateScriptArguments) {
-                if (-not [string]::IsNullOrWhiteSpace($arg)) {
-                  $isolateExtraArgs += @($arg)
-                }
-              }
-            }
+            $isolateParams = New-IsolationParams -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
+            $isolateExtraArgs = Get-IsolationExtraArgs
 
             $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
             $isolateExitCode = $LASTEXITCODE
@@ -1153,118 +807,16 @@ while ($true) {
         exit $compatExitCode
       }
     } else {
-      $compatArgs = @()
-      if ($DeleteFromGameMods) {
-        $compatArgs += @("-DeleteFromGameMods")
-      }
-      if ($NoLegacy) {
-        $compatArgs += @("-NoLegacy")
-      }
-      if ($GameLegacy) {
-        $compatArgs += @("-GameLegacy")
-      }
-      if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
-        $compatArgs += @("-LogPath", $LogPath)
-      }
-      if ($CheckScriptArguments) {
-        foreach ($arg in $CheckScriptArguments) {
-          if (-not [string]::IsNullOrWhiteSpace($arg)) {
-            $compatArgs += @($arg)
-          }
-        }
-      }
+      $compatArgs = New-CompatibilityArgs
       if ($compatArgs.Count -gt 0) {
         Write-Host ("DRYRUN would run: {0} {1}" -f $CheckScriptPath, ($compatArgs -join " ")) -ForegroundColor Gray
       } else {
         Write-Host ("DRYRUN would run: {0}" -f $CheckScriptPath) -ForegroundColor Gray
       }
       if ($effectiveIsolateOnNoChanges) {
-        $isolateParams = @{}
-        if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
-          $isolateParams["LauncherExePath"] = $LauncherExePath
-        }
-        if ($LauncherArguments -and $LauncherArguments.Count -gt 0) {
-          $isolateParams["LauncherArguments"] = $LauncherArguments
-        }
-        if ($effectiveAutoLaunch) {
-          $isolateParams["UseAutoLaunch"] = $true
-        }
-        if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) {
-          $isolateParams["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern
-        }
-        if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) {
-          $isolateParams["PlayButtonNames"] = $PlayButtonNames
-        }
-        if ($PlayClickOffsetX -ge 0) {
-          $isolateParams["PlayClickOffsetX"] = $PlayClickOffsetX
-        }
-        if ($PlayClickOffsetY -ge 0) {
-          $isolateParams["PlayClickOffsetY"] = $PlayClickOffsetY
-        }
-        if (-not $UseEnterFallback) {
-          $isolateParams["UseEnterFallback"] = $false
-        }
-        if ($EnableBroadUiSearch) {
-          $isolateParams["EnableBroadUiSearch"] = $true
-        }
-        if ($PrintCursorOffset) {
-          $isolateParams["PrintCursorOffset"] = $true
-        }
-        if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
-          $isolateParams["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
-        }
-        if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) {
-          $isolateParams["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns
-        }
-        if ($CrashCloseClickOffsetX -ge 0) {
-          $isolateParams["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX
-        }
-        if ($CrashCloseClickOffsetY -ge 0) {
-          $isolateParams["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY
-        }
-        if ($CrashCloseDelaySeconds -gt 0) {
-          $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
-        }
-        if ($UseLinearIsolation) {
-          $isolateParams["UseLinearIsolation"] = $true
-        }
-        if ($BinaryLinearThreshold -gt 0) {
-          $isolateParams["BinaryLinearThreshold"] = $BinaryLinearThreshold
-        }
-        if ($LauncherWindowTimeoutSeconds -gt 0) {
-          $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
-        }
-        if ($OutcomeTimeoutSeconds -gt 0) {
-          $isolateParams["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds
-        }
-        if ($PollIntervalSeconds -gt 0) {
-          $isolateParams["PollIntervalSeconds"] = $PollIntervalSeconds
-        }
-        if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
-          $isolateParams["LogPath"] = $LogPath
-        }
-        if ($PSBoundParameters.ContainsKey("Verbose")) {
-          $isolateParams["Verbose"] = $true
-        }
-
-        $isolateExtraArgs = @()
-        if ($IsolateScriptArguments) {
-          foreach ($arg in $IsolateScriptArguments) {
-            if (-not [string]::IsNullOrWhiteSpace($arg)) {
-              $isolateExtraArgs += @($arg)
-            }
-          }
-        }
-
-        $prettyParams = @()
-        foreach ($key in ($isolateParams.Keys | Sort-Object)) {
-          $value = $isolateParams[$key]
-          if ($value -is [System.Array]) {
-            $prettyParams += @(("-{0} [{1}]" -f $key, (($value | ForEach-Object { "'{0}'" -f $_ }) -join ", ")))
-          } else {
-            $prettyParams += @(("-{0} '{1}'" -f $key, $value))
-          }
-        }
+        $isolateParams = New-IsolationParams
+        $isolateExtraArgs = Get-IsolationExtraArgs
+        $prettyParams = Format-IsolationParamsForDisplay -Params $isolateParams
         if ($isolateExtraArgs.Count -gt 0) {
           Write-Host ("DRYRUN would run (on no changes): {0} {1} {2}" -f $IsolateScriptPath, ($prettyParams -join " "), ($isolateExtraArgs -join " ")) -ForegroundColor Gray
         } else {
@@ -1284,18 +836,7 @@ while ($true) {
     # * Fabric can show its own incompatibility dialog alongside the generic crash dialog.
     # * Close it to keep automation continuous and allow launcher to return.
     $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
-    if ($null -ne $fabricWindow) {
-      Write-Host "Closing Fabric Loader dialog." -ForegroundColor Gray
-      if (-not $DryRun) {
-        Invoke-WindowClose -Handle $fabricWindow.Handle
-        Start-Sleep -Milliseconds 250
-        [void][MCCompatWin32]::SetForegroundWindow($fabricWindow.Handle)
-        Start-Sleep -Milliseconds 150
-        [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
-      } else {
-        Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
-      }
-    }
+    Close-FabricDialogWindow -Window $fabricWindow -IsDryRun ([bool]$DryRun)
 
     # * Wait before retrying after a crash.
     Write-Host "Waiting 5 seconds before retry..." -ForegroundColor Cyan
@@ -1305,18 +846,7 @@ while ($true) {
 
   if ($outcome.Type -eq "FabricDialog") {
     Write-Host "Outcome: Fabric Loader dialog detected." -ForegroundColor Yellow
-    if ($null -ne $outcome.Window) {
-      Write-Host "Closing Fabric Loader dialog." -ForegroundColor Gray
-      if (-not $DryRun) {
-        Invoke-WindowClose -Handle $outcome.Window.Handle
-        Start-Sleep -Milliseconds 250
-        [void][MCCompatWin32]::SetForegroundWindow($outcome.Window.Handle)
-        Start-Sleep -Milliseconds 150
-        [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
-      } else {
-        Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
-      }
-    }
+    Close-FabricDialogWindow -Window $outcome.Window -IsDryRun ([bool]$DryRun)
   } else {
     Write-Host ("Outcome: timeout after {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
   }
@@ -1367,4 +897,3 @@ while ($true) {
     Stop-Transcript | Out-Null
   }
 }
-
