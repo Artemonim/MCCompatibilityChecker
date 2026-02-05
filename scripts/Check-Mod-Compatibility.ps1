@@ -583,12 +583,15 @@ function Build-ModIdToJarMap {
 }
 
 function New-DirectoryIfMissing {
+  [CmdletBinding(SupportsShouldProcess = $true)]
   param(
     [Parameter(Mandatory = $true)]
     [string]$DirPath
   )
   if (-not (Test-Path -LiteralPath $DirPath)) {
-    New-Item -ItemType Directory -Path $DirPath -Force | Out-Null
+    if ($PSCmdlet.ShouldProcess($DirPath, "Create directory")) {
+      New-Item -ItemType Directory -Path $DirPath -Force | Out-Null
+    }
   }
 }
 
@@ -657,19 +660,19 @@ foreach ($logPath in $logLinesBySource.Keys) {
 }
 $logLineCount = Get-LineCountSafe -Lines $allLogLines
 if ($logLineCount -eq 0) {
-  Write-Host ("Logs are empty or unreadable: {0}" -f ($resolvedLogPaths -join "; "))
+  Write-Host ("Logs are empty or unreadable: {0}" -f ($resolvedLogPaths -join "; ")) -ForegroundColor Red
   exit 2
 }
 $mcVersion = Get-MinecraftVersionFromLog -Lines $allLogLines
 
-Write-Host ("Log: {0}" -f $primaryLogPath)
+Write-Host ("Log: {0}" -f $primaryLogPath) -ForegroundColor Cyan
 if ($resolvedLogPaths.Count -gt 1) {
   $additionalList = @($resolvedLogPaths | Where-Object { $_ -ne $primaryLogPath })
   if ($additionalList -and $additionalList.Count -gt 0) {
-    Write-Host ("Additional logs: {0}" -f ($additionalList -join "; "))
+    Write-Host ("Additional logs: {0}" -f ($additionalList -join "; ")) -ForegroundColor Cyan
   }
 }
-Write-Host ("Minecraft: {0}" -f $mcVersion)
+Write-Host ("Minecraft: {0}" -f $mcVersion) -ForegroundColor Cyan
 
 $evidenceByModId = Get-IncompatibleModEvidenceFromLog -Lines $allLogLines -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
 $nonFabricJarNames = Get-NonFabricJarNamesFromLog -Lines $allLogLines
@@ -688,7 +691,7 @@ if ($compatLogsEnabled) {
 }
 
 if ($evidenceByModId.Count -eq 0 -and (-not $TreatNonFabricAsIncompatible)) {
-  Write-Host "No incompatible mods detected from current log patterns."
+  Write-Host "No incompatible mods detected from current log patterns." -ForegroundColor Green
   exit 0
 }
 
@@ -823,32 +826,32 @@ if ($compatLogsEnabled) {
   $report | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $outPath -Encoding UTF8
 
   Write-Host ""
-  Write-Host ("Report: {0}" -f $outPath)
-  Write-Host ("Items: {0}" -f $actions.Count)
+  Write-Host ("Report: {0}" -f $outPath) -ForegroundColor Gray
+  Write-Host ("Items: {0}" -f $actions.Count) -ForegroundColor Cyan
 } else {
   Write-Host ""
-  Write-Host ("Items: {0}" -f $actions.Count)
+  Write-Host ("Items: {0}" -f $actions.Count) -ForegroundColor Cyan
 }
 
 # * Compact console summary (mod ids only).
 $handled = $actions | Where-Object { $_.status -eq "handled" } | Select-Object -ExpandProperty modId -Unique
 if ($handled) {
-  Write-Host ("Incompatible mods (handled): {0}" -f (($handled | Sort-Object) -join ", "))
+  Write-Host ("Incompatible mods (handled): {0}" -f (($handled | Sort-Object) -join ", ")) -ForegroundColor Green
 }
 
 $unresolved = $actions | Where-Object { $_.status -eq "unresolved_in_game_mods" } | Select-Object -ExpandProperty modId -Unique
 if ($unresolved) {
-  Write-Host ("Incompatible mods (unresolved in game mods): {0}" -f (($unresolved | Sort-Object) -join ", "))
+  Write-Host ("Incompatible mods (unresolved in game mods): {0}" -f (($unresolved | Sort-Object) -join ", ")) -ForegroundColor Yellow
 }
 
 $handledNonFabric = $actions | Where-Object { $_.status -eq "handled_non_fabric_by_filename" } | Select-Object -ExpandProperty jar -Unique
 if ($handledNonFabric) {
-  Write-Host ("Non-fabric mods (handled by filename): {0}" -f (($handledNonFabric | Sort-Object) -join ", "))
+  Write-Host ("Non-fabric mods (handled by filename): {0}" -f (($handledNonFabric | Sort-Object) -join ", ")) -ForegroundColor Green
 }
 
 $handledActions = @($actions | Where-Object { $_.status -in @("handled", "handled_non_fabric_by_filename") })
 if ($actions.Count -gt 0 -and $handledActions.Count -eq 0) {
-  Write-Host "No removable mods found in game mods folder. Check missing dependencies or mod ids."
+  Write-Host "No removable mods found in game mods folder. Check missing dependencies or mod ids." -ForegroundColor Yellow
   exit 3
 }
 

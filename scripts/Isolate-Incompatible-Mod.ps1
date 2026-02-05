@@ -66,6 +66,24 @@ Number of error lines to include in the signature.
 .PARAMETER IncludeWarnMixinsAsIncompatible
 If set, also matches WARN mixin lines in the signature.
 
+.PARAMETER IgnoreModListForSignatureChange
+If true (default), signature change detection prefers comparing selected error evidence lines (when present)
+and ignores changes in the extracted mod ID list. This avoids false positives caused by dependency cascades
+that change Fabric's incompatible mod listing without changing the underlying error.
+
+.PARAMETER PreIsolateJarNames
+Optional list of jar file names to move into the quarantine AFTER the baseline is captured and BEFORE the iterative loop.
+This "fast-forward" reduces repeated re-testing when isolation is triggered multiple times in the same Auto-Run session.
+
+.PARAMETER PreIsolateBaselineEvidenceKey
+Optional baseline evidence key from the previous isolation activation.
+If set, PreIsolateJarNames is only applied when the current baseline evidence key matches this value.
+This prevents stale fast-forward lists from being applied after the underlying crash changes.
+
+.PARAMETER EmitResultObject
+If set, writes a single structured object to the pipeline with details about the isolation run
+(including a suggested fast-forward jar list for the next activation).
+
 .PARAMETER LauncherExePath
 Optional path to Legacy Launcher executable. If empty, attaches to a running launcher window.
 
@@ -86,6 +104,20 @@ Optional click offset (pixels) relative to the top-left of the launcher window.
 
 .PARAMETER PlayClickOffsetY
 Optional click offset (pixels) relative to the top-left of the launcher window.
+
+.PARAMETER PlayClickDelayMs
+Delay (milliseconds) after focusing the launcher window and before clicking Play.
+Helps when the launcher ignores immediate clicks due to focus/animation timing.
+
+.PARAMETER LaunchStartTimeoutSeconds
+Seconds to wait after triggering Play to detect that the game actually starts (a game process starts or the launcher window closes).
+If exceeded, Play triggering is retried to avoid false "success" timeouts when the click does nothing.
+
+.PARAMETER PlayClickMaxAttempts
+How many times to attempt triggering Play per launch attempt when no game start is detected.
+
+.PARAMETER RequireGameStartForTimeout
+If true (default), a Timeout outcome is only treated as success when a game start is detected.
 
 .PARAMETER UseEnterFallback
 If true, sends ENTER when play element is not found.
@@ -218,6 +250,11 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$IncludeWarnMixinsAsIncompatible,
 
+  # * If true, signature-change detection prefers evidence lines when present.
+  # * This avoids false positives when mod ID lists change due to dependency cascades.
+  [Parameter(Mandatory = $false)]
+  [bool]$IgnoreModListForSignatureChange = $true,
+
   # * Optional path to Legacy Launcher executable. If empty, attaches to a running launcher window.
   [Parameter(Mandatory = $false)]
   [string]$LauncherExePath = "",
@@ -248,6 +285,22 @@ param(
   # * Set both to enable coordinate-based click fallback.
   [Parameter(Mandatory = $false)]
   [int]$PlayClickOffsetY = -1,
+
+  # * Delay (ms) after focusing launcher and before clicking Play.
+  [Parameter(Mandatory = $false)]
+  [int]$PlayClickDelayMs = 1000,
+
+  # * How long to wait (s) after triggering Play to detect game start.
+  [Parameter(Mandatory = $false)]
+  [int]$LaunchStartTimeoutSeconds = 15,
+
+  # * How many times to try triggering Play when no game start is detected.
+  [Parameter(Mandatory = $false)]
+  [int]$PlayClickMaxAttempts = 2,
+
+  # * If true, only treat Timeout as success if game start is detected.
+  [Parameter(Mandatory = $false)]
+  [bool]$RequireGameStartForTimeout = $true,
 
   # * If true, sends ENTER when play element is not found.
   [Parameter(Mandatory = $false)]
@@ -300,6 +353,18 @@ param(
   # * Array of jar file names to skip.
   [Parameter(Mandatory = $false)]
   [string[]]$ExcludeJarNames = @(),
+
+  # * Optional jar file names to quarantine after baseline (fast-forward resume).
+  [Parameter(Mandatory = $false)]
+  [string[]]$PreIsolateJarNames = @(),
+
+  # * If set, apply fast-forward only when the baseline evidence key matches.
+  [Parameter(Mandatory = $false)]
+  [string]$PreIsolateBaselineEvidenceKey = "",
+
+  # * If set, emits a single structured object to the pipeline with run details.
+  [Parameter(Mandatory = $false)]
+  [switch]$EmitResultObject,
 
   # * How many times to retry moving a jar if locked.
   [Parameter(Mandatory = $false)]
@@ -397,12 +462,15 @@ public static class MCCompatWin32 {
 }
 
 function New-DirectoryIfMissing {
+  [CmdletBinding(SupportsShouldProcess = $true)]
   param(
     [Parameter(Mandatory = $true)]
     [string]$DirPath
   )
   if (-not (Test-Path -LiteralPath $DirPath)) {
-    New-Item -ItemType Directory -Path $DirPath -Force | Out-Null
+    if ($PSCmdlet.ShouldProcess($DirPath, "Create directory")) {
+      New-Item -ItemType Directory -Path $DirPath -Force | Out-Null
+    }
   }
 }
 
@@ -455,6 +523,52 @@ function Get-RecentProcessesByName {
   return ,$recent.ToArray()
 }
 
+function Test-ProcessLooksLikeMinecraftGame {
+  <#
+  .SYNOPSIS
+  Checks whether a recently started process likely belongs to Minecraft.
+
+  .DESCRIPTION
+  The launcher/game commonly runs under java/javaw, which is too generic for "game started" detection.
+  This helper uses Win32_Process.CommandLine to confirm the java/javaw process is a Minecraft client.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    $Process
+  )
+
+  if ($null -eq $Process) { return $false }
+  $name = [string]$Process.Name
+  if ([string]::IsNullOrWhiteSpace($name)) { return $false }
+  $nameLower = $name.ToLowerInvariant()
+
+  # * Non-java game processes can be treated as a positive signal.
+  if ($nameLower -ne "java" -and $nameLower -ne "javaw") {
+    return $true
+  }
+
+  $processId = 0
+  try {
+    $processId = [int]$Process.Id
+  } catch {
+    return $false
+  }
+  if ($processId -le 0) { return $false }
+
+  try {
+    $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop
+  } catch {
+    return $false
+  }
+  if ($null -eq $cim) { return $false }
+
+  $cmd = [string]$cim.CommandLine
+  if ([string]::IsNullOrWhiteSpace($cmd)) { return $false }
+
+  # * net.minecraft.* is a strong signal that this java/javaw belongs to the Minecraft client.
+  return ($cmd -match "net\.minecraft")
+}
+
 function Wait-ForGameProcessesToExit {
   param(
     [Parameter(Mandatory = $true)]
@@ -485,6 +599,7 @@ function Get-WindowList {
   $callback = [MCCompatWin32+EnumWindowsProc]{
     param([IntPtr]$hWnd, [IntPtr]$lParam)
 
+    $null = $lParam
     if (-not [MCCompatWin32]::IsWindowVisible($hWnd)) { return $true }
     $length = [MCCompatWin32]::GetWindowTextLength($hWnd)
     if ($length -le 0) { return $true }
@@ -556,6 +671,7 @@ function Wait-ForLauncherWindow {
 }
 
 function Start-LauncherIfNeeded {
+  [CmdletBinding(SupportsShouldProcess = $true)]
   param(
     [Parameter(Mandatory = $true)]
     [string]$TitlePattern,
@@ -575,7 +691,7 @@ function Start-LauncherIfNeeded {
   if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $waited = Wait-ForLauncherWindow -TitlePattern $TitlePattern -TimeoutSeconds $TimeoutSeconds
     if ($null -eq $waited) {
-      Write-Host ("Launcher window not found after {0}s." -f $TimeoutSeconds)
+      Write-Host ("Launcher window not found after {0}s." -f $TimeoutSeconds) -ForegroundColor Yellow
     }
     return $waited
   }
@@ -602,7 +718,10 @@ function Start-LauncherIfNeeded {
     }
   }
 
-  Write-Host ("Starting launcher: {0}" -f $ExePath)
+  Write-Host ("Starting launcher: {0}" -f $ExePath) -ForegroundColor Cyan
+  if (-not $PSCmdlet.ShouldProcess($ExePath, "Start-Process")) {
+    return $null
+  }
   if ($startArgs.Count -gt 0) {
     Start-Process -FilePath $ExePath -ArgumentList $startArgs | Out-Null
   } else {
@@ -670,15 +789,20 @@ function Invoke-LauncherPlay {
     [Parameter(Mandatory = $true)]
     [bool]$EnableEnterFallback,
     [Parameter(Mandatory = $true)]
-    [bool]$AllowBroadSearch
+    [bool]$AllowBroadSearch,
+    [Parameter(Mandatory = $false)]
+    [int]$PreClickDelayMs = 0
   )
 
   [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
   Start-Sleep -Milliseconds 150
+  if ($PreClickDelayMs -gt 0) {
+    Start-Sleep -Milliseconds $PreClickDelayMs
+  }
 
   # * Prefer offset click to avoid UI Automation hangs.
   if ($ClickOffsetX -ge 0 -and $ClickOffsetY -ge 0) {
-    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY)
+    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY) -ForegroundColor Cyan
     Invoke-ClickRelativeToWindow -Handle $LauncherHandle -OffsetX $ClickOffsetX -OffsetY $ClickOffsetY
     return
   }
@@ -712,7 +836,7 @@ function Invoke-LauncherPlay {
   }
 
   if ($EnableEnterFallback) {
-    Write-Host "Play element not found via UI Automation. Using ENTER fallback."
+    Write-Host "Play element not found via UI Automation. Using ENTER fallback." -ForegroundColor Cyan
     [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
     Start-Sleep -Milliseconds 150
     [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
@@ -721,7 +845,7 @@ function Invoke-LauncherPlay {
 
   # * Optional broad fallback (can be slow on some launchers).
   if ($AllowBroadSearch) {
-    Write-Host "Using broad UI Automation search fallback for Play element."
+    Write-Host "Using broad UI Automation search fallback for Play element." -ForegroundColor Cyan
     $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
       [System.Windows.Automation.ControlType]::Button
@@ -770,27 +894,153 @@ function Wait-ForOutcome {
     [int]$TimeoutSeconds,
     [Parameter(Mandatory = $true)]
     [int]$PollSeconds,
+    [Parameter(Mandatory = $true)]
+    [datetime]$LaunchStart,
+    [Parameter(Mandatory = $false)]
+    [string[]]$GameProcessNames = @(),
+    [Parameter(Mandatory = $false)]
+    [long]$LauncherHandleId = 0,
+    [Parameter(Mandatory = $false)]
+    [int]$LaunchStartTimeoutSeconds = 0,
+    [Parameter(Mandatory = $false)]
+    [bool]$RequireGameStartForTimeout = $false,
     [Parameter(Mandatory = $false)]
     [long[]]$IgnoreHandleIds = @()
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $launchStartDeadline = $null
+  if ($LaunchStartTimeoutSeconds -gt 0) {
+    $launchStartDeadline = $LaunchStart.AddSeconds($LaunchStartTimeoutSeconds)
+  }
+
+  $gameStarted = $false
+  $launcherClosed = $false
+  $logUpdated = $false
+  $observedGamePids = @{}
+  $gameObservedOnce = $false
+  $gameExited = $false
 
   while ((Get-Date) -lt $deadline) {
     $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricPatterns
     if ($null -ne $fabricWindow) {
-      return [pscustomobject]@{ Type = "FabricDialog"; Window = $fabricWindow }
+      return [pscustomobject]@{
+        Type = "FabricDialog"
+        Window = $fabricWindow
+        GameStarted = $gameStarted
+        LauncherClosed = $launcherClosed
+        LaunchObserved = $true
+      }
     }
 
     $crashWindow = Select-WindowByTitlePatterns -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
     if ($null -ne $crashWindow) {
-      return [pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow }
+      return [pscustomobject]@{
+        Type = "CrashDialog"
+        Window = $crashWindow
+        GameStarted = $gameStarted
+        LauncherClosed = $launcherClosed
+        LaunchObserved = $true
+      }
+    }
+
+    if (-not $logUpdated) {
+      # * Track whether the launcher wrote a new temp log since the click.
+      $latestTlLog = Get-LatestTLauncherLogPathOrNull -PreferredPath ""
+      if (-not [string]::IsNullOrWhiteSpace($latestTlLog)) {
+        $tlItem = Get-Item -LiteralPath $latestTlLog -ErrorAction SilentlyContinue
+        if ($null -ne $tlItem -and $tlItem.LastWriteTime -ge $LaunchStart) {
+          $logUpdated = $true
+        }
+      }
+    }
+
+    if ($GameProcessNames -and $GameProcessNames.Count -gt 0) {
+      $recent = Get-RecentProcessesByName -Names $GameProcessNames -StartedAfter $LaunchStart
+      foreach ($p in $recent) {
+        if (Test-ProcessLooksLikeMinecraftGame -Process $p) {
+          $gameStarted = $true
+          $gameObservedOnce = $true
+          try {
+            $observedGamePids[[int]$p.Id] = $true
+          } catch {
+            Write-Verbose ("Skipping invalid game process id: {0}" -f $p.Id)
+          }
+        }
+      }
+    }
+
+    if ($gameObservedOnce) {
+      $stillRunning = $false
+      foreach ($processId in @($observedGamePids.Keys)) {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $proc) {
+          $observedGamePids.Remove($processId) | Out-Null
+          $gameExited = $true
+          continue
+        }
+        $stillRunning = $true
+      }
+      if ($gameExited -and (-not $stillRunning)) {
+        return [pscustomobject]@{
+          Type = "ProcessExit"
+          Window = $null
+          GameStarted = $gameStarted
+          LauncherClosed = $launcherClosed
+          LaunchObserved = $true
+        }
+      }
+    }
+
+    if (-not $launcherClosed -and $LauncherHandleId -ne 0) {
+      if (-not (Test-WindowStillExists -HandleId $LauncherHandleId)) {
+        $launcherClosed = $true
+      }
+    }
+
+    # * Launch trigger can be inferred by either a game process start or the launcher disappearing.
+    # * Success is gated by gameStarted (see RequireGameStartForTimeout below).
+    $launchTriggered = $gameStarted -or $launcherClosed -or $logUpdated
+    if (-not $launchTriggered -and $null -ne $launchStartDeadline -and (Get-Date) -ge $launchStartDeadline) {
+      return [pscustomobject]@{
+        Type = "NoLaunch"
+        Window = $null
+        GameStarted = $gameStarted
+        LauncherClosed = $launcherClosed
+        LaunchObserved = $launchTriggered
+      }
     }
 
     Start-Sleep -Seconds $PollSeconds
   }
 
-  return [pscustomobject]@{ Type = "Timeout"; Window = $null }
+  $launchTriggered = $gameStarted -or $launcherClosed -or $logUpdated
+  if ($RequireGameStartForTimeout -and (-not $gameStarted)) {
+    return [pscustomobject]@{
+      Type = "NoLaunch"
+      Window = $null
+      GameStarted = $gameStarted
+      LauncherClosed = $launcherClosed
+      LaunchObserved = $launchTriggered
+    }
+  }
+  if ($RequireGameStartForTimeout -and $gameObservedOnce -and $observedGamePids.Count -eq 0) {
+    return [pscustomobject]@{
+      Type = "ProcessExit"
+      Window = $null
+      GameStarted = $gameStarted
+      LauncherClosed = $launcherClosed
+      LaunchObserved = $launchTriggered
+    }
+  }
+
+  return [pscustomobject]@{
+    Type = "Timeout"
+    Window = $null
+    GameStarted = $gameStarted
+    LauncherClosed = $launcherClosed
+    LaunchObserved = $launchTriggered
+  }
 }
 
 function Close-OutcomeWindow {
@@ -878,7 +1128,7 @@ function Invoke-LaunchAttempt {
   # * Close any leftover dialogs that can block launcher interaction.
   $strayCrash = Select-WindowByTitlePatterns -Patterns $CrashPatterns
   if ($null -ne $strayCrash) {
-    Write-Host ("Closing stray crash dialog before launching: {0}" -f $strayCrash.Title)
+    Write-Host ("Closing stray crash dialog before launching: {0}" -f $strayCrash.Title) -ForegroundColor Gray
     Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $strayCrash }) `
       -DelaySeconds 0 `
       -OffsetX -1 `
@@ -886,7 +1136,7 @@ function Invoke-LaunchAttempt {
   }
   $strayFabric = Select-WindowByTitlePatterns -Patterns $FabricPatterns
   if ($null -ne $strayFabric) {
-    Write-Host ("Closing stray Fabric Loader dialog before launching: {0}" -f $strayFabric.Title)
+    Write-Host ("Closing stray Fabric Loader dialog before launching: {0}" -f $strayFabric.Title) -ForegroundColor Gray
     Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $strayFabric }) `
       -DelaySeconds 0 `
       -OffsetX -1 `
@@ -902,19 +1152,45 @@ function Invoke-LaunchAttempt {
     throw "Launcher window not found."
   }
 
-  Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
-    -ButtonNames $ButtonNames `
-    -ClickOffsetX $ClickOffsetX `
-    -ClickOffsetY $ClickOffsetY `
-    -EnableEnterFallback $EnableEnterFallback `
-    -AllowBroadSearch $AllowBroadSearch
+  $launcherHandleId = [long]$launcherWindow.Handle.ToInt64()
 
-  $outcome = Wait-ForOutcome -CrashPatterns $CrashPatterns `
-    -FabricPatterns $FabricPatterns `
-    -TimeoutSeconds $OutcomeTimeoutSeconds `
-    -PollSeconds $PollSeconds `
-    -IgnoreHandleIds $IgnoreHandleIds
-  return $outcome
+  $maxPlayAttempts = $PlayClickMaxAttempts
+  if ($maxPlayAttempts -lt 1) { $maxPlayAttempts = 1 }
+  if ($LaunchStartTimeoutSeconds -gt $OutcomeTimeoutSeconds) {
+    $LaunchStartTimeoutSeconds = $OutcomeTimeoutSeconds
+  }
+
+  for ($playAttempt = 1; $playAttempt -le $maxPlayAttempts; $playAttempt++) {
+    if ($playAttempt -gt 1) {
+      Write-Host ("Warning: no game launch detected. Retrying Play click ({0}/{1})..." -f $playAttempt, $maxPlayAttempts) -ForegroundColor Yellow
+    }
+
+    $launchStart = Get-Date
+    Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
+      -ButtonNames $ButtonNames `
+      -ClickOffsetX $ClickOffsetX `
+      -ClickOffsetY $ClickOffsetY `
+      -EnableEnterFallback $EnableEnterFallback `
+      -AllowBroadSearch $AllowBroadSearch `
+      -PreClickDelayMs $PlayClickDelayMs
+
+    $outcome = Wait-ForOutcome -CrashPatterns $CrashPatterns `
+      -FabricPatterns $FabricPatterns `
+      -TimeoutSeconds $OutcomeTimeoutSeconds `
+      -PollSeconds $PollSeconds `
+      -LaunchStart $launchStart `
+      -GameProcessNames $GameProcessNames `
+      -LauncherHandleId $launcherHandleId `
+      -LaunchStartTimeoutSeconds $LaunchStartTimeoutSeconds `
+      -RequireGameStartForTimeout ([bool]$RequireGameStartForTimeout) `
+      -IgnoreHandleIds $IgnoreHandleIds
+
+    if ($outcome.Type -ne "NoLaunch") {
+      return $outcome
+    }
+  }
+
+  throw ("No game launch detected after {0} Play click attempt(s). Consider increasing -PlayClickDelayMs or -LaunchStartTimeoutSeconds." -f $maxPlayAttempts)
 }
 
 function Get-LatestTLauncherLogPathOrNull {
@@ -1286,7 +1562,8 @@ function Get-FabricRequiringModIds {
 
   $ids = @{}
   # * Pattern: "Mod 'Name' (mod-id) X.Y.Z requires version ... of dependency, which is missing!"
-  $fabricRequiresPattern = "Mod\s+['""]?[^'""]+['""]?\s+\((?<id>[a-z0-9_\-\.]+)\)\s+[\d\.]+\s+requires\s+"
+  # * Accepts versions like "1.4.1+1.21.7" and list-style lines like "- Mod 'Bonded' ...".
+  $fabricRequiresPattern = "^\s*(?:-\s+)?Mod\s+['""]?[^'""]+['""]?\s+\((?<id>[a-z0-9_\-\.]+)\)\s+\S+\s+requires\s+"
 
   foreach ($line in $Lines) {
     $m = [regex]::Match($line, $fabricRequiresPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
@@ -1540,13 +1817,48 @@ function Get-ErrorSignature {
   return ($parts -join "; ")
 }
 
+function Get-ErrorEvidenceKey {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines,
+    [Parameter(Mandatory = $true)]
+    [int]$MaxLines
+  )
+
+  $evidenceLines = Select-ErrorEvidenceLines -Lines $Lines -MaxLines $MaxLines
+  if (-not $evidenceLines -or $evidenceLines.Count -eq 0) { return "" }
+
+  $norm = @()
+  foreach ($l in $evidenceLines) {
+    $v = [string]$l
+    if ([string]::IsNullOrWhiteSpace($v)) { continue }
+    $norm += @($v.Trim())
+  }
+  if (-not $norm -or $norm.Count -eq 0) { return "" }
+  return ($norm -join " | ")
+}
+
 function Test-SignatureChanged {
   param(
     [Parameter(Mandatory = $true)]
     [string]$Baseline,
     [Parameter(Mandatory = $true)]
-    [string]$Current
+    [string]$Current,
+    [Parameter(Mandatory = $false)]
+    [string]$BaselineEvidenceKey = "",
+    [Parameter(Mandatory = $false)]
+    [string]$CurrentEvidenceKey = "",
+    [Parameter(Mandatory = $false)]
+    [bool]$IgnoreModsWhenEvidencePresent = $true
   )
+
+  # * Prefer evidence-line comparison when available to avoid false positives caused by
+  # * changes in Fabric's "incompatible mods" listing (dependency cascades).
+  if ($IgnoreModsWhenEvidencePresent -and (-not [string]::IsNullOrWhiteSpace($BaselineEvidenceKey) -or -not [string]::IsNullOrWhiteSpace($CurrentEvidenceKey))) {
+    if ([string]::IsNullOrWhiteSpace($BaselineEvidenceKey)) { return $true }
+    if ([string]::IsNullOrWhiteSpace($CurrentEvidenceKey)) { return $true }
+    return -not [string]::Equals($BaselineEvidenceKey, $CurrentEvidenceKey, [System.StringComparison]::OrdinalIgnoreCase)
+  }
 
   if ([string]::IsNullOrWhiteSpace($Baseline)) {
     return (-not [string]::IsNullOrWhiteSpace($Current))
@@ -1625,7 +1937,7 @@ if (-not (Test-Path -LiteralPath $GameModsDir)) {
 
 $useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
 if ($useStorage -and (-not (Test-Path -LiteralPath $StorageModsDir))) {
-  Write-Host ("Warning: StorageModsDir not found, storage operations are skipped: {0}" -f $StorageModsDir)
+  Write-Host ("Warning: StorageModsDir not found, storage operations are skipped: {0}" -f $StorageModsDir) -ForegroundColor Yellow
   $useStorage = $false
 }
 
@@ -1647,7 +1959,7 @@ if ($MaxModsToTest -gt 0 -and $candidateMods.Count -gt $MaxModsToTest) {
 }
 
 if (-not $candidateMods -or $candidateMods.Count -eq 0) {
-  Write-Host "No jar mods found to test."
+  Write-Host "No jar mods found to test." -ForegroundColor Yellow
   exit 0
 }
 
@@ -1662,17 +1974,17 @@ if ($useStorage) {
   $storageQuarantineDir = Join-Path -Path $storageLegacyTempRoot -ChildPath ("isolate-{0}" -f $runId)
 }
 
-Write-Host ("Mods to test: {0}" -f $candidateMods.Count)
-Write-Host ("Quarantine dir: {0}" -f $gameQuarantineDir)
+Write-Host ("Mods to test: {0}" -f $candidateMods.Count) -ForegroundColor Cyan
+Write-Host ("Quarantine dir: {0}" -f $gameQuarantineDir) -ForegroundColor Gray
 if ($useStorage) {
-  Write-Host ("Storage quarantine dir: {0}" -f $storageQuarantineDir)
+  Write-Host ("Storage quarantine dir: {0}" -f $storageQuarantineDir) -ForegroundColor Gray
 }
 
 if ($DryRun) {
   foreach ($mod in $candidateMods) {
-    Write-Host ("Plan: {0} ({1})" -f $mod.Name, $mod.LastWriteTime)
+    Write-Host ("Plan: {0} ({1})" -f $mod.Name, $mod.LastWriteTime) -ForegroundColor Gray
   }
-  Write-Host "Dry run complete. No changes made."
+  Write-Host "Dry run complete. No changes made." -ForegroundColor Green
   exit 0
 }
 
@@ -1688,22 +2000,24 @@ if ($PrintCursorOffset) {
   [void][MCCompatWin32]::SetForegroundWindow($launcherWindow.Handle)
   Start-Sleep -Milliseconds 150
   $offsets = Get-CursorOffsetRelativeToWindow -Handle $launcherWindow.Handle
-  Write-Host ("Cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY)
+  Write-Host ("Cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY) -ForegroundColor Gray
 
   if ($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) {
     $PlayClickOffsetX = $offsets.OffsetX
     $PlayClickOffsetY = $offsets.OffsetY
-    Write-Host ("Using cursor offsets for click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY)
+    Write-Host ("Using cursor offsets for click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY) -ForegroundColor Cyan
   }
 }
 
 $movedItems = New-Object System.Collections.Generic.List[object]
 $movedJarNameSet = @{}
 $baselineSignature = ""
+$baselineEvidenceKey = ""
 $baselineOutcome = "Unknown"
 $mcVersionForLegacy = "unknown"
 $exitCode = 0
 $culpritJarNames = @()
+$culpritMoves = New-Object System.Collections.Generic.List[object]
 $stopReason = ""
 $hadError = $false
 $lastOutcomeHandleId = 0
@@ -1799,7 +2113,7 @@ function Write-ErrorDump {
 
 try {
   if (-not $SkipBaselineRun) {
-    Write-Host "Baseline attempt starting."
+    Write-Host "Baseline attempt starting." -ForegroundColor Cyan
     $baselineAttemptStart = Get-Date
     $phase = "baseline_invoke_launch"
     $baselineOutcomeObj = Invoke-LaunchAttempt -LauncherTitlePattern $LauncherWindowTitlePattern `
@@ -1819,10 +2133,10 @@ try {
       -IgnoreHandleIds @()
 
     $baselineOutcome = $baselineOutcomeObj.Type
-    Write-Host ("Baseline outcome: {0}" -f $baselineOutcome)
+    Write-Host ("Baseline outcome: {0}" -f $baselineOutcome) -ForegroundColor $(if ($baselineOutcome -eq "Timeout") { "Green" } else { "Yellow" })
     if ($baselineOutcome -ne "Timeout") {
       if ($null -ne $baselineOutcomeObj.Window) {
-        Write-Host ("Closing outcome window: {0} ({1})" -f $baselineOutcomeObj.Type, $baselineOutcomeObj.Window.Title)
+        Write-Host ("Closing outcome window: {0} ({1})" -f $baselineOutcomeObj.Type, $baselineOutcomeObj.Window.Title) -ForegroundColor Gray
         $lastOutcomeHandleId = [long]$baselineOutcomeObj.Window.Handle.ToInt64()
         $phase = "baseline_close_outcome_window"
         Close-OutcomeWindow -Outcome $baselineOutcomeObj `
@@ -1831,7 +2145,7 @@ try {
           -OffsetY $CrashCloseClickOffsetY
         # * Verify the window actually closed. If not, don't ignore it in future attempts.
         if (Test-WindowStillExists -HandleId $lastOutcomeHandleId) {
-          Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $baselineOutcomeObj.Type)
+          Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $baselineOutcomeObj.Type) -ForegroundColor Yellow
           $lastOutcomeHandleId = 0
         }
       }
@@ -1841,7 +2155,7 @@ try {
         -TimeoutSeconds $WaitForGameExitSeconds `
         -PollSeconds $GameExitPollSeconds
       if (-not $exited) {
-        Write-Host ("Warning: game processes still running after {0}s. File moves may fail due to locks." -f $WaitForGameExitSeconds)
+        Write-Host ("Warning: game processes still running after {0}s. File moves may fail due to locks." -f $WaitForGameExitSeconds) -ForegroundColor Yellow
       }
     } else {
       $baselineSucceeded = $true
@@ -1863,11 +2177,73 @@ try {
     $baselineSignature = Get-ErrorSignature -Lines $baselineSnapshot.Lines `
       -MaxLines $ErrorSignatureLineLimit `
       -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+    $baselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
 
     if ([string]::IsNullOrWhiteSpace($baselineSignature)) {
-      Write-Host "Baseline signature is empty. Error change detection may be limited."
+      Write-Host "Baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
     } else {
       Write-Verbose ("Baseline signature: {0}" -f $baselineSignature)
+    }
+
+    if ($PreIsolateJarNames -and $PreIsolateJarNames.Count -gt 0) {
+      $canFastForward = $true
+      if (-not [string]::IsNullOrWhiteSpace($PreIsolateBaselineEvidenceKey) -and -not [string]::IsNullOrWhiteSpace($baselineEvidenceKey)) {
+        if (-not [string]::Equals($PreIsolateBaselineEvidenceKey, $baselineEvidenceKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+          Write-Host "Fast-forward disabled: baseline evidence changed." -ForegroundColor Gray
+          Write-Verbose ("Previous baseline evidence: {0}" -f $PreIsolateBaselineEvidenceKey)
+          Write-Verbose ("Current baseline evidence: {0}" -f $baselineEvidenceKey)
+          $canFastForward = $false
+        }
+      }
+      if (-not $canFastForward) {
+        $PreIsolateJarNames = @()
+      }
+
+      $preIsolateSet = @{}
+      foreach ($name in $PreIsolateJarNames) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        $key = $name.ToLowerInvariant()
+        if (-not $preIsolateSet.ContainsKey($key)) {
+          $preIsolateSet[$key] = $name
+        }
+      }
+      $preList = @($preIsolateSet.Values)
+      if ($preList.Count -gt 0) {
+        Write-Host ("Fast-forward: quarantining {0} mod(s) from previous isolation run..." -f $preList.Count) -ForegroundColor Cyan
+        foreach ($jarName in $preList) {
+          if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+          if ($movedJarNameSet.ContainsKey($jarName)) { continue }
+
+          $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
+          if (-not (Test-Path -LiteralPath $gamePath)) {
+            Write-Verbose ("Fast-forward skip missing mod: {0}" -f $jarName)
+            continue
+          }
+
+          $phase = "fast_forward_move_to_quarantine"
+          $ffGameDest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+          if ($null -eq $ffGameDest) { continue }
+
+          $ffStorageDest = $null
+          if ($useStorage) {
+            $storagePath = Join-Path -Path $StorageModsDir -ChildPath $jarName
+            if (Test-Path -LiteralPath $storagePath) {
+              $ffStorageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            }
+          }
+
+          $movedItems.Add([pscustomobject]@{
+              JarName = $jarName
+              GameSource = $gamePath
+              GameQuarantine = $ffGameDest
+              StorageSource = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $jarName } else { $null }
+              StorageQuarantine = $ffStorageDest
+              IsFastForward = $true
+            })
+          $movedJarNameSet[$jarName] = $true
+          Write-Verbose ("Fast-forward moved: {0} -> {1}" -f $jarName, $ffGameDest)
+        }
+      }
     }
 
     $attemptIndex = 0
@@ -1884,7 +2260,7 @@ try {
       }
 
       $attemptIndex++
-      Write-Host ("Attempt {0}: removing {1}" -f $attemptIndex, $mod.Name)
+      Write-Host ("Isolation attempt {0}: removing {1}" -f $attemptIndex, $mod.Name) -ForegroundColor Cyan
 
       $phase = "move_to_quarantine"
       $gameDest = Move-ToQuarantine -SourcePath $mod.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
@@ -1934,9 +2310,9 @@ try {
         -PollSeconds $PollIntervalSeconds `
         -IgnoreHandleIds $ignoreHandles
 
-      Write-Host ("Outcome: {0}" -f $outcome.Type)
+      Write-Host ("Outcome: {0}" -f $outcome.Type) -ForegroundColor $(if ($outcome.Type -eq "Timeout") { "Green" } else { "Yellow" })
       if ($outcome.Type -ne "Timeout" -and $null -ne $outcome.Window) {
-        Write-Host ("Closing outcome window: {0} ({1})" -f $outcome.Type, $outcome.Window.Title)
+        Write-Host ("Closing outcome window: {0} ({1})" -f $outcome.Type, $outcome.Window.Title) -ForegroundColor Gray
         $lastOutcomeHandleId = [long]$outcome.Window.Handle.ToInt64()
         $phase = "attempt_close_outcome_window"
         Close-OutcomeWindow -Outcome $outcome `
@@ -1948,7 +2324,7 @@ try {
         # * Close Fabric dialog too to keep automation continuous.
         $extraFabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
         if ($null -ne $extraFabricWindow) {
-          Write-Host ("Closing extra Fabric Loader dialog: {0}" -f $extraFabricWindow.Title)
+          Write-Host ("Closing extra Fabric Loader dialog: {0}" -f $extraFabricWindow.Title) -ForegroundColor Gray
           Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $extraFabricWindow }) `
             -DelaySeconds 0 `
             -OffsetX -1 `
@@ -1957,7 +2333,7 @@ try {
 
         # * Verify the window actually closed. If not, don't ignore it in future attempts.
         if (Test-WindowStillExists -HandleId $lastOutcomeHandleId) {
-          Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $outcome.Type)
+          Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $outcome.Type) -ForegroundColor Yellow
           $lastOutcomeHandleId = 0
         }
         $phase = "attempt_wait_game_exit"
@@ -1966,7 +2342,7 @@ try {
           -TimeoutSeconds $WaitForGameExitSeconds `
           -PollSeconds $GameExitPollSeconds
         if (-not $exited) {
-          Write-Host ("Warning: game processes still running after {0}s. Next file move may fail due to locks." -f $WaitForGameExitSeconds)
+          Write-Host ("Warning: game processes still running after {0}s. Next file move may fail due to locks." -f $WaitForGameExitSeconds) -ForegroundColor Yellow
         }
       }
 
@@ -1997,22 +2373,61 @@ try {
         $reqText = if ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) { $fabricIdsFromLogs -join ", " } else { "" }
         $missText = if ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0) { $fabricMissingIdsFromLogs -join ", " } else { "" }
         if (-not [string]::IsNullOrWhiteSpace($reqText) -or -not [string]::IsNullOrWhiteSpace($missText)) {
-          Write-Host ("Fabric detected. Requiring mods: {0}; Missing deps: {1}" -f $reqText, $missText)
+          Write-Host ("Fabric detected. Requiring mods: {0}; Missing deps: {1}" -f $reqText, $missText) -ForegroundColor Yellow
         } else {
-          Write-Host "Fabric window detected."
+          Write-Host "Fabric window detected." -ForegroundColor Yellow
         }
       }
 
       if ($outcome.Type -eq "FabricDialog") {
-        # * Fabric dependency dialog: try to quick-isolate mods it blames and continue.
+        # * Fabric dependency dialog:
+        # * - Prefer isolating the requiring mod(s) (not the missing dependency).
+        # * - If the removed jar is the missing dependency, restore it to avoid falsely blaming it.
         $newModIds = $fabricIdsFromLogs
-        if ($newModIds -and $newModIds.Count -gt 0) {
-          Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($newModIds -join ", "))
-          $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $newModIds
+        $missingDepIds = $fabricMissingIdsFromLogs
+        $newModIdsArr = @($newModIds)
+        $missingDepIdsArr = @($missingDepIds)
+
+        $removedItem = $null
+        for ($i = $movedItems.Count - 1; $i -ge 0; $i--) {
+          if ($movedItems[$i].JarName -eq $mod.Name) { $removedItem = $movedItems[$i]; break }
+        }
+        $removedJarProvides = @()
+        if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+          $removedJarProvides = Get-FabricModIdsFromJar -JarPath $removedItem.GameQuarantine
+        }
+        $removedJarProvidesArr = @($removedJarProvides)
+
+        $isLikelyRemovedDep = $false
+        if ($missingDepIdsArr.Count -gt 0) {
+          if ($removedJarProvidesArr.Count -gt 0) {
+            $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingDepIdsArr
+          }
+          if (-not $isLikelyRemovedDep) {
+            $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr
+          }
+        }
+
+        if ($isLikelyRemovedDep) {
+          Write-Host ("Fabric missing dependency '{0}' appears caused by removing '{1}'. Restoring dependency and isolating requiring mod(s)." -f ($missingDepIdsArr -join ", "), $mod.Name) -ForegroundColor Cyan
+
+          if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+            [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+            $removedItem.GameQuarantine = $null
+          }
+          if ($useStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+            [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+            $removedItem.StorageQuarantine = $null
+          }
+        }
+
+        if ($newModIdsArr.Count -gt 0) {
+          Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($newModIdsArr -join ", ")) -ForegroundColor Cyan
+          $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $newModIdsArr
           if ($culpritJars -and $culpritJars.Count -gt 0) {
             foreach ($cj in $culpritJars) {
               if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
-              Write-Host ("Quick-isolating: {0}" -f $cj.Name)
+              Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
               $phase = "quick_isolate_move"
               $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
               if ($null -ne $qDest) {
@@ -2026,8 +2441,16 @@ try {
                 $movedJarNameSet[$cj.Name] = $true
               }
             }
+          } else {
+            Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
           }
-          Write-Host "Continuing isolation after Fabric quick-isolate..."
+          Write-Host "Continuing isolation after Fabric quick-isolate..." -ForegroundColor Cyan
+          continue
+        }
+
+        if ($isLikelyRemovedDep) {
+          # * We restored the dependency; proceed with next candidate.
+          Write-Host "Continuing isolation after dependency restore..." -ForegroundColor Cyan
           continue
         }
       }
@@ -2035,9 +2458,12 @@ try {
       $signature = Get-ErrorSignature -Lines $snapshot.Lines `
         -MaxLines $ErrorSignatureLineLimit `
         -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+      $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $ErrorSignatureLineLimit
 
       Write-Verbose ("Signature: {0}" -f $signature)
-      if (Test-SignatureChanged -Baseline $baselineSignature -Current $signature) {
+      if (Test-SignatureChanged -Baseline $baselineSignature -Current $signature `
+          -BaselineEvidenceKey $baselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
+          -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)) {
         # * Confirm signature change to avoid log-flush noise.
         Start-Sleep -Milliseconds 750
         $confirmSnapshot = Get-LogSnapshot -PrimaryLogPath $LogPath `
@@ -2049,7 +2475,10 @@ try {
         $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
           -MaxLines $ErrorSignatureLineLimit `
           -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-        if (-not (Test-SignatureChanged -Baseline $baselineSignature -Current $confirmSignature)) {
+        $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+        if (-not (Test-SignatureChanged -Baseline $baselineSignature -Current $confirmSignature `
+              -BaselineEvidenceKey $baselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
+              -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange))) {
           Write-Verbose "Transient signature change detected; continuing."
           continue
         }
@@ -2083,7 +2512,7 @@ try {
         }
 
         if ($isLikelyRemovedDep) {
-          Write-Host ("Detected missing dependency caused by removed library '{0}'. Restoring it and isolating requiring mod(s)." -f $mod.Name)
+          Write-Host ("Detected missing dependency caused by removed library '{0}'. Restoring it and isolating requiring mod(s)." -f $mod.Name) -ForegroundColor Cyan
 
             # * Restore removed dependency jar back to active mods (and storage if applicable).
             if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
@@ -2100,7 +2529,7 @@ try {
             if ($requiringJars -and $requiringJars.Count -gt 0) {
               $culpritJarNames = @()
               foreach ($rj in $requiringJars) {
-                Write-Host ("Isolating requiring mod: {0}" -f $rj.Name)
+                Write-Host ("Isolating requiring mod: {0}" -f $rj.Name) -ForegroundColor Cyan
                 $rDest = Move-ToQuarantine -SourcePath $rj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
                 $rStorageDest = $null
                 if ($useStorage) {
@@ -2125,20 +2554,20 @@ try {
 
             # ! If we cannot map requiring mod IDs to jar files, do NOT blame the removed library.
             # ! The safest behavior is to continue isolation with the library restored.
-            Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", "))
+            Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
             continue
         }
 
         $movedExtra = $false
         if ($newModIds -and $newModIds.Count -gt 0) {
-          Write-Host ("Fabric dependency error detected. Mods requiring missing deps: {0}" -f ($newModIds -join ", "))
+          Write-Host ("Fabric dependency error detected. Mods requiring missing deps: {0}" -f ($newModIds -join ", ")) -ForegroundColor Yellow
           $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $newModIds
           if ($culpritJars -and $culpritJars.Count -gt 0) {
             foreach ($cj in $culpritJars) {
               # * Skip if already moved.
               if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
 
-              Write-Host ("Quick-isolating: {0}" -f $cj.Name)
+              Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
               $phase = "quick_isolate_move"
               $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
               if ($null -ne $qDest) {
@@ -2157,7 +2586,7 @@ try {
         }
         if ($movedExtra) {
           # * Continue isolation with newly identified mods removed.
-          Write-Host "Continuing isolation after quick-isolate..."
+          Write-Host "Continuing isolation after quick-isolate..." -ForegroundColor Cyan
           continue
         }
         $culpritJarNames = @($mod.Name)
@@ -2174,18 +2603,18 @@ try {
   }
   $dumpPath = Write-ErrorDump -TargetDir $dumpDir -Phase $phase -ErrorRecord $_
   if ($dumpPath) {
-    Write-Host ("Error: {0}" -f $_.Exception.Message)
-    Write-Host ("Error dump: {0}" -f $dumpPath)
-    Write-Host ("Phase: {0}" -f $phase)
+    Write-Host ("Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("Error dump: {0}" -f $dumpPath) -ForegroundColor Gray
+    Write-Host ("Phase: {0}" -f $phase) -ForegroundColor Gray
   } else {
-    Write-Host ("Error: {0}" -f $_.Exception.Message)
-    Write-Host ("Phase: {0}" -f $phase)
+    Write-Host ("Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("Phase: {0}" -f $phase) -ForegroundColor Gray
   }
   $exitCode = 1
 } finally {
   if (-not $DryRun -and $movedItems.Count -gt 0) {
     if ($hadError -and $KeepMovedModsOnFailure) {
-      Write-Host "Keeping moved mods due to failure."
+      Write-Host "Keeping moved mods due to failure." -ForegroundColor Yellow
     } else {
       # * On unexpected errors, restore everything. Culprit selection is unreliable in this state.
       $excludeSet = @{}
@@ -2220,7 +2649,7 @@ try {
         }
       }
       if ($restoreCount -gt 0) {
-        Write-Host ("Restored {0} mod(s) from quarantine." -f $restoreCount)
+        Write-Host ("Restored {0} mod(s) from quarantine." -f $restoreCount) -ForegroundColor Green
       }
     }
   }
@@ -2237,7 +2666,7 @@ try {
 
     $keepGameLegacyEffective = [bool]$KeepCulpritInGameLegacy
     if (-not $useStorage -and (-not $keepGameLegacyEffective)) {
-      Write-Host "Warning: storage is disabled/unavailable; keeping culprit in game legacy to avoid data loss."
+      Write-Host "Warning: storage is disabled/unavailable; keeping culprit in game legacy to avoid data loss." -ForegroundColor Yellow
       $keepGameLegacyEffective = $true
     }
 
@@ -2253,6 +2682,8 @@ try {
 
       $movedStorageLegacy = $false
       $storageOk = $false
+      $culpritStorageLegacyPath = $null
+      $culpritGameLegacyPath = $null
 
       # * Move to storage legacy first when available (prefer the quarantined storage copy).
       foreach ($item in $movedItems) {
@@ -2261,7 +2692,8 @@ try {
         if ($useStorage -and (-not $movedStorageLegacy) -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
           $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
           Move-Item -LiteralPath $item.StorageQuarantine -Destination $destPath -Force -ErrorAction Stop
-          Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath)
+          Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
+          $culpritStorageLegacyPath = $destPath
           $movedStorageLegacy = $true
         }
       }
@@ -2271,10 +2703,11 @@ try {
         if (Test-Path -LiteralPath $storagePath) {
           $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
           Move-Item -LiteralPath $storagePath -Destination $destPath -Force -ErrorAction Stop
-          Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath)
+          Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
+          $culpritStorageLegacyPath = $destPath
           $movedStorageLegacy = $true
         } else {
-          Write-Host ("Warning: culprit jar not found in storage for legacy move: {0}" -f $culpritName)
+          Write-Host ("Warning: culprit jar not found in storage for legacy move: {0}" -f $culpritName) -ForegroundColor Yellow
         }
       }
 
@@ -2288,7 +2721,8 @@ try {
           if (-not $movedGameLegacy -and $null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
             $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $culpritName
             Move-Item -LiteralPath $item.GameQuarantine -Destination $destPath -Force -ErrorAction Stop
-            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath)
+            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
+            $culpritGameLegacyPath = $destPath
             $movedGameLegacy = $true
           }
         }
@@ -2297,17 +2731,18 @@ try {
           if (Test-Path -LiteralPath $gamePath) {
             $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $culpritName
             Move-Item -LiteralPath $gamePath -Destination $destPath -Force -ErrorAction Stop
-            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath)
+            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
+            $culpritGameLegacyPath = $destPath
             $movedGameLegacy = $true
           }
         }
         if (-not $movedGameLegacy -and (-not $storageOk)) {
-          Write-Host ("Warning: culprit jar was not moved to any legacy location: {0}" -f $culpritName)
+          Write-Host ("Warning: culprit jar was not moved to any legacy location: {0}" -f $culpritName) -ForegroundColor Yellow
         }
       } else {
         # * Do not keep game legacy copy unless requested. Remove only after storage copy is secured.
         if (-not $storageOk) {
-          Write-Host ("Warning: storage legacy move did not happen; keeping culprit in quarantine: {0}" -f $culpritName)
+          Write-Host ("Warning: storage legacy move did not happen; keeping culprit in quarantine: {0}" -f $culpritName) -ForegroundColor Yellow
           continue
         }
 
@@ -2333,23 +2768,71 @@ try {
           Write-Verbose ("Culprit not present on game side (already removed): {0}" -f $culpritName)
         }
       }
+
+      $culpritMoves.Add([pscustomobject]@{
+          JarName = $culpritName
+          GameModsDir = $GameModsDir
+          StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+          StorageLegacyPath = $culpritStorageLegacyPath
+          GameLegacyPath = $culpritGameLegacyPath
+          Minecraft = $mcVersionForLegacy
+          KeepCulpritInGameLegacy = [bool]$keepGameLegacyEffective
+        })
     }
   }
 }
 
 if ($baselineSucceeded) {
-  Write-Host "Baseline launch succeeded. No isolation needed."
+  Write-Host "Baseline launch succeeded. No isolation needed." -ForegroundColor Green
   $exitCode = 0
-  exit $exitCode
 }
 
 if ($culpritJarNames -and $culpritJarNames.Count -gt 0) {
-  Write-Host ("Culprit candidate(s): {0}" -f (($culpritJarNames | Sort-Object -Unique) -join ", "))
-  Write-Host ("Stop reason: {0}" -f $stopReason)
+  Write-Host ("Culprit candidate(s): {0}" -f (($culpritJarNames | Sort-Object -Unique) -join ", ")) -ForegroundColor Green
+  Write-Host ("Stop reason: {0}" -f $stopReason) -ForegroundColor Cyan
   $exitCode = 0
 } elseif (-not $hadError) {
-  Write-Host "No error change or successful launch detected."
+  Write-Host "No error change or successful launch detected." -ForegroundColor Yellow
   $exitCode = 2
+}
+
+if ($EmitResultObject) {
+  $culpritSet = @{}
+  foreach ($n in $culpritJarNames) {
+    if (-not [string]::IsNullOrWhiteSpace($n)) {
+      $culpritSet[$n.ToLowerInvariant()] = $true
+    }
+  }
+
+  $fastForward = New-Object System.Collections.Generic.List[string]
+  $seen = @{}
+  foreach ($item in $movedItems) {
+    if ($null -eq $item) { continue }
+    $name = [string]$item.JarName
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $key = $name.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    if ($culpritSet.ContainsKey($key)) { continue }
+    $fastForward.Add($name)
+  }
+
+  Write-Output ([pscustomobject]@{
+      Type = "IsolationResult"
+      RunId = $runId
+      GameModsDir = $GameModsDir
+      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+      Minecraft = $mcVersionForLegacy
+      BaselineOutcome = $baselineOutcome
+      BaselineSignature = $baselineSignature
+      BaselineEvidenceKey = $baselineEvidenceKey
+      StopReason = $stopReason
+      CulpritJarNames = @($culpritJarNames | Sort-Object -Unique)
+      CulpritMoves = @($culpritMoves.ToArray())
+      FastForwardJarNames = @($fastForward.ToArray())
+      PreIsolateJarNames = @($PreIsolateJarNames)
+      ExitCode = $exitCode
+    })
 }
 
 exit $exitCode

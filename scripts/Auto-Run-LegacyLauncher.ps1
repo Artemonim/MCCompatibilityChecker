@@ -104,6 +104,9 @@ Polling interval.
 .PARAMETER SuccessGraceSeconds
 Seconds a Minecraft process must live to consider launch successful.
 
+.PARAMETER GameProcessNames
+Process names to detect a successful launch (used with SuccessGraceSeconds).
+
 .PARAMETER CrashCloseDelaySeconds
 Delay before closing crash dialog automatically.
 
@@ -248,6 +251,10 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$SuccessGraceSeconds = 15,
 
+  # * Process names to detect a successful launch.
+  [Parameter(Mandatory = $false)]
+  [string[]]$GameProcessNames = @("javaw", "java", "Minecraft"),
+
   # * Delay before closing crash dialog automatically.
   [Parameter(Mandatory = $false)]
   [int]$CrashCloseDelaySeconds = 5,
@@ -390,7 +397,7 @@ function Invoke-ClickRelativeToWindow {
   $targetX = $rect.Left + $OffsetX
   $targetY = $rect.Top + $OffsetY
   if ($IsDryRun) {
-    Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY)
+    Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY) -ForegroundColor Gray
     return
   }
   [void][MCCompatWin32]::SetCursorPos($targetX, $targetY)
@@ -404,6 +411,7 @@ function Get-WindowList {
   $callback = [MCCompatWin32+EnumWindowsProc]{
     param([IntPtr]$hWnd, [IntPtr]$lParam)
 
+    $null = $lParam
     if (-not [MCCompatWin32]::IsWindowVisible($hWnd)) { return $true }
     $length = [MCCompatWin32]::GetWindowTextLength($hWnd)
     if ($length -le 0) { return $true }
@@ -437,6 +445,43 @@ function Test-TitleMatch {
 
   $escaped = [regex]::Escape($Pattern)
   return [regex]::IsMatch($Title, $escaped, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+}
+
+function Get-RecentProcessesByName {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Names,
+    [Parameter(Mandatory = $true)]
+    [datetime]$StartedAfter
+  )
+
+  $set = @{}
+  foreach ($name in $Names) {
+    if (-not [string]::IsNullOrWhiteSpace($name)) {
+      $set[$name.ToLowerInvariant()] = $true
+    }
+  }
+  if ($set.Count -eq 0) { return @() }
+
+  $recent = New-Object System.Collections.Generic.List[object]
+  $all = Get-Process -ErrorAction SilentlyContinue
+  foreach ($p in $all) {
+    if (-not $p -or [string]::IsNullOrWhiteSpace($p.Name)) { continue }
+    $key = $p.Name.ToLowerInvariant()
+    if (-not $set.ContainsKey($key)) { continue }
+    try {
+      $startTime = $p.StartTime
+    } catch {
+      continue
+    }
+    if ($startTime -ge $StartedAfter) {
+      $recent.Add($p)
+    }
+  }
+  # ! PowerShell 7.5 can throw "Argument types do not match" when expanding a generic List via @(...).
+  # ! Return a native array to avoid the enumerable binder bug.
+  # ! Use unary comma to prevent single-element array unwrapping (which would lose .Count property).
+  return ,$recent.ToArray()
 }
 
 function Select-WindowByTitlePatterns {
@@ -487,6 +532,7 @@ function Wait-ForLauncherWindow {
 }
 
 function Start-LauncherIfNeeded {
+  [CmdletBinding(SupportsShouldProcess = $true)]
   param(
     [Parameter(Mandatory = $true)]
     [string]$TitlePattern,
@@ -504,10 +550,10 @@ function Start-LauncherIfNeeded {
   if ($null -ne $existing) { return $existing }
 
   if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    Write-Host "Launcher window not found. Waiting for it to appear..."
+    Write-Host "Launcher window not found. Waiting for it to appear..." -ForegroundColor Cyan
     $waited = Wait-ForLauncherWindow -TitlePattern $TitlePattern -TimeoutSeconds $TimeoutSeconds
     if ($null -eq $waited) {
-      Write-Host ("Launcher window not found after {0}s." -f $TimeoutSeconds)
+      Write-Host ("Launcher window not found after {0}s." -f $TimeoutSeconds) -ForegroundColor Yellow
     }
     return $waited
   }
@@ -534,8 +580,11 @@ function Start-LauncherIfNeeded {
     }
   }
 
-  Write-Host ("Starting launcher: {0}" -f $ExePath)
+  Write-Host ("Starting launcher: {0}" -f $ExePath) -ForegroundColor Cyan
   if (-not $DryRun) {
+    if (-not $PSCmdlet.ShouldProcess($ExePath, "Start-Process")) {
+      return $null
+    }
     if ($startArgs.Count -gt 0) {
       Start-Process -FilePath $ExePath -ArgumentList $startArgs | Out-Null
     } else {
@@ -543,9 +592,9 @@ function Start-LauncherIfNeeded {
     }
   } else {
     if ($startArgs.Count -gt 0) {
-      Write-Host ("DRYRUN would start: {0} {1}" -f $ExePath, ($startArgs -join " "))
+      Write-Host ("DRYRUN would start: {0} {1}" -f $ExePath, ($startArgs -join " ")) -ForegroundColor Gray
     } else {
-      Write-Host ("DRYRUN would start: {0}" -f $ExePath)
+      Write-Host ("DRYRUN would start: {0}" -f $ExePath) -ForegroundColor Gray
     }
   }
 
@@ -577,7 +626,7 @@ function Invoke-LauncherPlay {
 
   # * Prefer offset click to avoid UI Automation hangs.
   if ($ClickOffsetX -ge 0 -and $ClickOffsetY -ge 0) {
-    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY)
+    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY) -ForegroundColor Cyan
     $rect = New-Object MCCompatWin32+RECT
     if (-not [MCCompatWin32]::GetWindowRect($LauncherHandle, [ref]$rect)) {
       throw "Failed to read launcher window rectangle."
@@ -589,7 +638,7 @@ function Invoke-LauncherPlay {
       [MCCompatWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
       [MCCompatWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
     } else {
-      Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY)
+      Write-Host ("DRYRUN would click at: {0},{1}" -f $targetX, $targetY) -ForegroundColor Gray
     }
     return
   }
@@ -620,7 +669,7 @@ function Invoke-LauncherPlay {
         if (-not $DryRun) {
           $invokePattern.Invoke()
         } else {
-          Write-Host ("DRYRUN would click Play button: {0}" -f $buttonName)
+          Write-Host ("DRYRUN would click Play button: {0}" -f $buttonName) -ForegroundColor Gray
         }
         return
       }
@@ -628,20 +677,20 @@ function Invoke-LauncherPlay {
   }
 
   if ($EnableEnterFallback) {
-    Write-Host "Play element not found via UI Automation. Using ENTER fallback."
+    Write-Host "Play element not found via UI Automation. Using ENTER fallback." -ForegroundColor Cyan
     [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
     Start-Sleep -Milliseconds 150
     if (-not $DryRun) {
       [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
     } else {
-      Write-Host "DRYRUN would send ENTER to launcher window."
+      Write-Host "DRYRUN would send ENTER to launcher window." -ForegroundColor Gray
     }
     return
   }
 
   # * Optional broad fallback (can be slow on some launchers).
   if ($AllowBroadSearch) {
-    Write-Host "Using broad UI Automation search fallback for Play element."
+    Write-Host "Using broad UI Automation search fallback for Play element." -ForegroundColor Cyan
     $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
       [System.Windows.Automation.ControlType]::Button
@@ -657,7 +706,7 @@ function Invoke-LauncherPlay {
             if (-not $DryRun) {
               $invokePattern.Invoke()
             } else {
-              Write-Host ("DRYRUN would click Play element: {0}" -f $name)
+              Write-Host ("DRYRUN would click Play element: {0}" -f $name) -ForegroundColor Gray
             }
             return
           }
@@ -666,7 +715,7 @@ function Invoke-LauncherPlay {
             if (-not $DryRun) {
               $legacyPattern.DoDefaultAction()
             } else {
-              Write-Host ("DRYRUN would activate element: {0}" -f $name)
+              Write-Host ("DRYRUN would activate element: {0}" -f $name) -ForegroundColor Gray
             }
             return
           }
@@ -703,6 +752,8 @@ function Wait-ForOutcome {
     [Parameter(Mandatory = $true)]
     [datetime]$LaunchStart,
     [Parameter(Mandatory = $false)]
+    [string[]]$GameProcessNames = @(),
+    [Parameter(Mandatory = $false)]
     [long[]]$IgnoreCrashHandleIds = @()
   )
 
@@ -720,14 +771,139 @@ function Wait-ForOutcome {
       $fabricDetected = $true
     }
 
+    if ($GraceSeconds -gt 0 -and $GameProcessNames -and $GameProcessNames.Count -gt 0) {
+      $now = Get-Date
+      $recent = Get-RecentProcessesByName -Names $GameProcessNames -StartedAfter $LaunchStart
+      foreach ($p in $recent) {
+        try {
+          $startTime = $p.StartTime
+        } catch {
+          continue
+        }
+        if (($now - $startTime).TotalSeconds -ge $GraceSeconds) {
+          return [pscustomobject]@{ Type = "Timeout"; Window = $null; FabricDetected = $fabricDetected }
+        }
+      }
+    }
+
     Start-Sleep -Seconds $PollSeconds
   }
 
   return [pscustomobject]@{ Type = "Timeout"; Window = $null; FabricDetected = $fabricDetected }
 }
 
-Write-Host ("Launcher title pattern: {0}" -f $LauncherWindowTitlePattern)
-Write-Host "Attempt limit: unlimited"
+function Restore-IsolationCulpritMods {
+  <#
+  .SYNOPSIS
+  Restores mods isolated by Isolate-Incompatible-Mod.ps1 back to game/storage roots.
+
+  .DESCRIPTION
+  Best-effort restore intended for "stop by user choice" flows.
+  - Moves storage legacy copy back to storage root (when available).
+  - Restores game copy from game legacy if present; otherwise copies from storage (legacy or root).
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [object[]]$CulpritMoves,
+    [Parameter(Mandatory = $false)]
+    [int]$Retries = 10,
+    [Parameter(Mandatory = $false)]
+    [int]$DelayMs = 750
+  )
+
+  function Invoke-WithRetry {
+    param(
+      [Parameter(Mandatory = $true)]
+      [scriptblock]$Action
+    )
+    for ($i = 0; $i -le $Retries; $i++) {
+      try {
+        & $Action
+        return $true
+      } catch [System.IO.IOException] {
+        if ($i -ge $Retries) { throw }
+        Start-Sleep -Milliseconds $DelayMs
+        continue
+      } catch {
+        throw
+      }
+    }
+    return $false
+  }
+
+  $hadFailures = $false
+  foreach ($m in $CulpritMoves) {
+    if ($null -eq $m) { continue }
+
+    $jarName = [string]$m.JarName
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+
+    $gameModsDir = [string]$m.GameModsDir
+    $storageModsDir = [string]$m.StorageModsDir
+    $storageLegacyPath = [string]$m.StorageLegacyPath
+    $gameLegacyPath = [string]$m.GameLegacyPath
+
+    $storageTarget = $null
+    if (-not [string]::IsNullOrWhiteSpace($storageModsDir)) {
+      $storageTarget = Join-Path -Path $storageModsDir -ChildPath $jarName
+    }
+    $gameTarget = $null
+    if (-not [string]::IsNullOrWhiteSpace($gameModsDir)) {
+      $gameTarget = Join-Path -Path $gameModsDir -ChildPath $jarName
+    }
+
+    try {
+      # * Restore storage first.
+      if (-not [string]::IsNullOrWhiteSpace($storageLegacyPath) -and $storageTarget) {
+        if (Test-Path -LiteralPath $storageLegacyPath) {
+          if (Test-Path -LiteralPath $storageTarget) {
+            Write-Host ("Warning: storage target already exists, leaving legacy copy: {0}" -f $storageTarget) -ForegroundColor Yellow
+          } else {
+            Invoke-WithRetry -Action { Move-Item -LiteralPath $storageLegacyPath -Destination $storageTarget -Force -ErrorAction Stop } | Out-Null
+            Write-Host ("Restored storage mod: {0}" -f $storageTarget) -ForegroundColor Green
+          }
+        }
+      }
+
+      # * Restore game mod (prefer game-legacy copy if present).
+      if ($gameTarget) {
+        if (Test-Path -LiteralPath $gameTarget) {
+          # * Already restored (manually or by other logic).
+          continue
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($gameLegacyPath) -and (Test-Path -LiteralPath $gameLegacyPath)) {
+          Invoke-WithRetry -Action { Move-Item -LiteralPath $gameLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } | Out-Null
+          Write-Host ("Restored game mod: {0}" -f $gameTarget) -ForegroundColor Green
+          continue
+        }
+
+        # * Fallback: copy from storage root (preferred) or from storage legacy.
+        if ($storageTarget -and (Test-Path -LiteralPath $storageTarget)) {
+          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageTarget -Destination $gameTarget -Force -ErrorAction Stop } | Out-Null
+          Write-Host ("Restored game mod (copied from storage): {0}" -f $gameTarget) -ForegroundColor Green
+          continue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($storageLegacyPath) -and (Test-Path -LiteralPath $storageLegacyPath)) {
+          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } | Out-Null
+          Write-Host ("Restored game mod (copied from storage legacy): {0}" -f $gameTarget) -ForegroundColor Green
+          continue
+        }
+
+        Write-Host ("Warning: could not restore game mod '{0}' (no legacy/source copy found)." -f $jarName) -ForegroundColor Yellow
+      }
+    } catch {
+      $hadFailures = $true
+      Write-Host ("Error while restoring '{0}': {1}" -f $jarName, $_.Exception.Message) -ForegroundColor Red
+    }
+  }
+
+  return (-not $hadFailures)
+}
+
+Write-Host ("Launcher title pattern: {0}" -f $LauncherWindowTitlePattern) -ForegroundColor Cyan
+Write-Host "Attempt limit: unlimited" -ForegroundColor Gray
 $launcherWindow = $null
 $lastCrashDialogHandleId = 0
 
@@ -735,7 +911,7 @@ $lastCrashDialogHandleId = 0
 if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset) {
   $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
   while ($null -eq $launcherWindow) {
-    Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds)
+    Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds) -ForegroundColor Yellow
     Start-Sleep -Seconds $PollIntervalSeconds
     $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
   }
@@ -743,29 +919,33 @@ if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset
   Start-Sleep -Milliseconds 150
 
   $offsets = Get-CursorOffsetRelativeToWindow -Handle $launcherWindow.Handle
-  Write-Host ("Captured cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY)
+  Write-Host ("Captured cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY) -ForegroundColor Gray
   if ($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) {
     $PlayClickOffsetX = $offsets.OffsetX
     $PlayClickOffsetY = $offsets.OffsetY
-    Write-Host ("Using captured offsets for Play click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY)
+    Write-Host ("Using captured offsets for Play click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY) -ForegroundColor Cyan
   } else {
-    Write-Host ("Using provided Play click offsets: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY)
+    Write-Host ("Using provided Play click offsets: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY) -ForegroundColor Cyan
   }
 }
+
+$sessionIsolationFastForwardJarNames = @()
+$sessionIsolationFastForwardEvidenceKey = ""
+$sessionIsolationCulpritByJar = @{}
 
 $attempt = 0
 while ($true) {
   $attempt++
-  Write-Host ("Attempt {0}" -f $attempt)
+  Write-Host ("Attempt {0}" -f $attempt) -ForegroundColor Cyan
 
   $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern -ExePath $LauncherExePath -ExeArguments $LauncherArguments -AppendAutoLaunch $effectiveAutoLaunch -TimeoutSeconds $LauncherWindowTimeoutSeconds
   if ($null -eq $launcherWindow) {
     $answer = Read-Host "Лаунчер не найден. Продолжить попытки? (y/n)"
     if ($answer -notmatch "^(y|yes|д|да)$") {
-      Write-Host "Stopping by user choice."
+      Write-Host "Stopping by user choice." -ForegroundColor Yellow
       exit 0
     }
-    Write-Host ("Retrying in {0}s." -f $PollIntervalSeconds)
+    Write-Host ("Retrying in {0}s." -f $PollIntervalSeconds) -ForegroundColor Yellow
     Start-Sleep -Seconds $PollIntervalSeconds
     continue
   }
@@ -782,10 +962,11 @@ while ($true) {
     -PollSeconds $PollIntervalSeconds `
     -GraceSeconds $SuccessGraceSeconds `
     -LaunchStart $launchStart `
+    -GameProcessNames $GameProcessNames `
     -IgnoreCrashHandleIds $ignoreCrashIds
 
   if ($outcome.Type -eq "CrashDialog") {
-    Write-Host "Outcome: crash dialog detected. Running compatibility cleanup."
+    Write-Host "Outcome: crash dialog detected. Running compatibility cleanup." -ForegroundColor Yellow
 
     if (-not $DryRun) {
       $compatArgs = @()
@@ -822,7 +1003,7 @@ while ($true) {
       if ($compatExitCode -ne 0) {
         if ($compatExitCode -eq 3) {
           if ($effectiveIsolateOnNoChanges) {
-            Write-Host "Compatibility cleanup made no changes. Running isolation."
+            Write-Host "Compatibility cleanup made no changes. Running isolation." -ForegroundColor Cyan
             $isolateParams = @{}
             if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
               $isolateParams["LauncherExePath"] = $LauncherExePath
@@ -887,6 +1068,14 @@ while ($true) {
             if ($GameLegacy) {
               $isolateParams["KeepCulpritInGameLegacy"] = $true
             }
+            $isolateParams["EmitResultObject"] = $true
+            if ($sessionIsolationFastForwardJarNames -and $sessionIsolationFastForwardJarNames.Count -gt 0) {
+              Write-Host ("Fast-forward isolation enabled (previously tested mods: {0})." -f $sessionIsolationFastForwardJarNames.Count) -ForegroundColor Gray
+              $isolateParams["PreIsolateJarNames"] = $sessionIsolationFastForwardJarNames
+              if (-not [string]::IsNullOrWhiteSpace($sessionIsolationFastForwardEvidenceKey)) {
+                $isolateParams["PreIsolateBaselineEvidenceKey"] = $sessionIsolationFastForwardEvidenceKey
+              }
+            }
 
             $isolateExtraArgs = @()
             if ($IsolateScriptArguments) {
@@ -897,20 +1086,38 @@ while ($true) {
               }
             }
 
-            & $IsolateScriptPath @isolateParams @isolateExtraArgs
+            $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
             $isolateExitCode = $LASTEXITCODE
             if ($isolateExitCode -ne 0) {
-              Write-Host ("Isolation failed with exit code {0}. Stopping." -f $isolateExitCode)
+              Write-Host ("Isolation failed with exit code {0}. Stopping." -f $isolateExitCode) -ForegroundColor Red
               exit $isolateExitCode
             }
-            Write-Host "Isolation completed. Returning to main loop."
+
+            $isolationResultObj = $isolationResult
+            if ($isolationResultObj -is [System.Array]) {
+              $isolationResultObj = $isolationResultObj | Select-Object -Last 1
+            }
+            if ($null -ne $isolationResultObj -and ($isolationResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
+              if ($isolationResultObj.Type -eq "IsolationResult") {
+                $sessionIsolationFastForwardJarNames = @($isolationResultObj.FastForwardJarNames)
+                $sessionIsolationFastForwardEvidenceKey = [string]$isolationResultObj.BaselineEvidenceKey
+                foreach ($move in @($isolationResultObj.CulpritMoves)) {
+                  if ($null -eq $move) { continue }
+                  $name = [string]$move.JarName
+                  if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                  $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+                }
+              }
+            }
+
+            Write-Host "Isolation completed. Returning to main loop." -ForegroundColor Cyan
             Start-Sleep -Seconds 2
             continue
           }
-          Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop."
+          Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop." -ForegroundColor Yellow
           exit 3
         }
-        Write-Host ("Compatibility cleanup failed with exit code {0}. Stopping." -f $compatExitCode)
+        Write-Host ("Compatibility cleanup failed with exit code {0}. Stopping." -f $compatExitCode) -ForegroundColor Red
         exit $compatExitCode
       }
     } else {
@@ -935,9 +1142,9 @@ while ($true) {
         }
       }
       if ($compatArgs.Count -gt 0) {
-        Write-Host ("DRYRUN would run: {0} {1}" -f $CheckScriptPath, ($compatArgs -join " "))
+        Write-Host ("DRYRUN would run: {0} {1}" -f $CheckScriptPath, ($compatArgs -join " ")) -ForegroundColor Gray
       } else {
-        Write-Host ("DRYRUN would run: {0}" -f $CheckScriptPath)
+        Write-Host ("DRYRUN would run: {0}" -f $CheckScriptPath) -ForegroundColor Gray
       }
       if ($effectiveIsolateOnNoChanges) {
         $isolateParams = @{}
@@ -1021,9 +1228,9 @@ while ($true) {
           }
         }
         if ($isolateExtraArgs.Count -gt 0) {
-          Write-Host ("DRYRUN would run (on no changes): {0} {1} {2}" -f $IsolateScriptPath, ($prettyParams -join " "), ($isolateExtraArgs -join " "))
+          Write-Host ("DRYRUN would run (on no changes): {0} {1} {2}" -f $IsolateScriptPath, ($prettyParams -join " "), ($isolateExtraArgs -join " ")) -ForegroundColor Gray
         } else {
-          Write-Host ("DRYRUN would run (on no changes): {0} {1}" -f $IsolateScriptPath, ($prettyParams -join " "))
+          Write-Host ("DRYRUN would run (on no changes): {0} {1}" -f $IsolateScriptPath, ($prettyParams -join " ")) -ForegroundColor Gray
         }
       }
     }
@@ -1040,7 +1247,7 @@ while ($true) {
     # * Close it to keep automation continuous and allow launcher to return.
     $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
     if ($null -ne $fabricWindow) {
-      Write-Host "Closing Fabric Loader dialog."
+      Write-Host "Closing Fabric Loader dialog." -ForegroundColor Gray
       if (-not $DryRun) {
         Invoke-WindowClose -Handle $fabricWindow.Handle
         Start-Sleep -Milliseconds 250
@@ -1048,24 +1255,53 @@ while ($true) {
         Start-Sleep -Milliseconds 150
         [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
       } else {
-        Write-Host "DRYRUN would close Fabric Loader dialog."
+        Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
       }
     }
 
     # * Wait before retrying after a crash.
-    Write-Host "Waiting 5 seconds before retry..."
+    Write-Host "Waiting 5 seconds before retry..." -ForegroundColor Cyan
     Start-Sleep -Seconds 5
     continue
   }
 
-  Write-Host ("Outcome: timeout after {0} seconds." -f $OutcomeTimeoutSeconds)
+  Write-Host ("Outcome: timeout after {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
   if ($outcome.FabricDetected) {
-    Write-Host "Fabric Loader dialog was detected during the wait."
+    Write-Host "Fabric Loader dialog was detected during the wait." -ForegroundColor Yellow
   }
-  $answer = Read-Host "Краш не обнаружен. Продолжить попытки? (y/n)"
+  $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
+  if ($hasSessionIsolants) {
+    $isolatedNames = @($sessionIsolationCulpritByJar.Values | ForEach-Object { $_.JarName } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
+    if ($isolatedNames -and $isolatedNames.Count -gt 0) {
+      Write-Host ""
+      Write-Host ("Isolation note: mods isolated (moved to Legacy) in this session: {0}" -f ($isolatedNames -join ", ")) -ForegroundColor Yellow
+      Write-Host "To retry the launch WITH these mods, they must be restored from Legacy first." -ForegroundColor Yellow
+      Write-Host ""
+    }
+  }
+  $answer = Read-Host $(if ($hasSessionIsolants) { "Краш не обнаружен. Вернуть изолированные моды и продолжить попытки? (y/n)" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
   if ($answer -notmatch "^(y|yes|д|да)$") {
-    Write-Host "Stopping by user choice."
+    if ($hasSessionIsolants) {
+      Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
+      $ok = Restore-IsolationCulpritMods -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+      if (-not $ok) {
+        Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
+        exit 1
+      }
+      $sessionIsolationCulpritByJar = @{}
+    }
+    Write-Host "Stopping by user choice." -ForegroundColor Yellow
     exit 0
+  }
+
+  if ($hasSessionIsolants) {
+    Write-Host "Restoring isolated mods before continuing..." -ForegroundColor Cyan
+    $ok = Restore-IsolationCulpritMods -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+    if (-not $ok) {
+      Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
+      exit 1
+    }
+    $sessionIsolationCulpritByJar = @{}
   }
 }
 
