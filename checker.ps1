@@ -27,7 +27,7 @@ $repoRoot = $PSScriptRoot
 
 function Resolve-AnalyzerTarget {
   param(
-    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
     [string[]]$InputPaths,
     [Parameter(Mandatory = $true)]
     [string]$DefaultRoot
