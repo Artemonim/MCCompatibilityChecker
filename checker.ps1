@@ -98,7 +98,16 @@ $findings = New-Object System.Collections.Generic.List[object]
 $hadAnalyzerError = $false
 foreach ($file in $uniqueFiles) {
   try {
-    $result = Invoke-ScriptAnalyzer -Path $file -ErrorAction Stop
+    $settingsPath = Join-Path -Path $repoRoot -ChildPath "PSScriptAnalyzerSettings.psd1"
+    $invokeParams = @{
+        Path = $file
+        ErrorAction = "Stop"
+    }
+    if (Test-Path -LiteralPath $settingsPath) {
+        $invokeParams["Settings"] = $settingsPath
+    }
+
+    $result = Invoke-ScriptAnalyzer @invokeParams
     if ($result) {
       foreach ($entry in $result) {
         $findings.Add($entry) | Out-Null

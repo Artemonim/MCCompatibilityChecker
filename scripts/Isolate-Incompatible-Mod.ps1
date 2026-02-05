@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Isolates a crashing mod by moving jars to Legacy (binary or linear).
 
@@ -789,7 +789,6 @@ $script:lastBaselinePinnedKey = ""
 $baselineSignature = ""
 $baselineEvidenceKey = ""
 $activeBaselineSignature = ""
-$activeBaselineEvidenceKey = ""
 $baselineOutcome = "Unknown"
 $mcVersionForLegacy = "unknown"
 $exitCode = 0
@@ -845,7 +844,6 @@ try {
       -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
     $baselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
     $activeBaselineSignature = $baselineSignature
-    $activeBaselineEvidenceKey = $baselineEvidenceKey
 
     if ([string]::IsNullOrWhiteSpace($baselineSignature)) {
       Write-Host "Baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
@@ -990,7 +988,6 @@ try {
         $activeBaselineSignature = Get-ErrorSignature -Lines $linearBaselineSnapshot.Lines `
           -MaxLines $ErrorSignatureLineLimit `
           -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-        $activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $linearBaselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
         if ([string]::IsNullOrWhiteSpace($activeBaselineSignature)) {
           Write-Host "Linear phase baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
         } else {
@@ -1259,3 +1256,4 @@ if ($EmitResultObject) {
 }
 
 exit $exitCode
+

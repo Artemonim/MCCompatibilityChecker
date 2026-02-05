@@ -117,6 +117,7 @@ function Add-MovedItemRecord {
 }
 
 function Update-QuarantineState {
+  [CmdletBinding(SupportsShouldProcess = $true)]
   param(
     [Parameter(Mandatory = $true)]
     [AllowEmptyCollection()]

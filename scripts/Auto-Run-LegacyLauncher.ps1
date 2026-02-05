@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Automates Legacy Launcher runs and triggers mod cleanup on crash dialog.
 
@@ -350,7 +350,7 @@ if ($effectiveIsolateOnNoChanges) {
   }
 }
 
-function New-CompatibilityArgs {
+function Get-CompatibilityArg {
   $compatArgs = @()
   if ($DeleteFromGameMods) {
     $compatArgs += @("-DeleteFromGameMods")
@@ -375,7 +375,7 @@ function New-CompatibilityArgs {
   return ,@($compatArgs)
 }
 
-function Get-IsolationExtraArgs {
+function Get-IsolationExtraArg {
   $isolateExtraArgs = @()
   if ($IsolateScriptArguments) {
     foreach ($arg in $IsolateScriptArguments) {
@@ -388,7 +388,7 @@ function Get-IsolationExtraArgs {
   return ,@($isolateExtraArgs)
 }
 
-function New-IsolationParams {
+function Get-IsolationParam {
   param(
     [Parameter(Mandatory = $false)]
     [bool]$IncludeEmitResultObject = $false,
@@ -544,12 +544,12 @@ function Wait-ForOutcome {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
   while ((Get-Date) -lt $deadline) {
-    $crashWindow = Select-WindowByTitlePatterns -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreCrashHandleIds
+    $crashWindow = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreCrashHandleIds
     if ($null -ne $crashWindow) {
       return [pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow }
     }
 
-    $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricPatterns
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns
     if ($null -ne $fabricWindow) {
       return [pscustomobject]@{ Type = "FabricDialog"; Window = $fabricWindow }
     }
@@ -575,7 +575,7 @@ function Wait-ForOutcome {
   return [pscustomobject]@{ Type = "Timeout"; Window = $null }
 }
 
-function Restore-IsolationCulpritMods {
+function Restore-IsolationCulpritMod {
   <#
   .SYNOPSIS
   Restores mods isolated by Isolate-Incompatible-Mod.ps1 back to game/storage roots.
@@ -598,15 +598,17 @@ function Restore-IsolationCulpritMods {
   function Invoke-WithRetry {
     param(
       [Parameter(Mandatory = $true)]
-      [scriptblock]$Action
+      [scriptblock]$Action,
+      [int]$MaxRetries = $Retries,
+      [int]$WaitMs = $DelayMs
     )
-    for ($i = 0; $i -le $Retries; $i++) {
+    for ($i = 0; $i -le $MaxRetries; $i++) {
       try {
         & $Action
         return $true
       } catch [System.IO.IOException] {
-        if ($i -ge $Retries) { throw }
-        Start-Sleep -Milliseconds $DelayMs
+        if ($i -ge $MaxRetries) { throw }
+        Start-Sleep -Milliseconds $WaitMs
         continue
       } catch {
         throw
@@ -643,7 +645,7 @@ function Restore-IsolationCulpritMods {
           if (Test-Path -LiteralPath $storageTarget) {
             Write-Host ("Warning: storage target already exists, leaving legacy copy: {0}" -f $storageTarget) -ForegroundColor Yellow
           } else {
-            Invoke-WithRetry -Action { Move-Item -LiteralPath $storageLegacyPath -Destination $storageTarget -Force -ErrorAction Stop } | Out-Null
+            Invoke-WithRetry -Action { Move-Item -LiteralPath $storageLegacyPath -Destination $storageTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
             Write-Host ("Restored storage mod: {0}" -f $storageTarget) -ForegroundColor Green
           }
         }
@@ -657,19 +659,19 @@ function Restore-IsolationCulpritMods {
         }
 
         if (-not [string]::IsNullOrWhiteSpace($gameLegacyPath) -and (Test-Path -LiteralPath $gameLegacyPath)) {
-          Invoke-WithRetry -Action { Move-Item -LiteralPath $gameLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } | Out-Null
+          Invoke-WithRetry -Action { Move-Item -LiteralPath $gameLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
           Write-Host ("Restored game mod: {0}" -f $gameTarget) -ForegroundColor Green
           continue
         }
 
         # * Fallback: copy from storage root (preferred) or from storage legacy.
         if ($storageTarget -and (Test-Path -LiteralPath $storageTarget)) {
-          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageTarget -Destination $gameTarget -Force -ErrorAction Stop } | Out-Null
+          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageTarget -Destination $gameTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
           Write-Host ("Restored game mod (copied from storage): {0}" -f $gameTarget) -ForegroundColor Green
           continue
         }
         if (-not [string]::IsNullOrWhiteSpace($storageLegacyPath) -and (Test-Path -LiteralPath $storageLegacyPath)) {
-          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } | Out-Null
+          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
           Write-Host ("Restored game mod (copied from storage legacy): {0}" -f $gameTarget) -ForegroundColor Green
           continue
         }
@@ -776,7 +778,7 @@ while ($true) {
     Write-Host "Outcome: crash dialog detected. Running compatibility cleanup." -ForegroundColor Yellow
 
     if (-not $DryRun) {
-      $compatArgs = New-CompatibilityArgs
+      $compatArgs = Get-CompatibilityArg
       $forwardVerbose = [bool]$PSBoundParameters.ContainsKey("Verbose")
       $hasVerboseArg = $false
       foreach ($arg in $compatArgs) {
@@ -792,8 +794,8 @@ while ($true) {
         if ($compatExitCode -eq 3) {
           if ($effectiveIsolateOnNoChanges) {
             Write-Host "Compatibility cleanup made no changes. Running isolation." -ForegroundColor Cyan
-            $isolateParams = New-IsolationParams -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
-            $isolateExtraArgs = Get-IsolationExtraArgs
+            $isolateParams = Get-IsolationParam -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
+            $isolateExtraArgs = Get-IsolationExtraArg
 
             $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
             $isolateExitCode = $LASTEXITCODE
@@ -830,15 +832,15 @@ while ($true) {
         exit $compatExitCode
       }
     } else {
-      $compatArgs = New-CompatibilityArgs
+      $compatArgs = Get-CompatibilityArg
       if ($compatArgs.Count -gt 0) {
         Write-Host ("DRYRUN would run: {0} {1}" -f $CheckScriptPath, ($compatArgs -join " ")) -ForegroundColor Gray
       } else {
         Write-Host ("DRYRUN would run: {0}" -f $CheckScriptPath) -ForegroundColor Gray
       }
       if ($effectiveIsolateOnNoChanges) {
-        $isolateParams = New-IsolationParams
-        $isolateExtraArgs = Get-IsolationExtraArgs
+        $isolateParams = Get-IsolationParam
+        $isolateExtraArgs = Get-IsolationExtraArg
         $prettyParams = Format-IsolationParamsForDisplay -Params $isolateParams
         if ($isolateExtraArgs.Count -gt 0) {
           Write-Host ("DRYRUN would run (on no changes): {0} {1} {2}" -f $IsolateScriptPath, ($prettyParams -join " "), ($isolateExtraArgs -join " ")) -ForegroundColor Gray
@@ -858,7 +860,7 @@ while ($true) {
 
     # * Fabric can show its own incompatibility dialog alongside the generic crash dialog.
     # * Close it to keep automation continuous and allow launcher to return.
-    $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
     Close-FabricDialogWindow -Window $fabricWindow -IsDryRun ([bool]$DryRun)
 
     # * Wait before retrying after a crash.
@@ -893,7 +895,7 @@ while ($true) {
   if ($answer -notmatch "^(y|yes|д|да)$") {
     if ($hasSessionIsolants) {
       Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
-      $ok = Restore-IsolationCulpritMods -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+      $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
       if (-not $ok) {
         Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
         exit 1
@@ -907,7 +909,7 @@ while ($true) {
 
   if ($hasSessionIsolants) {
     Write-Host "Restoring isolated mods before continuing..." -ForegroundColor Cyan
-    $ok = Restore-IsolationCulpritMods -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+    $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
     if (-not $ok) {
       Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
       exit 1
@@ -920,3 +922,5 @@ while ($true) {
     Stop-Transcript | Out-Null
   }
 }
+
+

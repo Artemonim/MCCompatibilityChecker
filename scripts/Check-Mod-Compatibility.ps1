@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Detects incompatible Minecraft mods from Fabric/TLauncher logs.
 
@@ -450,10 +450,10 @@ function Move-OrDelete {
 $primaryLogPath = Get-LatestTLauncherLogPath -PreferredPath $LogPath
 $additionalLogPaths = @()
 if (-not $SkipGameLogs -and [string]::IsNullOrWhiteSpace($LogPath)) {
-  $additionalLogPaths = Get-AdditionalGameLogPaths -GameModsDir $GameModsDir
-  $additionalLogPaths = Select-RecentLogPaths -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
+  $additionalLogPaths = Get-AdditionalGameLogPath -GameModsDir $GameModsDir
+  $additionalLogPaths = Select-RecentLogPath -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
 }
-$resolvedLogPaths = Resolve-LogPaths -PrimaryPath $primaryLogPath -AdditionalPaths $additionalLogPaths
+$resolvedLogPaths = Resolve-LogPath -PrimaryPath $primaryLogPath -AdditionalPaths $additionalLogPaths
 $resolvedLogPaths = @($resolvedLogPaths)
 
 $logLinesBySource = @{}

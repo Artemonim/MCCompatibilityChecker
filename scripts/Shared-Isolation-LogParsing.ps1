@@ -33,10 +33,10 @@ function Get-LogSnapshot {
   $resolvedPrimary = Get-LatestTLauncherLogPath -PreferredPath $PrimaryLogPath -AllowMissing $true
   $additionalLogPaths = @()
   if (-not $SkipGameLogs -and [string]::IsNullOrWhiteSpace($PrimaryLogPath)) {
-    $additionalLogPaths = Get-AdditionalGameLogPaths -GameModsDir $GameModsDir
-    $additionalLogPaths = Select-RecentLogPaths -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
+    $additionalLogPaths = Get-AdditionalGameLogPath -GameModsDir $GameModsDir
+    $additionalLogPaths = Select-RecentLogPath -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
   }
-  $resolvedLogPaths = Resolve-LogPaths -PrimaryPath $resolvedPrimary -AdditionalPaths $additionalLogPaths
+  $resolvedLogPaths = Resolve-LogPath -PrimaryPath $resolvedPrimary -AdditionalPaths $additionalLogPaths
   $resolvedLogPaths = @($resolvedLogPaths)
 
   $logLinesBySource = @{}
@@ -152,7 +152,7 @@ function Get-IncompatibleModIdsFromLog {
   return ,@($ids.Keys | Sort-Object)
 }
 
-function Get-FabricRequiringModIds {
+function Get-FabricRequiringModId {
   <#
   .SYNOPSIS
   Extracts mod IDs that REQUIRE missing dependencies (the mod to blame, not the missing dep).
@@ -179,7 +179,7 @@ function Get-FabricRequiringModIds {
   return ,@($ids.Keys | Sort-Object)
 }
 
-function Get-FabricMissingDependencyIds {
+function Get-FabricMissingDependencyId {
   <#
   .SYNOPSIS
   Extracts missing dependency mod IDs from Fabric logs/dialog text.
@@ -232,7 +232,7 @@ function ConvertTo-NormalizedLogLine {
   return $text
 }
 
-function Select-ErrorEvidenceLines {
+function Select-ErrorEvidenceLine {
   param(
     [Parameter(Mandatory = $true)]
     [string[]]$Lines,
@@ -304,7 +304,7 @@ function Get-ErrorSignature {
     $parts.Add(("mods: {0}" -f ($modIds -join ", ")))
   }
 
-  $evidenceLines = @(Select-ErrorEvidenceLines -Lines $safeLines -MaxLines $MaxLines)
+  $evidenceLines = @(Select-ErrorEvidenceLine -Lines $safeLines -MaxLines $MaxLines)
   if ($evidenceLines.Count -gt 0) {
     $parts.Add(("lines: {0}" -f ($evidenceLines -join " | ")))
   }
@@ -322,7 +322,7 @@ function Get-ErrorEvidenceKey {
   )
 
   $safeLines = @($Lines)
-  $evidenceLines = @(Select-ErrorEvidenceLines -Lines $safeLines -MaxLines $MaxLines)
+  $evidenceLines = @(Select-ErrorEvidenceLine -Lines $safeLines -MaxLines $MaxLines)
   if (-not $evidenceLines -or $evidenceLines.Count -eq 0) { return "" }
 
   $norm = @()
@@ -370,13 +370,13 @@ function Get-FabricDependencyDialogInfo {
     [string[]]$Lines
   )
 
-  $requiringRaw = @(Get-FabricRequiringModIds -Lines $Lines)
+  $requiringRaw = @(Get-FabricRequiringModId -Lines $Lines)
   $requiringArr = @($requiringRaw |
       ForEach-Object { [string]$_ } |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
       Sort-Object -Unique)
 
-  $missingRaw = @(Get-FabricMissingDependencyIds -Lines $Lines)
+  $missingRaw = @(Get-FabricMissingDependencyId -Lines $Lines)
   $missingArr = @($missingRaw |
       ForEach-Object { [string]$_ } |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |

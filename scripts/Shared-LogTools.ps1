@@ -35,7 +35,7 @@ function Get-GameRootFromModsDir {
   return $parent
 }
 
-function Get-AdditionalGameLogPaths {
+function Get-AdditionalGameLogPath {
   param(
     [Parameter(Mandatory = $true)]
     [string]$GameModsDir
@@ -62,7 +62,7 @@ function Get-AdditionalGameLogPaths {
   return $paths
 }
 
-function Select-RecentLogPaths {
+function Select-RecentLogPath {
   param(
     [Parameter(Mandatory = $true)]
     [string[]]$Paths,
@@ -85,7 +85,7 @@ function Select-RecentLogPaths {
   return $recent
 }
 
-function Resolve-LogPaths {
+function Resolve-LogPath {
   param(
     [Parameter(Mandatory = $true)]
     [string]$PrimaryPath,

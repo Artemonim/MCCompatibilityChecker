@@ -119,7 +119,7 @@ function Get-ModJarsByIdsFromDependencyMap {
   return Resolve-JarsByName -Dirs $Dirs -JarNames $jarNames
 }
 
-function Find-ModJarsByIds {
+function Find-ModJarById {
   <#
   .SYNOPSIS
   Finds jar files that provide the given mod IDs in specified directories.
@@ -164,7 +164,7 @@ function Find-ModJarsByIds {
   return ,@($foundJars.ToArray() | Sort-Object -Property FullName -Unique)
 }
 
-function Find-ModJarsByIdsBestEffort {
+function Find-ModJarByIdBestEffort {
   <#
   .SYNOPSIS
   Finds jar files for mod IDs using metadata first, then filename heuristics.
@@ -181,7 +181,7 @@ function Find-ModJarsByIdsBestEffort {
   if (-not $ModIds -or $ModIds.Count -eq 0) { return @() }
   if (-not $Dirs -or $Dirs.Count -eq 0) { return @() }
 
-  $byMetadata = Find-ModJarsByIds -Dirs $Dirs -ModIds $ModIds
+  $byMetadata = Find-ModJarById -Dirs $Dirs -ModIds $ModIds
   if ($byMetadata -and $byMetadata.Count -gt 0) {
     return ,@($byMetadata | Sort-Object -Property FullName -Unique)
   }

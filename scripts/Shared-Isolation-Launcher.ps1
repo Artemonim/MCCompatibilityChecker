@@ -1,4 +1,4 @@
-function Invoke-ConfiguredLaunchAttempt {
+﻿function Invoke-ConfiguredLaunchAttempt {
   param(
     [Parameter(Mandatory = $false)]
     [long[]]$IgnoreHandleIds = @()
@@ -72,7 +72,7 @@ function Close-OutcomeWindowWithExtraDialog {
   if ($CloseExtraFabricDialogs) {
     # * Some launchers show both a generic crash dialog and Fabric's incompatibility dialog.
     # * Close Fabric dialog too to keep automation continuous.
-    $extraFabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    $extraFabricWindow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
     if ($null -ne $extraFabricWindow) {
       Write-Host ("Closing extra Fabric Loader dialog: {0}" -f $extraFabricWindow.Title) -ForegroundColor Gray
       Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $extraFabricWindow }) `
@@ -83,7 +83,7 @@ function Close-OutcomeWindowWithExtraDialog {
   }
 
   # * Verify the window actually closed. If not, don't ignore it in future attempts.
-  if (Test-WindowStillExists -HandleId $handleId) {
+  if (Test-WindowPresence -HandleId $handleId) {
     Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $Outcome.Type) -ForegroundColor Yellow
     return 0
   }
@@ -199,7 +199,7 @@ function Wait-ForOutcome {
   $gameExited = $false
 
   while ((Get-Date) -lt $deadline) {
-    $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricPatterns
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns
     if ($null -ne $fabricWindow) {
       return [pscustomobject]@{
         Type = "FabricDialog"
@@ -210,7 +210,7 @@ function Wait-ForOutcome {
       }
     }
 
-    $crashWindow = Select-WindowByTitlePatterns -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+    $crashWindow = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
     if ($null -ne $crashWindow) {
       return [pscustomobject]@{
         Type = "CrashDialog"
@@ -270,7 +270,7 @@ function Wait-ForOutcome {
     }
 
     if (-not $launcherClosed -and $LauncherHandleId -ne 0) {
-      if (-not (Test-WindowStillExists -HandleId $LauncherHandleId)) {
+      if (-not (Test-WindowPresence -HandleId $LauncherHandleId)) {
         $launcherClosed = $true
       }
     }
@@ -344,19 +344,19 @@ function Close-OutcomeWindow {
 
   # * Fallback: some dialogs ignore WM_CLOSE; try Alt+F4.
   $handleId = [long]$Outcome.Window.Handle.ToInt64()
-  if (Test-WindowStillExists -HandleId $handleId) {
+  if (Test-WindowPresence -HandleId $handleId) {
     [void][MCCompatWin32]::SetForegroundWindow($Outcome.Window.Handle)
     Start-Sleep -Milliseconds 150
     [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
     Start-Sleep -Milliseconds 500
   }
 
-  if (Test-WindowStillExists -HandleId $handleId) {
+  if (Test-WindowPresence -HandleId $handleId) {
     Request-UserToCloseBlockingWindow -HandleId $handleId -WindowTitle $Outcome.Window.Title
   }
 }
 
-function Test-WindowStillExists {
+function Test-WindowPresence {
   param(
     [Parameter(Mandatory = $true)]
     [long]$HandleId
@@ -385,7 +385,7 @@ function Request-UserToCloseBlockingWindow {
   $label = if ([string]::IsNullOrWhiteSpace($WindowTitle)) { "неизвестное мешающее окно" } else { $WindowTitle }
   $message = "Не удалось закрыть мешающее окно автоматически. Закройте его вручную и нажмите OK для продолжения.`nОкно: {0}" -f $label
 
-  while (Test-WindowStillExists -HandleId $HandleId) {
+  while (Test-WindowPresence -HandleId $HandleId) {
     [void][System.Windows.Forms.MessageBox]::Show(
       $message,
       "Требуется действие пользователя",
@@ -410,7 +410,7 @@ function Wait-ForLauncherWindowInteractive {
 
   $promptMessage = "Не удалось увидеть окно лаунчера. Закройте неизвестное мешающее окно (включая игру, если она запущена) и нажмите OK для продолжения."
   while ($true) {
-    $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricPatterns
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns
     if ($null -ne $fabricWindow) {
       Write-Host ("Blocking Fabric dialog detected: {0}" -f $fabricWindow.Title) -ForegroundColor Yellow
       Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $fabricWindow }) `
@@ -421,7 +421,7 @@ function Wait-ForLauncherWindowInteractive {
       continue
     }
 
-    $crashWindow = Select-WindowByTitlePatterns -Patterns $CrashPatterns
+    $crashWindow = Select-WindowByTitlePattern -Patterns $CrashPatterns
     if ($null -ne $crashWindow) {
       Write-Host ("Blocking crash dialog detected: {0}" -f $crashWindow.Title) -ForegroundColor Yellow
       Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow }) `
@@ -432,7 +432,7 @@ function Wait-ForLauncherWindowInteractive {
       continue
     }
 
-    $launcherWindow = Select-WindowByTitlePatterns -Patterns @($TitlePattern)
+    $launcherWindow = Select-WindowByTitlePattern -Patterns @($TitlePattern)
     if ($null -ne $launcherWindow) { return $launcherWindow }
 
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -480,7 +480,7 @@ function Invoke-LaunchAttempt {
   )
 
   # * Close any leftover dialogs that can block launcher interaction.
-  $strayCrash = Select-WindowByTitlePatterns -Patterns $CrashPatterns
+  $strayCrash = Select-WindowByTitlePattern -Patterns $CrashPatterns
   if ($null -ne $strayCrash) {
     Write-Host ("Closing stray crash dialog before launching: {0}" -f $strayCrash.Title) -ForegroundColor Gray
     Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $strayCrash }) `
@@ -488,7 +488,7 @@ function Invoke-LaunchAttempt {
       -OffsetX -1 `
       -OffsetY -1
   }
-  $strayFabric = Select-WindowByTitlePatterns -Patterns $FabricPatterns
+  $strayFabric = Select-WindowByTitlePattern -Patterns $FabricPatterns
   if ($null -ne $strayFabric) {
     Write-Host ("Closing stray Fabric Loader dialog before launching: {0}" -f $strayFabric.Title) -ForegroundColor Gray
     Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $strayFabric }) `
@@ -546,3 +546,4 @@ function Invoke-LaunchAttempt {
 
   throw ("No game launch detected after {0} Play click attempt(s). Consider increasing -PlayClickDelayMs or -LaunchStartTimeoutSeconds." -f $maxPlayAttempts)
 }
+

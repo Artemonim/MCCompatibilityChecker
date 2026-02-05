@@ -188,7 +188,7 @@ function Get-RecentProcessesByName {
   return ,$recent.ToArray()
 }
 
-function Select-WindowByTitlePatterns {
+function Select-WindowByTitlePattern {
   param(
     [Parameter(Mandatory = $true)]
     [string[]]$Patterns,
@@ -228,7 +228,7 @@ function Wait-ForLauncherWindow {
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   while ((Get-Date) -lt $deadline) {
-    $window = Select-WindowByTitlePatterns -Patterns @($TitlePattern)
+    $window = Select-WindowByTitlePattern -Patterns @($TitlePattern)
     if ($null -ne $window) { return $window }
     Start-Sleep -Seconds 1
   }
@@ -254,7 +254,7 @@ function Start-LauncherIfNeeded {
     [bool]$ShowWaitMessage = $false
   )
 
-  $existing = Select-WindowByTitlePatterns -Patterns @($TitlePattern)
+  $existing = Select-WindowByTitlePattern -Patterns @($TitlePattern)
   if ($null -ne $existing) { return $existing }
 
   if ([string]::IsNullOrWhiteSpace($ExePath)) {

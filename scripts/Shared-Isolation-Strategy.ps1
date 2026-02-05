@@ -34,7 +34,7 @@ function Invoke-IsolationProbe {
   $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles
 
   if ($outcome.Type -ne "FabricDialog") {
-    $fabricWindowNow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    $fabricWindowNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
     if ($null -ne $fabricWindowNow) {
       Write-Host ("Detected Fabric dialog after outcome: {0}" -f $fabricWindowNow.Title) -ForegroundColor Yellow
       $outcome = [pscustomobject]@{
@@ -203,7 +203,7 @@ function Invoke-FabricDependencyRecovery {
     $searchDirs = @($GameModsDir)
     if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
     if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
-    $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $requiringArr -AllowTokenFallback:$false
+    $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $requiringArr -AllowTokenFallback:$false
     $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency dialog"
     if ($culpritJars -and $culpritJars.Count -gt 0 -and $ProtectedJarNameSet.Count -gt 0) {
       $culpritJars = @($culpritJars | Where-Object {
@@ -638,7 +638,7 @@ function Invoke-LinearIsolation {
     # * Fabric signals (from window or from logs). This makes behavior visible in console output.
     $fabricIdsFromLogs = Get-FabricRequiringModIds -Lines $snapshot.Lines
     $fabricMissingIdsFromLogs = Get-FabricMissingDependencyIds -Lines $snapshot.Lines
-    $fabricWindowNow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    $fabricWindowNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
     if (($null -ne $fabricWindowNow) -or ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) -or ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0)) {
       $reqText = if ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) { $fabricIdsFromLogs -join ", " } else { "" }
       $missText = if ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0) { $fabricMissingIdsFromLogs -join ", " } else { "" }
@@ -696,7 +696,7 @@ function Invoke-LinearIsolation {
         $searchDirs = @($GameModsDir)
         if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
         if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
-        $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
+        $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
         $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "fabric dialog"
         if ($culpritJars -and $culpritJars.Count -gt 0) {
           foreach ($cj in $culpritJars) {
@@ -791,7 +791,7 @@ function Invoke-LinearIsolation {
         $searchDirs = @($GameModsDir)
         if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
         if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
-        $requiringJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
+        $requiringJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
         $requiringJars = Select-QuickIsolateJarsByTier -Jars $requiringJars -Context "dependency signature"
         if ($requiringJars -and $requiringJars.Count -gt 0) {
           $culpritJarNames = @()
@@ -832,7 +832,7 @@ function Invoke-LinearIsolation {
         $searchDirs = @($GameModsDir)
         if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
         if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
-        $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIds -AllowTokenFallback:$false
+        $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIds -AllowTokenFallback:$false
         $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency signature"
         if ($culpritJars -and $culpritJars.Count -gt 0) {
           foreach ($cj in $culpritJars) {
