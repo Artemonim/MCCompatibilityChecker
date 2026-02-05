@@ -285,7 +285,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$effectiveAutoLaunch = ([bool]$UseAutoLaunch) -and (-not [bool]$DisableAutoLaunch)
+$transcriptLogPath = Join-Path -Path $PSScriptRoot -ChildPath "MCCC.log"
+$enableTranscript = $PSBoundParameters.ContainsKey("Verbose")
+$transcriptStarted = $false
+
+try {
+  if ($enableTranscript) {
+    if (Test-Path -LiteralPath $transcriptLogPath) {
+      Remove-Item -LiteralPath $transcriptLogPath -Force -ErrorAction Stop
+    }
+    Start-Transcript -Path $transcriptLogPath -Force | Out-Null
+    $transcriptStarted = $true
+  }
+
+  $effectiveAutoLaunch = ([bool]$UseAutoLaunch) -and (-not [bool]$DisableAutoLaunch)
 
 if ($Help) {
   Get-Help -Full -Name $PSCommandPath
@@ -772,17 +785,16 @@ function Wait-ForOutcome {
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  $fabricDetected = $false
 
   while ((Get-Date) -lt $deadline) {
     $crashWindow = Select-WindowByTitlePatterns -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreCrashHandleIds
     if ($null -ne $crashWindow) {
-      return [pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow; FabricDetected = $fabricDetected }
+      return [pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow }
     }
 
     $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricPatterns
     if ($null -ne $fabricWindow) {
-      $fabricDetected = $true
+      return [pscustomobject]@{ Type = "FabricDialog"; Window = $fabricWindow }
     }
 
     if ($GraceSeconds -gt 0 -and $GameProcessNames -and $GameProcessNames.Count -gt 0) {
@@ -795,7 +807,7 @@ function Wait-ForOutcome {
           continue
         }
         if (($now - $startTime).TotalSeconds -ge $GraceSeconds) {
-          return [pscustomobject]@{ Type = "Timeout"; Window = $null; FabricDetected = $fabricDetected }
+          return [pscustomobject]@{ Type = "Timeout"; Window = $null }
         }
       }
     }
@@ -803,7 +815,7 @@ function Wait-ForOutcome {
     Start-Sleep -Seconds $PollSeconds
   }
 
-  return [pscustomobject]@{ Type = "Timeout"; Window = $null; FabricDetected = $fabricDetected }
+  return [pscustomobject]@{ Type = "Timeout"; Window = $null }
 }
 
 function Restore-IsolationCulpritMods {
@@ -1291,9 +1303,22 @@ while ($true) {
     continue
   }
 
-  Write-Host ("Outcome: timeout after {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
-  if ($outcome.FabricDetected) {
-    Write-Host "Fabric Loader dialog was detected during the wait." -ForegroundColor Yellow
+  if ($outcome.Type -eq "FabricDialog") {
+    Write-Host "Outcome: Fabric Loader dialog detected." -ForegroundColor Yellow
+    if ($null -ne $outcome.Window) {
+      Write-Host "Closing Fabric Loader dialog." -ForegroundColor Gray
+      if (-not $DryRun) {
+        Invoke-WindowClose -Handle $outcome.Window.Handle
+        Start-Sleep -Milliseconds 250
+        [void][MCCompatWin32]::SetForegroundWindow($outcome.Window.Handle)
+        Start-Sleep -Milliseconds 150
+        [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
+      } else {
+        Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
+      }
+    }
+  } else {
+    Write-Host ("Outcome: timeout after {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
   }
   $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
   if ($hasSessionIsolants) {
@@ -1305,7 +1330,13 @@ while ($true) {
       Write-Host ""
     }
   }
-  $answer = Read-Host $(if ($hasSessionIsolants) { "Краш не обнаружен. Вернуть изолированные моды и продолжить попытки? (y/n)" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
+  $prompt = $null
+  if ($outcome.Type -eq "FabricDialog") {
+    $prompt = $(if ($hasSessionIsolants) { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Вернуть изолированные моды и продолжить попытки? (y/n)" } else { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Продолжить попытки? (y/n)" })
+  } else {
+    $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Вернуть изолированные моды и продолжить попытки? (y/n)" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
+  }
+  $answer = Read-Host $prompt
   if ($answer -notmatch "^(y|yes|д|да)$") {
     if ($hasSessionIsolants) {
       Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
@@ -1329,6 +1360,11 @@ while ($true) {
       exit 1
     }
     $sessionIsolationCulpritByJar = @{}
+  }
+}
+} finally {
+  if ($transcriptStarted) {
+    Stop-Transcript | Out-Null
   }
 }
 

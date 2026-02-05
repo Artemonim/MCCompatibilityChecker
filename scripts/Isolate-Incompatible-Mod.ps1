@@ -2758,6 +2758,8 @@ $movedItems = New-Object System.Collections.Generic.List[object]
 $movedJarNameSet = @{}
 $baselineSignature = ""
 $baselineEvidenceKey = ""
+$activeBaselineSignature = ""
+$activeBaselineEvidenceKey = ""
 $baselineOutcome = "Unknown"
 $mcVersionForLegacy = "unknown"
 $exitCode = 0
@@ -2923,6 +2925,8 @@ try {
       -MaxLines $ErrorSignatureLineLimit `
       -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
     $baselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+    $activeBaselineSignature = $baselineSignature
+    $activeBaselineEvidenceKey = $baselineEvidenceKey
 
     if ([string]::IsNullOrWhiteSpace($baselineSignature)) {
       Write-Host "Baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
@@ -2999,6 +3003,7 @@ try {
       $pinnedJarNames = @($pinnedJarNameSet.Values)
     }
 
+    $didExponential = $false
     if ($effectiveIsolationStrategy -eq "Exponential") {
       $exponentialCandidates = @($candidateMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
       if ($exponentialCandidates.Count -gt 0) {
@@ -3011,8 +3016,91 @@ try {
           -BaselineSignature $baselineSignature `
           -BaselineEvidenceKey $baselineEvidenceKey `
           -PinnedJarNames $pinnedJarNames
+        $didExponential = $true
         $candidateMods = @($exponentialResult.Remaining)
         Write-Host ("Exponential isolation completed. Switching to linear with {0} mod(s) ({1})." -f $candidateMods.Count, $exponentialResult.Reason) -ForegroundColor Gray
+      }
+    }
+
+    if ($didExponential -and (-not $baselineSucceeded) -and $candidateMods -and $candidateMods.Count -gt 0) {
+      # * Exponential/binary probing can quick-isolate additional mods (dependencies/requirers),
+      # * which can change the observed error signature. Refresh baseline before the linear phase
+      # * to avoid falsely blaming a stable mod as "error_changed" relative to the original baseline.
+      Write-Host "Refreshing baseline signature for linear phase." -ForegroundColor Gray
+
+      $linearBaselineAttemptStart = Get-Date
+      $phase = "linear_phase_baseline_invoke_launch"
+      $linearBaselineOutcomeObj = Invoke-LaunchAttempt -LauncherTitlePattern $LauncherWindowTitlePattern `
+        -LauncherPath $LauncherExePath `
+        -LauncherArgs $LauncherArguments `
+        -AppendAutoLaunch ([bool]$UseAutoLaunch) `
+        -LauncherTimeoutSeconds $LauncherWindowTimeoutSeconds `
+        -ButtonNames $PlayButtonNames `
+        -ClickOffsetX $PlayClickOffsetX `
+        -ClickOffsetY $PlayClickOffsetY `
+        -EnableEnterFallback $UseEnterFallback `
+        -AllowBroadSearch ([bool]$EnableBroadUiSearch) `
+        -CrashPatterns $CrashWindowTitlePatterns `
+        -FabricPatterns $FabricWindowTitlePatterns `
+        -OutcomeTimeoutSeconds $OutcomeTimeoutSeconds `
+        -PollSeconds $PollIntervalSeconds `
+        -IgnoreHandleIds @()
+
+      $linearBaselineOutcome = $linearBaselineOutcomeObj.Type
+      Write-Host ("Linear phase baseline outcome: {0}" -f $linearBaselineOutcome) -ForegroundColor $(if ($linearBaselineOutcome -eq "Timeout") { "Green" } else { "Yellow" })
+
+      if ($linearBaselineOutcome -ne "Timeout") {
+        if ($null -ne $linearBaselineOutcomeObj.Window) {
+          Write-Host ("Closing outcome window: {0} ({1})" -f $linearBaselineOutcomeObj.Type, $linearBaselineOutcomeObj.Window.Title) -ForegroundColor Gray
+          $lastOutcomeHandleId = [long]$linearBaselineOutcomeObj.Window.Handle.ToInt64()
+          $phase = "linear_phase_baseline_close_outcome_window"
+          Close-OutcomeWindow -Outcome $linearBaselineOutcomeObj `
+            -DelaySeconds $CrashCloseDelaySeconds `
+            -OffsetX $CrashCloseClickOffsetX `
+            -OffsetY $CrashCloseClickOffsetY
+          if (Test-WindowStillExists -HandleId $lastOutcomeHandleId) {
+            Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $linearBaselineOutcomeObj.Type) -ForegroundColor Yellow
+            $lastOutcomeHandleId = 0
+          }
+        }
+        $phase = "linear_phase_baseline_wait_game_exit"
+        $exited = Wait-ForGameProcessesToExit -Names $GameProcessNames `
+          -StartedAfter $linearBaselineAttemptStart `
+          -TimeoutSeconds $WaitForGameExitSeconds `
+          -PollSeconds $GameExitPollSeconds
+        if (-not $exited) {
+          Write-Host ("Warning: game processes still running after {0}s. Next file move may fail due to locks." -f $WaitForGameExitSeconds) -ForegroundColor Yellow
+        }
+      } else {
+        # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
+        # ! Stop early to prevent moving a random mod to Legacy.
+        Write-Host "Warning: baseline issue not reproduced in linear phase. Stopping isolation to avoid false culprit selection." -ForegroundColor Yellow
+        $candidateMods = @()
+      }
+
+      [void](Wait-ForLauncherWindowInteractive -TitlePattern $LauncherWindowTitlePattern `
+          -CrashPatterns $CrashWindowTitlePatterns `
+          -FabricPatterns $FabricWindowTitlePatterns `
+          -PollSeconds $PollIntervalSeconds)
+
+      if ($candidateMods -and $candidateMods.Count -gt 0 -and $linearBaselineOutcome -ne "Timeout") {
+        Start-Sleep -Seconds $LogPostRunDelaySeconds
+        $phase = "linear_phase_baseline_read_logs"
+        $linearBaselineSnapshot = Get-LogSnapshot -PrimaryLogPath $LogPath `
+          -GameModsDir $GameModsDir `
+          -SkipGameLogs ([bool]$SkipGameLogs) `
+          -LogMaxAgeMinutes $LogMaxAgeMinutes `
+          -LogReadRetryCount $LogReadRetryCount `
+          -LogReadRetryDelayMs $LogReadRetryDelayMs
+        $activeBaselineSignature = Get-ErrorSignature -Lines $linearBaselineSnapshot.Lines `
+          -MaxLines $ErrorSignatureLineLimit `
+          -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+        $activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $linearBaselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+        if ([string]::IsNullOrWhiteSpace($activeBaselineSignature)) {
+          Write-Host "Linear phase baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
+        } else {
+          Write-Verbose ("Linear phase baseline signature: {0}" -f $activeBaselineSignature)
+        }
       }
     }
 
@@ -3236,8 +3324,8 @@ try {
       $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $ErrorSignatureLineLimit
 
       Write-Verbose ("Signature: {0}" -f $signature)
-      if (Test-SignatureChanged -Baseline $baselineSignature -Current $signature `
-          -BaselineEvidenceKey $baselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
+      if (Test-SignatureChanged -Baseline $activeBaselineSignature -Current $signature `
+          -BaselineEvidenceKey $activeBaselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
           -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)) {
         # * Confirm signature change to avoid log-flush noise.
         Start-Sleep -Milliseconds 750
@@ -3251,8 +3339,8 @@ try {
           -MaxLines $ErrorSignatureLineLimit `
           -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
         $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
-        if (-not (Test-SignatureChanged -Baseline $baselineSignature -Current $confirmSignature `
-              -BaselineEvidenceKey $baselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
+        if (-not (Test-SignatureChanged -Baseline $activeBaselineSignature -Current $confirmSignature `
+              -BaselineEvidenceKey $activeBaselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
               -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange))) {
           Write-Verbose "Transient signature change detected; continuing."
           continue
