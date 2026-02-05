@@ -87,6 +87,18 @@ if ($HelpFull) {
   exit $LASTEXITCODE
 }
 
-& $scriptPath @RemainingArgs
+$forwardCommon = @{}
+if ($PSBoundParameters.ContainsKey("Verbose")) {
+  $forwardCommon["Verbose"] = $true
+}
+if ($PSBoundParameters.ContainsKey("Debug")) {
+  $forwardCommon["Debug"] = $true
+}
+
+if ($null -eq $RemainingArgs) {
+  $RemainingArgs = @()
+}
+
+& $scriptPath @forwardCommon @RemainingArgs
 exit $LASTEXITCODE
 

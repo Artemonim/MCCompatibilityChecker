@@ -371,7 +371,8 @@ function New-CompatibilityArgs {
       }
     }
   }
-  return $compatArgs
+  # ! Use unary comma to prevent single-element unwrapping (avoids char-by-char splatting).
+  return ,@($compatArgs)
 }
 
 function Get-IsolationExtraArgs {
@@ -383,7 +384,8 @@ function Get-IsolationExtraArgs {
       }
     }
   }
-  return $isolateExtraArgs
+  # ! Use unary comma to prevent single-element unwrapping (avoids char-by-char splatting).
+  return ,@($isolateExtraArgs)
 }
 
 function New-IsolationParams {
@@ -494,7 +496,8 @@ function Format-IsolationParamsForDisplay {
       $prettyParams += @(("-{0} '{1}'" -f $key, $value))
     }
   }
-  return $prettyParams
+  # ! Use unary comma to prevent single-element unwrapping (avoids char-by-char splatting).
+  return ,@($prettyParams)
 }
 
 function Close-FabricDialogWindow {

@@ -4,3 +4,4 @@
 *.log
 scripts/*.json
 config.local.ini
+reports/

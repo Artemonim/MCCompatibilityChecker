@@ -366,6 +366,70 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$MaxModsToTest = 0,
 
+  # * If true, orders candidates by "library importance" before testing.
+  # * Importance is estimated by how many other mods depend on this mod (incoming edges in the JAR dependency graph).
+  # * Low-dependency mods are isolated first to avoid dependency-cascade false positives.
+  [Parameter(Mandatory = $false)]
+  [bool]$UseDependencyAwareOrdering = $true,
+
+  # * Dependency graph counting mode.
+  # * - RequiredOnly: counts only required dependencies (Fabric/Quilt depends, Forge/NeoForge mandatory=true).
+  # * - All: counts all dependency references (including suggests/recommends/conflicts).
+  [Parameter(Mandatory = $false)]
+  [ValidateSet("RequiredOnly", "All")]
+  [string]$DependencyAwareOrderingCountMode = "RequiredOnly",
+
+  # * Tier thresholds for dependent-mod counts (inclusive).
+  # * Tier 1: 0 dependents
+  # * Tier 2: <= DependencyAwareTier2MaxDependents
+  # * Tier 3: <= DependencyAwareTier3MaxDependents
+  # * Tier 4: > DependencyAwareTier3MaxDependents (core libraries)
+  [Parameter(Mandatory = $false)]
+  [int]$DependencyAwareTier2MaxDependents = 3,
+
+  [Parameter(Mandatory = $false)]
+  [int]$DependencyAwareTier3MaxDependents = 10,
+
+  # * If true, jars with unreadable/unknown metadata are treated as core libraries (isolated last).
+  [Parameter(Mandatory = $false)]
+  [bool]$DependencyAwareTreatUnknownAsCore = $true,
+
+  # * If true, dependency-aware ordering forces linear isolation (disables hybrid).
+  [Parameter(Mandatory = $false)]
+  [bool]$DependencyAwareForceLinearIsolation = $false,
+
+  # * Highest dependency-aware tier that still uses exponential/binary (0 disables).
+  [Parameter(Mandatory = $false)]
+  [int]$DependencyAwareExponentialMaxTier = 2,
+
+  # * Max dependency-aware tier allowed for quick-isolate (0 disables tier filter).
+  [Parameter(Mandatory = $false)]
+  [int]$DependencyAwareQuickIsolateMaxTier = 3,
+
+  # * If true, abort isolation when the baseline run hits dependency dialogs.
+  [Parameter(Mandatory = $false)]
+  [bool]$RespectDependencyDialogsInBaseline = $true,
+
+  # * Dependency map source for dependency-aware ordering and mod ID resolution.
+  # * - Tool: runs tools\Analyze-JarDependencyMap.ps1 and loads jar-dependency-map.json.
+  # * - File: loads dependency map JSON from DependencyMapJsonPath.
+  # * - Internal: parses jars inside this script (legacy fallback).
+  [Parameter(Mandatory = $false)]
+  [ValidateSet("Tool", "File", "Internal")]
+  [string]$DependencyMapSource = "Tool",
+
+  # * Dependency map JSON path when DependencyMapSource=File (optional).
+  [Parameter(Mandatory = $false)]
+  [string]$DependencyMapJsonPath = "",
+
+  # * Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool (optional).
+  [Parameter(Mandatory = $false)]
+  [string]$DependencyMapToolPath = "",
+
+  # * Output directory for dependency map tool reports (optional).
+  [Parameter(Mandatory = $false)]
+  [string]$DependencyMapOutDir = "",
+
   # * Array of jar file names to skip.
   [Parameter(Mandatory = $false)]
   [string[]]$ExcludeJarNames = @(),
@@ -457,6 +521,15 @@ if (-not $PSBoundParameters.ContainsKey("LauncherExePath")) {
 }
 
 $effectiveIsolationStrategy = if ($UseLinearIsolation) { "Linear" } else { "Exponential" }
+if (-not $UseLinearIsolation -and $UseDependencyAwareOrdering) {
+  if ($DependencyAwareForceLinearIsolation) {
+    $effectiveIsolationStrategy = "Linear"
+    Write-Host "Dependency-aware ordering forces linear isolation strategy." -ForegroundColor Gray
+  } else {
+    $effectiveIsolationStrategy = "Hybrid"
+    Write-Host "Dependency-aware ordering enables hybrid isolation strategy." -ForegroundColor Gray
+  }
+}
 if ($BinaryLinearThreshold -lt 1) { $BinaryLinearThreshold = 1 }
 
 # * Configured wrappers reduce parameter boilerplate and keep call sites consistent.
@@ -1260,7 +1333,9 @@ function Test-JarNameMatchesAnyId {
     [string]$JarName,
     [Parameter(Mandatory = $false)]
     [AllowEmptyCollection()]
-    [string[]]$Ids = @()
+    [string[]]$Ids = @(),
+    [Parameter(Mandatory = $false)]
+    [bool]$AllowTokenMatch = $true
   )
 
   if ([string]::IsNullOrWhiteSpace($JarName)) { return $false }
@@ -1272,29 +1347,102 @@ function Test-JarNameMatchesAnyId {
     $idLower = $id.ToLowerInvariant()
     if ($name -like ("*{0}*" -f $idLower)) { return $true }
 
-    # * Token match for cases like: missing dep "libjf-base" vs jar "libjf-3.19.3+backport.jar".
-    $tokens = $idLower -split "[-_\\.]"
-    foreach ($t in $tokens) {
-      if ($t.Length -lt 3) { continue }
-      if ($name -like ("*{0}*" -f $t)) { return $true }
+    if ($AllowTokenMatch) {
+      # * Token match for cases like: missing dep "libjf-base" vs jar "libjf-3.19.3+backport.jar".
+      $tokens = $idLower -split "[-_\\.]"
+      foreach ($t in $tokens) {
+        if ($t.Length -lt 3) { continue }
+        if ($name -like ("*{0}*" -f $t)) { return $true }
+      }
     }
   }
   return $false
 }
 
-function Find-ModJarsByIds {
+function Resolve-JarsByName {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Dirs,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$JarNames
+  )
+
+  if (-not $Dirs -or $Dirs.Count -eq 0) { return @() }
+  if (-not $JarNames -or $JarNames.Count -eq 0) { return @() }
+
+  $nameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($name in $JarNames) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $null = $nameSet.Add([string]$name)
+  }
+  if ($nameSet.Count -eq 0) { return @() }
+
+  $resolved = New-Object System.Collections.Generic.List[object]
+  foreach ($dir in $Dirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    $jars = Get-ChildItem -LiteralPath $dir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+    foreach ($jar in $jars) {
+      if ($nameSet.Contains($jar.Name)) {
+        $resolved.Add($jar) | Out-Null
+      }
+    }
+  }
+
+  if ($resolved.Count -eq 0) { return @() }
+  return ,@($resolved.ToArray() | Sort-Object -Property FullName -Unique)
+}
+
+function Get-ModJarsByIdsFromDependencyMap {
   <#
   .SYNOPSIS
-  Finds jar files that provide the given mod IDs.
+  Resolves mod IDs to jar files using the prebuilt dependency map (if available).
   #>
   param(
     [Parameter(Mandatory = $true)]
-    [string]$ModsDir,
+    [string[]]$Dirs,
     [Parameter(Mandatory = $true)]
     [string[]]$ModIds
   )
 
   if (-not $ModIds -or $ModIds.Count -eq 0) { return @() }
+  if (-not $Dirs -or $Dirs.Count -eq 0) { return @() }
+  if (-not $script:dependencyMapByModId -or $script:dependencyMapByModId.Count -eq 0) { return @() }
+
+  $jarNames = New-Object System.Collections.Generic.List[string]
+  foreach ($id in $ModIds) {
+    if ([string]::IsNullOrWhiteSpace($id)) { continue }
+    $key = $id.ToLowerInvariant()
+    if (-not $script:dependencyMapByModId.ContainsKey($key)) { continue }
+    foreach ($name in $script:dependencyMapByModId[$key]) {
+      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+      $jarNames.Add([string]$name) | Out-Null
+    }
+  }
+
+  if ($jarNames.Count -eq 0) { return @() }
+  return Resolve-JarsByName -Dirs $Dirs -JarNames $jarNames
+}
+
+function Find-ModJarsByIds {
+  <#
+  .SYNOPSIS
+  Finds jar files that provide the given mod IDs in specified directories.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Dirs,
+    [Parameter(Mandatory = $true)]
+    [string[]]$ModIds
+  )
+
+  if (-not $ModIds -or $ModIds.Count -eq 0) { return @() }
+  if (-not $Dirs -or $Dirs.Count -eq 0) { return @() }
+
+  $fromDependencyMap = Get-ModJarsByIdsFromDependencyMap -Dirs $Dirs -ModIds $ModIds
+  if ($fromDependencyMap -and $fromDependencyMap.Count -gt 0) {
+    return ,@($fromDependencyMap | Sort-Object -Property FullName -Unique)
+  }
 
   $idSet = @{}
   foreach ($id in $ModIds) {
@@ -1302,19 +1450,23 @@ function Find-ModJarsByIds {
   }
 
   $foundJars = New-Object System.Collections.Generic.List[object]
-  $jars = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
-  foreach ($jar in $jars) {
-    $jarIds = Get-FabricModIdsFromJar -JarPath $jar.FullName
-    if (-not $jarIds) { continue }
-    foreach ($jarId in $jarIds) {
-      if ($idSet.ContainsKey($jarId.ToLowerInvariant())) {
-        $foundJars.Add($jar)
-        break
+  foreach ($dir in $Dirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    $jars = Get-ChildItem -LiteralPath $dir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+    foreach ($jar in $jars) {
+      $jarIds = Get-FabricModIdsFromJar -JarPath $jar.FullName
+      if (-not $jarIds) { continue }
+      foreach ($jarId in $jarIds) {
+        if ($idSet.ContainsKey($jarId.ToLowerInvariant())) {
+          $foundJars.Add($jar)
+          break
+        }
       }
     }
   }
 
-  return ,$foundJars.ToArray()
+  if ($foundJars.Count -eq 0) { return @() }
+  return ,@($foundJars.ToArray() | Sort-Object -Property FullName -Unique)
 }
 
 function Find-ModJarsByIdsBestEffort {
@@ -1324,28 +1476,790 @@ function Find-ModJarsByIdsBestEffort {
   #>
   param(
     [Parameter(Mandatory = $true)]
-    [string]$ModsDir,
+    [string[]]$Dirs,
     [Parameter(Mandatory = $true)]
-    [string[]]$ModIds
+    [string[]]$ModIds,
+    [Parameter(Mandatory = $false)]
+    [bool]$AllowTokenFallback = $true
   )
 
   if (-not $ModIds -or $ModIds.Count -eq 0) { return @() }
+  if (-not $Dirs -or $Dirs.Count -eq 0) { return @() }
 
-  $byMetadata = Find-ModJarsByIds -ModsDir $ModsDir -ModIds $ModIds
+  $byMetadata = Find-ModJarsByIds -Dirs $Dirs -ModIds $ModIds
   if ($byMetadata -and $byMetadata.Count -gt 0) {
     return ,@($byMetadata | Sort-Object -Property FullName -Unique)
   }
 
   # * Fallback: match jar filenames against the ids/tokens (for edge cases where fabric.mod.json is missing/unreadable).
   $matched = New-Object System.Collections.Generic.List[object]
-  $jars = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
-  foreach ($jar in $jars) {
-    if (Test-JarNameMatchesAnyId -JarName $jar.Name -Ids $ModIds) {
-      $matched.Add($jar)
+  foreach ($dir in $Dirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    $jars = Get-ChildItem -LiteralPath $dir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+    foreach ($jar in $jars) {
+      if (Test-JarNameMatchesAnyId -JarName $jar.Name -Ids $ModIds -AllowTokenMatch $AllowTokenFallback) {
+        $matched.Add($jar)
+      }
     }
   }
   if ($matched.Count -eq 0) { return @() }
   return ,@($matched.ToArray() | Sort-Object -Property FullName -Unique)
+}
+
+# * Reads a text entry from a jar (zip) without extracting.
+function Get-JarZipEntryText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.IO.Compression.ZipArchive]$Zip,
+    [Parameter(Mandatory = $true)]
+    [string]$EntryPath
+  )
+
+  $entry = $Zip.Entries | Where-Object { $_.FullName -eq $EntryPath } | Select-Object -First 1
+  if (-not $entry) {
+    return $null
+  }
+
+  $stream = $null
+  $reader = $null
+  try {
+    $stream = $entry.Open()
+    $reader = [System.IO.StreamReader]::new($stream)
+    return $reader.ReadToEnd()
+  } finally {
+    if ($reader) { $reader.Dispose() }
+    if ($stream) { $stream.Dispose() }
+  }
+}
+
+function Get-FabricDependencyRecordsFromModJson {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$ModJson
+  )
+
+  $deps = New-Object System.Collections.Generic.List[object]
+  $depBlocks = @("depends", "suggests", "recommends", "breaks", "conflicts")
+  foreach ($block in $depBlocks) {
+    if (-not ($ModJson.PSObject.Properties.Name -contains $block)) { continue }
+    $blockValue = $ModJson.$block
+    if ($null -eq $blockValue) { continue }
+
+    if ($blockValue -is [pscustomobject]) {
+      foreach ($prop in $blockValue.PSObject.Properties) {
+        $depId = [string]$prop.Name
+        if (-not [string]::IsNullOrWhiteSpace($depId)) {
+          $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+        }
+      }
+      continue
+    }
+
+    if ($blockValue -is [System.Collections.IEnumerable] -and -not ($blockValue -is [string])) {
+      foreach ($item in $blockValue) {
+        if ($item -is [string]) {
+          $depId = [string]$item
+          if (-not [string]::IsNullOrWhiteSpace($depId)) {
+            $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+          }
+        } elseif ($item -is [pscustomobject]) {
+          $depId = ""
+          if ($item.PSObject.Properties.Name -contains "id") {
+            $depId = [string]$item.id
+          }
+          if (-not [string]::IsNullOrWhiteSpace($depId)) {
+            $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+          }
+        }
+      }
+    }
+  }
+
+  return ,@($deps.ToArray())
+}
+
+function Get-QuiltDependencyRecordsFromLoader {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$Loader
+  )
+
+  $deps = New-Object System.Collections.Generic.List[object]
+  $depBlocks = @("depends", "suggests", "recommends", "breaks", "conflicts")
+  foreach ($block in $depBlocks) {
+    if (-not ($Loader.PSObject.Properties.Name -contains $block)) { continue }
+    $blockValue = $Loader.$block
+    if ($null -eq $blockValue) { continue }
+
+    if ($blockValue -is [System.Collections.IEnumerable] -and -not ($blockValue -is [string])) {
+      foreach ($item in $blockValue) {
+        if ($item -is [pscustomobject]) {
+          $depId = ""
+          if ($item.PSObject.Properties.Name -contains "id") {
+            $depId = [string]$item.id
+          }
+          if (-not [string]::IsNullOrWhiteSpace($depId)) {
+            $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+          }
+        }
+      }
+    }
+  }
+
+  return ,@($deps.ToArray())
+}
+
+function ConvertFrom-ForgeToml {
+  <#
+  .SYNOPSIS
+  Parses mods.toml / neoforge.mods.toml to extract mod ids and dependency blocks.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$TomlText
+  )
+
+  $mods = New-Object System.Collections.Generic.List[object]
+  $dependencies = New-Object System.Collections.Generic.List[object]
+  $currentSection = ""
+  $currentMod = $null
+  $currentDep = $null
+
+  $lines = $TomlText -split "(`r`n|`n|`r)"
+  foreach ($line in $lines) {
+    $trim = $line.Trim()
+    if ([string]::IsNullOrWhiteSpace($trim)) { continue }
+
+    if ($trim -match '^\[\[mods\]\]') {
+      if ($currentMod) {
+        $mods.Add($currentMod) | Out-Null
+      }
+      $currentMod = [ordered]@{
+        ModId = ""
+      }
+      $currentSection = "mods"
+      continue
+    }
+
+    if ($trim -match '^\[\[dependencies\.([^\]]+)\]\]') {
+      if ($currentDep) {
+        $dependencies.Add($currentDep) | Out-Null
+      }
+      $currentDep = [ordered]@{
+        OwnerModId = [string]$Matches[1]
+        DependencyId = ""
+        Mandatory = $null
+      }
+      $currentSection = "dependencies"
+      continue
+    }
+
+    if ($currentSection -eq "mods" -and $currentMod) {
+      if ($trim -match '^modId\s*=\s*"(.*)"') {
+        $currentMod.ModId = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^modId\s*=\s*'(.*)'") {
+        $currentMod.ModId = [string]$Matches[1]
+        continue
+      }
+    }
+
+    if ($currentSection -eq "dependencies" -and $currentDep) {
+      if ($trim -match '^modId\s*=\s*"(.*)"') {
+        $currentDep.DependencyId = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^modId\s*=\s*'(.*)'") {
+        $currentDep.DependencyId = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match '^mandatory\s*=\s*(true|false)') {
+        $currentDep.Mandatory = [System.Convert]::ToBoolean($Matches[1])
+        continue
+      }
+    }
+  }
+
+  if ($currentMod) {
+    $mods.Add($currentMod) | Out-Null
+  }
+  if ($currentDep) {
+    $dependencies.Add($currentDep) | Out-Null
+  }
+
+  return [pscustomobject]@{
+    Mods = $mods
+    Dependencies = $dependencies
+  }
+}
+
+function Get-JarDependencyInfo {
+  <#
+  .SYNOPSIS
+  Extracts mod ids provided by a jar and dependency edges declared in its metadata.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarPath
+  )
+
+  if (-not (Test-Path -LiteralPath $JarPath)) {
+    return $null
+  }
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = $null
+  try {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+
+    $fabricText = Get-JarZipEntryText -Zip $zip -EntryPath "fabric.mod.json"
+    if ($fabricText) {
+      $modJson = $null
+      try {
+        $modJson = $fabricText | ConvertFrom-Json -ErrorAction Stop
+      } catch {
+        return $null
+      }
+
+      $mainId = ""
+      if ($modJson.PSObject.Properties.Name -contains "id") {
+        $mainId = [string]$modJson.id
+      }
+      if ([string]::IsNullOrWhiteSpace($mainId)) {
+        $mainId = [System.IO.Path]::GetFileNameWithoutExtension($JarPath)
+      }
+
+      $provided = New-Object System.Collections.Generic.List[string]
+      if (-not [string]::IsNullOrWhiteSpace($mainId)) {
+        $provided.Add($mainId) | Out-Null
+      }
+      if ($modJson.PSObject.Properties.Name -contains "provides" -and $null -ne $modJson.provides) {
+        if ($modJson.provides -is [string]) {
+          $v = [string]$modJson.provides
+          if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+        } elseif ($modJson.provides -is [System.Collections.IDictionary]) {
+          foreach ($key in $modJson.provides.Keys) {
+            $v = [string]$key
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+          }
+        } elseif ($modJson.provides -is [pscustomobject]) {
+          foreach ($prop in $modJson.provides.PSObject.Properties) {
+            $v = [string]$prop.Name
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+          }
+        } elseif ($modJson.provides -is [System.Collections.IEnumerable]) {
+          foreach ($p in $modJson.provides) {
+            $v = [string]$p
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+          }
+        }
+      }
+
+      $edges = New-Object System.Collections.Generic.List[object]
+      $depRecords = @(Get-FabricDependencyRecordsFromModJson -ModJson $modJson)
+      foreach ($dep in $depRecords) {
+        $depId = [string]$dep.DependencyId
+        if ([string]::IsNullOrWhiteSpace($depId)) { continue }
+        $edges.Add([pscustomobject]@{
+            FromModId = $mainId
+            DependencyId = $depId
+            IsRequired = ([string]$dep.Kind -eq "depends")
+          }) | Out-Null
+      }
+
+      return [pscustomobject]@{
+        Loader = "Fabric"
+        ProvidedModIds = @($provided.ToArray())
+        DependencyEdges = @($edges.ToArray())
+      }
+    }
+
+    $quiltText = Get-JarZipEntryText -Zip $zip -EntryPath "quilt.mod.json"
+    if ($quiltText) {
+      $modJson = $null
+      try {
+        $modJson = $quiltText | ConvertFrom-Json -ErrorAction Stop
+      } catch {
+        return $null
+      }
+
+      $loader = $modJson.quilt_loader
+      if ($null -eq $loader) {
+        return $null
+      }
+
+      $mainId = ""
+      if ($loader.PSObject.Properties.Name -contains "id") {
+        $mainId = [string]$loader.id
+      }
+      if ([string]::IsNullOrWhiteSpace($mainId)) {
+        $mainId = [System.IO.Path]::GetFileNameWithoutExtension($JarPath)
+      }
+
+      $provided = New-Object System.Collections.Generic.List[string]
+      if (-not [string]::IsNullOrWhiteSpace($mainId)) {
+        $provided.Add($mainId) | Out-Null
+      }
+      if ($loader.PSObject.Properties.Name -contains "provides" -and $null -ne $loader.provides) {
+        if ($loader.provides -is [string]) {
+          $v = [string]$loader.provides
+          if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+        } elseif ($loader.provides -is [System.Collections.IDictionary]) {
+          foreach ($key in $loader.provides.Keys) {
+            $v = [string]$key
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+          }
+        } elseif ($loader.provides -is [pscustomobject]) {
+          foreach ($prop in $loader.provides.PSObject.Properties) {
+            $v = [string]$prop.Name
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+          }
+        } elseif ($loader.provides -is [System.Collections.IEnumerable]) {
+          foreach ($p in $loader.provides) {
+            $v = [string]$p
+            if (-not [string]::IsNullOrWhiteSpace($v)) { $provided.Add($v) | Out-Null }
+          }
+        }
+      }
+
+      $edges = New-Object System.Collections.Generic.List[object]
+      $depRecords = @(Get-QuiltDependencyRecordsFromLoader -Loader $loader)
+      foreach ($dep in $depRecords) {
+        $depId = [string]$dep.DependencyId
+        if ([string]::IsNullOrWhiteSpace($depId)) { continue }
+        $edges.Add([pscustomobject]@{
+            FromModId = $mainId
+            DependencyId = $depId
+            IsRequired = ([string]$dep.Kind -eq "depends")
+          }) | Out-Null
+      }
+
+      return [pscustomobject]@{
+        Loader = "Quilt"
+        ProvidedModIds = @($provided.ToArray())
+        DependencyEdges = @($edges.ToArray())
+      }
+    }
+
+    $tomlText = Get-JarZipEntryText -Zip $zip -EntryPath "META-INF/mods.toml"
+    $loaderName = "Forge"
+    if (-not $tomlText) {
+      $tomlText = Get-JarZipEntryText -Zip $zip -EntryPath "META-INF/neoforge.mods.toml"
+      if ($tomlText) {
+        $loaderName = "NeoForge"
+      }
+    }
+
+    if ($tomlText) {
+      $parsed = ConvertFrom-ForgeToml -TomlText $tomlText
+
+      $provided = New-Object System.Collections.Generic.List[string]
+      foreach ($mod in $parsed.Mods) {
+        $id = [string]$mod.ModId
+        if (-not [string]::IsNullOrWhiteSpace($id)) {
+          $provided.Add($id) | Out-Null
+        }
+      }
+
+      $edges = New-Object System.Collections.Generic.List[object]
+      foreach ($dep in $parsed.Dependencies) {
+        $fromId = [string]$dep.OwnerModId
+        if ([string]::IsNullOrWhiteSpace($fromId)) {
+          $fromId = [System.IO.Path]::GetFileNameWithoutExtension($JarPath)
+        }
+        $depId = [string]$dep.DependencyId
+        if ([string]::IsNullOrWhiteSpace($depId)) { continue }
+        $edges.Add([pscustomobject]@{
+            FromModId = $fromId
+            DependencyId = $depId
+            IsRequired = ([bool]($dep.Mandatory -eq $true))
+          }) | Out-Null
+      }
+
+      return [pscustomobject]@{
+        Loader = $loaderName
+        ProvidedModIds = @($provided.ToArray())
+        DependencyEdges = @($edges.ToArray())
+      }
+    }
+
+    return $null
+  } catch {
+    return $null
+  } finally {
+    if ($zip) { $zip.Dispose() }
+  }
+}
+
+function Get-DependentModCountsByJarName {
+  <#
+  .SYNOPSIS
+  Builds a map jarName->dependentCount where dependentCount is how many other mods reference this mod id.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModsDir,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("RequiredOnly", "All")]
+    [string]$CountMode = "RequiredOnly"
+  )
+
+  $jarFiles = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+  if (-not $jarFiles -or $jarFiles.Count -eq 0) {
+    return @{}
+  }
+
+  $incomingById = @{}
+  $providedIdsByJar = @{}
+
+  foreach ($jar in $jarFiles) {
+    $jarKey = $jar.Name.ToLowerInvariant()
+    $info = Get-JarDependencyInfo -JarPath $jar.FullName
+    if ($null -eq $info) {
+      $providedIdsByJar[$jarKey] = @()
+      continue
+    }
+
+    $provided = @($info.ProvidedModIds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $providedLower = @($provided | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
+    $providedIdsByJar[$jarKey] = $providedLower
+
+    $edges = @($info.DependencyEdges)
+    foreach ($edge in $edges) {
+      if ($null -eq $edge) { continue }
+      $depId = [string]$edge.DependencyId
+      $fromId = [string]$edge.FromModId
+      if ([string]::IsNullOrWhiteSpace($depId) -or [string]::IsNullOrWhiteSpace($fromId)) { continue }
+
+      $isRequired = [bool]$edge.IsRequired
+      if ($CountMode -eq "RequiredOnly" -and (-not $isRequired)) { continue }
+
+      $depKey = $depId.ToLowerInvariant()
+      $fromKey = $fromId.ToLowerInvariant()
+      if (-not $incomingById.ContainsKey($depKey)) {
+        $incomingById[$depKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      }
+      $null = $incomingById[$depKey].Add($fromKey)
+    }
+  }
+
+  $result = @{}
+  foreach ($jarKey in $providedIdsByJar.Keys) {
+    $ids = @($providedIdsByJar[$jarKey])
+    if (-not $ids -or $ids.Count -eq 0) {
+      $result[$jarKey] = [pscustomobject]@{
+        DependentCount = -1
+        Known = $false
+        ProvidedModIds = @()
+      }
+      continue
+    }
+
+    $max = 0
+    foreach ($id in $ids) {
+      if ($incomingById.ContainsKey($id)) {
+        $count = $incomingById[$id].Count
+        if ($count -gt $max) { $max = $count }
+      }
+    }
+    $result[$jarKey] = [pscustomobject]@{
+      DependentCount = [int]$max
+      Known = $true
+      ProvidedModIds = @($ids)
+    }
+  }
+
+  return $result
+}
+
+function Read-DependencyMapJson {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JsonPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($JsonPath)) { return $null }
+  if (-not (Test-Path -LiteralPath $JsonPath)) { return $null }
+
+  try {
+    $raw = Get-Content -LiteralPath $JsonPath -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return ($raw | ConvertFrom-Json -ErrorAction Stop)
+  } catch {
+    Write-Host ("Warning: failed to read dependency map JSON: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    return $null
+  }
+}
+
+function Initialize-DependencyMapCache {
+  param(
+    [Parameter(Mandatory = $false)]
+    [pscustomobject]$DependencyMap
+  )
+
+  $script:dependencyMapByModId = @{}
+  $script:dependencyMapProvidedIdsByJar = @{}
+  $script:dependencyMapScanPath = ""
+
+  if ($null -eq $DependencyMap) { return }
+
+  if ($DependencyMap.PSObject.Properties.Name -contains "Scan") {
+    $scanPath = [string]$DependencyMap.Scan.Path
+    if (-not [string]::IsNullOrWhiteSpace($scanPath)) {
+      $script:dependencyMapScanPath = $scanPath
+    }
+  }
+
+  $mods = @($DependencyMap.Mods)
+  foreach ($mod in $mods) {
+    if ($null -eq $mod) { continue }
+    $jarName = [string]$mod.JarName
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+
+    $jarKey = $jarName.ToLowerInvariant()
+    if (-not $script:dependencyMapProvidedIdsByJar.ContainsKey($jarKey)) {
+      $script:dependencyMapProvidedIdsByJar[$jarKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+
+    $providedIds = New-Object System.Collections.Generic.List[string]
+    if ($mod.PSObject.Properties.Name -contains "ModId") {
+      $modId = [string]$mod.ModId
+      if (-not [string]::IsNullOrWhiteSpace($modId)) {
+        $providedIds.Add($modId) | Out-Null
+      }
+    }
+    if ($mod.PSObject.Properties.Name -contains "ProvidedModIds") {
+      foreach ($item in $mod.ProvidedModIds) {
+        $value = [string]$item
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+          $providedIds.Add($value) | Out-Null
+        }
+      }
+    }
+
+    $uniqueProvided = @($providedIds.ToArray() | Sort-Object -Unique)
+    foreach ($id in $uniqueProvided) {
+      $null = $script:dependencyMapProvidedIdsByJar[$jarKey].Add($id)
+      $key = $id.ToLowerInvariant()
+      if (-not $script:dependencyMapByModId.ContainsKey($key)) {
+        $script:dependencyMapByModId[$key] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      }
+      $null = $script:dependencyMapByModId[$key].Add($jarName)
+    }
+  }
+}
+
+function Get-DependentModCountsFromDependencyMap {
+  <#
+  .SYNOPSIS
+  Builds a jarName->dependentCount map from an external dependency map.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$DependencyMap,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("RequiredOnly", "All")]
+    [string]$CountMode = "RequiredOnly"
+  )
+
+  if ($null -eq $DependencyMap) { return @{} }
+
+  $incomingById = @{}
+  $providedByJar = @{}
+
+  $edges = @($DependencyMap.Dependencies)
+  foreach ($edge in $edges) {
+    if ($null -eq $edge) { continue }
+    $depId = [string]$edge.DependencyId
+    $fromId = [string]$edge.FromModId
+    if ([string]::IsNullOrWhiteSpace($depId) -or [string]::IsNullOrWhiteSpace($fromId)) { continue }
+
+    $isRequired = [bool]$edge.IsRequired
+    if ($CountMode -eq "RequiredOnly" -and (-not $isRequired)) { continue }
+
+    $depKey = $depId.ToLowerInvariant()
+    if (-not $incomingById.ContainsKey($depKey)) {
+      $incomingById[$depKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    $null = $incomingById[$depKey].Add($fromId)
+  }
+
+  $mods = @($DependencyMap.Mods)
+  foreach ($mod in $mods) {
+    if ($null -eq $mod) { continue }
+    $jarName = [string]$mod.JarName
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $jarKey = $jarName.ToLowerInvariant()
+    if (-not $providedByJar.ContainsKey($jarKey)) {
+      $providedByJar[$jarKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+
+    if ($mod.PSObject.Properties.Name -contains "ModId") {
+      $modId = [string]$mod.ModId
+      if (-not [string]::IsNullOrWhiteSpace($modId)) {
+        $null = $providedByJar[$jarKey].Add($modId)
+      }
+    }
+    if ($mod.PSObject.Properties.Name -contains "ProvidedModIds") {
+      foreach ($item in $mod.ProvidedModIds) {
+        $value = [string]$item
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+          $null = $providedByJar[$jarKey].Add($value)
+        }
+      }
+    }
+  }
+
+  $result = @{}
+  foreach ($jarKey in $providedByJar.Keys) {
+    $ids = @($providedByJar[$jarKey])
+    if (-not $ids -or $ids.Count -eq 0) {
+      $result[$jarKey] = [pscustomobject]@{
+        DependentCount = -1
+        Known = $false
+        ProvidedModIds = @()
+      }
+      continue
+    }
+
+    $max = 0
+    foreach ($id in $ids) {
+      $idKey = [string]$id
+      if ($incomingById.ContainsKey($idKey.ToLowerInvariant())) {
+        $count = $incomingById[$idKey.ToLowerInvariant()].Count
+        if ($count -gt $max) { $max = $count }
+      }
+    }
+    $result[$jarKey] = [pscustomobject]@{
+      DependentCount = [int]$max
+      Known = $true
+      ProvidedModIds = @($ids)
+    }
+  }
+
+  return $result
+}
+
+function Get-DependencyMapFromSource {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScanPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($DependencyMapSource)) {
+    return $null
+  }
+
+  if ($DependencyMapSource -eq "Internal") {
+    return $null
+  }
+
+  if ($DependencyMapSource -eq "File") {
+    $jsonPath = $DependencyMapJsonPath
+    if ([string]::IsNullOrWhiteSpace($jsonPath)) {
+      $jsonPath = Join-Path -Path $PSScriptRoot -ChildPath "..\reports\jar-dependency-map.json"
+    }
+    return Read-DependencyMapJson -JsonPath $jsonPath
+  }
+
+  $toolPath = $DependencyMapToolPath
+  if ([string]::IsNullOrWhiteSpace($toolPath)) {
+    $toolPath = Join-Path -Path $PSScriptRoot -ChildPath "..\tools\Analyze-JarDependencyMap.ps1"
+  }
+  if (-not (Test-Path -LiteralPath $toolPath)) {
+    Write-Host ("Warning: dependency map tool not found: {0}" -f $toolPath) -ForegroundColor Yellow
+    return $null
+  }
+
+  $outDir = $DependencyMapOutDir
+  if ([string]::IsNullOrWhiteSpace($outDir)) {
+    $outDir = Join-Path -Path $PSScriptRoot -ChildPath "..\reports"
+  }
+  New-DirectoryIfMissing -DirPath $outDir
+
+  try {
+    & $toolPath -ScanPath $ScanPath -NoRecurse -WriteFiles:$true -OutDir $outDir -TopDependencies 0
+  } catch {
+    Write-Host ("Warning: dependency map tool failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    return $null
+  }
+
+  $jsonPath = Join-Path -Path $outDir -ChildPath "jar-dependency-map.json"
+  return Read-DependencyMapJson -JsonPath $jsonPath
+}
+
+# * Computes dependency-aware tier from dependent count and known flag.
+function Get-DependencyAwareTier {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$DependentCount,
+    [Parameter(Mandatory = $true)]
+    [bool]$Known
+  )
+
+  if (-not $Known) { return 4 }
+  if ($DependentCount -le 0) { return 1 }
+  if ($DependentCount -le $DependencyAwareTier2MaxDependents) { return 2 }
+  if ($DependentCount -le $DependencyAwareTier3MaxDependents) { return 3 }
+  return 4
+}
+
+# * Filters quick-isolate candidates to avoid core-tier mods early.
+function Select-QuickIsolateJarsByTier {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [object[]]$Jars,
+    [Parameter(Mandatory = $false)]
+    [string]$Context = ""
+  )
+
+  if (-not $Jars -or $Jars.Count -eq 0) { return @() }
+  if (-not $UseDependencyAwareOrdering) { return ,@($Jars) }
+  $effectiveMaxTier = $DependencyAwareQuickIsolateMaxTier
+  if ($script:currentDependencyTier -gt 0 -and $effectiveMaxTier -gt 0) {
+    $effectiveMaxTier = [Math]::Min($effectiveMaxTier, $script:currentDependencyTier)
+  }
+  if ($effectiveMaxTier -le 0) { return ,@($Jars) }
+  if (-not $script:dependencyAwareTierByJarName -or $script:dependencyAwareTierByJarName.Count -eq 0) {
+    return ,@($Jars)
+  }
+
+  $allowed = New-Object System.Collections.Generic.List[object]
+  $skipped = New-Object System.Collections.Generic.List[string]
+  foreach ($jar in $Jars) {
+    if ($null -eq $jar) { continue }
+    $jarName = [string]$jar.Name
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $key = $jarName.ToLowerInvariant()
+
+    $tier = 4
+    if ($script:dependencyAwareTierByJarName.ContainsKey($key)) {
+      $tier = [int]$script:dependencyAwareTierByJarName[$key]
+    } elseif (-not [bool]$DependencyAwareTreatUnknownAsCore) {
+      $tier = 1
+    }
+
+    if ($tier -le $effectiveMaxTier) {
+      $allowed.Add($jar) | Out-Null
+    } else {
+      $skipped.Add($jarName) | Out-Null
+    }
+  }
+
+  if ($skipped.Count -gt 0) {
+    $contextLabel = if ([string]::IsNullOrWhiteSpace($Context)) { "" } else { " ({0})" -f $Context }
+    $skippedLabel = ($skipped | Sort-Object -Unique) -join ", "
+    Write-Host ("Quick-isolate skipped core-tier mod(s){0}: {1}" -f $contextLabel, $skippedLabel) -ForegroundColor Gray
+  }
+
+  return ,@($allowed.ToArray())
+}
+
+function Get-PinnedJarNameKey {
+  if (-not $pinnedJarNameSet -or $pinnedJarNameSet.Count -eq 0) { return "" }
+  return (($pinnedJarNameSet.Keys | Sort-Object) -join "|")
 }
 
 function ConvertTo-NormalizedLogLine {
@@ -1493,9 +2407,59 @@ function Test-SignatureChanged {
   return -not [string]::Equals($Baseline, $Current, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-FabricDependencyDialogInfo {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines
+  )
+
+  $requiringRaw = @(Get-FabricRequiringModIds -Lines $Lines)
+  $requiringArr = @($requiringRaw |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Sort-Object -Unique)
+
+  $missingRaw = @(Get-FabricMissingDependencyIds -Lines $Lines)
+  $missingArr = @($missingRaw |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Sort-Object -Unique)
+
+  return [pscustomobject]@{
+    RequiringModIds = @($requiringArr)
+    MissingDepIds = @($missingArr)
+    HasMissingDeps = ($missingArr.Count -gt 0)
+  }
+}
+
+function Test-DependencyDialogBlock {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Context,
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines
+  )
+
+  if (-not [bool]$RespectDependencyDialogsInBaseline) { return $false }
+
+  $info = Get-FabricDependencyDialogInfo -Lines $Lines
+  if (-not $info.HasMissingDeps) { return $false }
+
+  $reqLabel = if ($info.RequiringModIds.Count -gt 0) { $info.RequiringModIds -join ", " } else { "<none>" }
+  $missLabel = if ($info.MissingDepIds.Count -gt 0) { $info.MissingDepIds -join ", " } else { "<none>" }
+  Write-Host ("Dependency dialog detected during {0}. Missing deps: {1}; Requiring mods: {2}" -f $Context, $missLabel, $reqLabel) -ForegroundColor Yellow
+
+  $script:blockedByDependency = $true
+  $script:blockedDependencyMissing = @($info.MissingDepIds)
+  $script:blockedDependencyRequiring = @($info.RequiringModIds)
+  $script:blockedDependencyContext = $Context
+  return $true
+}
+
 function Move-ToQuarantine {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
     [string]$SourcePath,
     [Parameter(Mandatory = $true)]
     [string]$DestDir,
@@ -1507,7 +2471,7 @@ function Move-ToQuarantine {
     [int]$DelayMs
   )
 
-  if (-not (Test-Path -LiteralPath $SourcePath)) {
+  if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) {
     return $null
   }
   if ($IsDryRun) {
@@ -1533,6 +2497,7 @@ function Move-ToQuarantine {
 function Restore-FromQuarantine {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
     [string]$SourcePath,
     [Parameter(Mandatory = $true)]
     [string]$DestDir,
@@ -1542,7 +2507,7 @@ function Restore-FromQuarantine {
     [bool]$AllowOverwrite
   )
 
-  if (-not (Test-Path -LiteralPath $SourcePath)) {
+  if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) {
     return $null
   }
   if ($IsDryRun) {
@@ -1635,7 +2600,7 @@ function Update-QuarantineState {
     $key = $jarName.ToLowerInvariant()
     if ($desiredSet.ContainsKey($key)) { continue }
 
-    if ($null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
+    if (-not [string]::IsNullOrWhiteSpace($item.GameQuarantine) -and (Test-Path -LiteralPath $item.GameQuarantine)) {
       $restoreGame = Restore-FromQuarantine -SourcePath $item.GameQuarantine `
         -DestDir $GameModsDir `
         -IsDryRun $false `
@@ -1644,7 +2609,7 @@ function Update-QuarantineState {
         $item.GameQuarantine = $null
       }
     }
-    if ($useStorage -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
+    if ($useStorage -and -not [string]::IsNullOrWhiteSpace($item.StorageQuarantine) -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
       $restoreStorage = Restore-FromQuarantine -SourcePath $item.StorageQuarantine `
         -DestDir $StorageModsDir `
         -IsDryRun $false `
@@ -1903,7 +2868,16 @@ function Invoke-FabricDependencyRecovery {
 
   if ($requiringArr.Count -gt 0) {
     Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($requiringArr -join ", ")) -ForegroundColor Cyan
-    $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $requiringArr
+    $searchDirs = @($GameModsDir)
+    if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+    if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+    $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $requiringArr -AllowTokenFallback:$false
+    $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency dialog"
+    if ($culpritJars -and $culpritJars.Count -gt 0 -and $ProtectedJarNameSet.Count -gt 0) {
+      $culpritJars = @($culpritJars | Where-Object {
+          -not $ProtectedJarNameSet.ContainsKey($_.Name.ToLowerInvariant())
+        })
+    }
     if ($culpritJars -and $culpritJars.Count -gt 0) {
       foreach ($cj in $culpritJars) {
         if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
@@ -1914,12 +2888,13 @@ function Invoke-FabricDependencyRecovery {
         if ($null -ne $qDest) {
           [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null)
           $PinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+          $script:pinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
           $pinnedAdded.Add($cj.Name)
           $changes = $true
         }
       }
     } else {
-      Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($requiringArr -join ", ")) -ForegroundColor Yellow
+      Write-Host ("Warning: could not resolve or filtered requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($requiringArr -join ", ")) -ForegroundColor Yellow
     }
   }
 
@@ -2165,6 +3140,509 @@ function Invoke-ExponentialIsolation {
   }
 }
 
+# * Refreshes the baseline signature before linear isolation phases.
+function Invoke-LinearBaselineRefresh {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$PhasePrefix
+  )
+
+  Write-Host ("Refreshing baseline signature for {0}." -f $PhasePrefix) -ForegroundColor Gray
+
+  $attemptStart = Get-Date
+  $script:phase = ("{0}_baseline_invoke_launch" -f $PhasePrefix)
+  $baselineOutcomeObj = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds @()
+
+  $baselineOutcome = $baselineOutcomeObj.Type
+  Write-Host ("{0} baseline outcome: {1}" -f $PhasePrefix, $baselineOutcome) -ForegroundColor $(if ($baselineOutcome -eq "Timeout") { "Green" } else { "Yellow" })
+
+  if ($baselineOutcome -ne "Timeout") {
+    if ($null -ne $baselineOutcomeObj.Window) {
+      $script:phase = ("{0}_baseline_close_outcome_window" -f $PhasePrefix)
+      $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $baselineOutcomeObj `
+        -DelaySeconds $CrashCloseDelaySeconds `
+        -OffsetX $CrashCloseClickOffsetX `
+        -OffsetY $CrashCloseClickOffsetY `
+        -CloseExtraFabricDialogs $false
+    }
+    $script:phase = ("{0}_baseline_wait_game_exit" -f $PhasePrefix)
+    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+  } else {
+    # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
+    # ! Stop early to prevent moving a random mod to Legacy.
+    Write-Host ("Warning: baseline issue not reproduced in {0}. Stopping isolation to avoid false culprit selection." -f $PhasePrefix) -ForegroundColor Yellow
+    Wait-ConfiguredLauncherInteractive
+    return [pscustomobject]@{
+      Outcome = $baselineOutcome
+      ShouldContinue = $false
+    }
+  }
+
+  Wait-ConfiguredLauncherInteractive
+
+  Start-Sleep -Seconds $LogPostRunDelaySeconds
+  $script:phase = ("{0}_baseline_read_logs" -f $PhasePrefix)
+  $baselineSnapshot = Get-ConfiguredLogSnapshot
+  if (Test-DependencyDialogBlock -Context ("{0} baseline" -f $PhasePrefix) -Lines $baselineSnapshot.Lines) {
+    return [pscustomobject]@{
+      Outcome = $baselineOutcome
+      ShouldContinue = $false
+    }
+  }
+  $script:activeBaselineSignature = Get-ErrorSignature -Lines $baselineSnapshot.Lines `
+    -MaxLines $ErrorSignatureLineLimit `
+    -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+  $script:activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+
+  if ([string]::IsNullOrWhiteSpace($script:activeBaselineSignature)) {
+    Write-Host ("{0} baseline signature is empty. Error change detection may be limited." -f $PhasePrefix) -ForegroundColor Yellow
+  } else {
+    Write-Verbose ("{0} baseline signature: {1}" -f $PhasePrefix, $script:activeBaselineSignature)
+  }
+
+  $script:lastBaselinePinnedKey = Get-PinnedJarNameKey
+
+  return [pscustomobject]@{
+    Outcome = $baselineOutcome
+    ShouldContinue = $true
+  }
+}
+
+# * Runs linear isolation on the provided mod list.
+function Invoke-LinearIsolation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [object[]]$Mods
+  )
+
+  if (-not $Mods -or $Mods.Count -eq 0) {
+    return [pscustomobject]@{
+      Found = $false
+      CulpritJarNames = @()
+      StopReason = ""
+    }
+  }
+
+  $attemptIndex = 0
+  foreach ($mod in $Mods) {
+    # * Mods can be moved by quick-isolate before their turn in the main loop.
+    # * Skip silently to avoid noisy "not moved" warnings and inconsistent attempt behavior.
+    if (-not (Test-Path -LiteralPath $mod.FullName)) {
+      Write-Verbose ("Skipping already removed or missing mod: {0}" -f $mod.Name)
+      continue
+    }
+    if ($movedJarNameSet.ContainsKey($mod.Name)) {
+      Write-Verbose ("Skipping already quarantined mod: {0}" -f $mod.Name)
+      continue
+    }
+
+    $attemptIndex++
+    Write-Host ("Isolation attempt {0}: removing {1}" -f $attemptIndex, $mod.Name) -ForegroundColor Cyan
+
+    $script:phase = "move_to_quarantine"
+    $gameDest = Move-ToQuarantine -SourcePath $mod.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    if ($null -eq $gameDest) {
+      Write-Verbose ("Skipping not moved (already removed or missing): {0}" -f $mod.FullName)
+      continue
+    } else {
+      Write-Verbose ("Moved: {0} -> {1}" -f $mod.Name, $gameDest)
+    }
+    $storageDest = $null
+    if ($useStorage) {
+      $storagePath = Join-Path -Path $StorageModsDir -ChildPath $mod.Name
+      if (Test-Path -LiteralPath $storagePath) {
+        $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+      }
+    }
+
+    [void](Add-MovedItemRecord -JarName $mod.Name `
+        -GameSource $mod.FullName `
+        -GameQuarantine $gameDest `
+        -StorageSource $(if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $mod.Name } else { $null }) `
+        -StorageQuarantine $storageDest)
+
+    $ignoreHandles = @()
+    if ($script:lastOutcomeHandleId -ne 0) {
+      $ignoreHandles = @($script:lastOutcomeHandleId)
+    }
+
+    $attemptStart = Get-Date
+    $script:phase = "attempt_invoke_launch"
+    $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles
+
+    Write-Host ("Outcome: {0}" -f $outcome.Type) -ForegroundColor $(if ($outcome.Type -eq "Timeout") { "Green" } else { "Yellow" })
+    if ($outcome.Type -ne "Timeout" -and $null -ne $outcome.Window) {
+      $script:phase = "attempt_close_outcome_window"
+      $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
+        -DelaySeconds $CrashCloseDelaySeconds `
+        -OffsetX $CrashCloseClickOffsetX `
+        -OffsetY $CrashCloseClickOffsetY `
+        -CloseExtraFabricDialogs $true
+    }
+    if ($outcome.Type -ne "Timeout") {
+      $script:phase = "attempt_wait_game_exit"
+      [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+    }
+
+    Wait-ConfiguredLauncherInteractive
+
+    if ($outcome.Type -eq "Timeout") {
+      return [pscustomobject]@{
+        Found = $true
+        CulpritJarNames = @($mod.Name)
+        StopReason = "success"
+      }
+    }
+
+    Start-Sleep -Seconds $LogPostRunDelaySeconds
+    $script:phase = "attempt_read_logs"
+    $snapshot = Get-ConfiguredLogSnapshot
+
+    if ($mcVersionForLegacy -eq "unknown") {
+      $script:mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
+    }
+
+    # * Fabric signals (from window or from logs). This makes behavior visible in console output.
+    $fabricIdsFromLogs = Get-FabricRequiringModIds -Lines $snapshot.Lines
+    $fabricMissingIdsFromLogs = Get-FabricMissingDependencyIds -Lines $snapshot.Lines
+    $fabricWindowNow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    if (($null -ne $fabricWindowNow) -or ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) -or ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0)) {
+      $reqText = if ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) { $fabricIdsFromLogs -join ", " } else { "" }
+      $missText = if ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0) { $fabricMissingIdsFromLogs -join ", " } else { "" }
+      if (-not [string]::IsNullOrWhiteSpace($reqText) -or -not [string]::IsNullOrWhiteSpace($missText)) {
+        Write-Host ("Fabric detected. Requiring mods: {0}; Missing deps: {1}" -f $reqText, $missText) -ForegroundColor Yellow
+      } else {
+        Write-Host "Fabric window detected." -ForegroundColor Yellow
+      }
+    }
+
+    if ($outcome.Type -eq "FabricDialog") {
+      # * Fabric dependency dialog:
+      # * - Prefer isolating the requiring mod(s) (not the missing dependency).
+      # * - If the removed jar is the missing dependency, restore it to avoid falsely blaming it.
+      $newModIds = $fabricIdsFromLogs
+      $missingDepIds = $fabricMissingIdsFromLogs
+      $newModIdsArr = @($newModIds)
+      $missingDepIdsArr = @($missingDepIds)
+
+      $removedItem = $null
+      for ($i = $movedItems.Count - 1; $i -ge 0; $i--) {
+        if ($movedItems[$i].JarName -eq $mod.Name) { $removedItem = $movedItems[$i]; break }
+      }
+      $removedJarProvides = @()
+      if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+        $removedJarProvides = Get-FabricModIdsFromJar -JarPath $removedItem.GameQuarantine
+      }
+      $removedJarProvidesArr = @($removedJarProvides)
+
+      $isLikelyRemovedDep = $false
+      if ($missingDepIdsArr.Count -gt 0) {
+        if ($removedJarProvidesArr.Count -gt 0) {
+          $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingDepIdsArr
+        }
+        if (-not $isLikelyRemovedDep) {
+          $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr
+        }
+      }
+
+      if ($isLikelyRemovedDep) {
+        Write-Host ("Fabric missing dependency '{0}' appears caused by removing '{1}'. Restoring dependency and isolating requiring mod(s)." -f ($missingDepIdsArr -join ", "), $mod.Name) -ForegroundColor Cyan
+
+        if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+          [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+          $removedItem.GameQuarantine = $null
+        }
+        if ($useStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+          [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+          $removedItem.StorageQuarantine = $null
+        }
+      }
+
+      if ($newModIdsArr.Count -gt 0) {
+        Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($newModIdsArr -join ", ")) -ForegroundColor Cyan
+        $searchDirs = @($GameModsDir)
+        if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+        if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+        $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
+        $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "fabric dialog"
+        if ($culpritJars -and $culpritJars.Count -gt 0) {
+          foreach ($cj in $culpritJars) {
+            if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
+            Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
+            $script:phase = "quick_isolate_move"
+            $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            if ($null -ne $qDest) {
+              [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null)
+              $script:pinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+            }
+          }
+        } else {
+          Write-Host ("Warning: could not resolve or filtered requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
+        }
+        Write-Host "Continuing isolation after Fabric quick-isolate..." -ForegroundColor Cyan
+        continue
+      }
+
+      if ($isLikelyRemovedDep) {
+        # * We restored the dependency; proceed with next candidate.
+        Write-Host "Continuing isolation after dependency restore..." -ForegroundColor Cyan
+        continue
+      }
+    }
+
+    $signature = Get-ErrorSignature -Lines $snapshot.Lines `
+      -MaxLines $ErrorSignatureLineLimit `
+      -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+    $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $ErrorSignatureLineLimit
+
+    Write-Verbose ("Signature: {0}" -f $signature)
+    if (Test-SignatureChanged -Baseline $activeBaselineSignature -Current $signature `
+        -BaselineEvidenceKey $activeBaselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
+        -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)) {
+      # * Confirm signature change to avoid log-flush noise.
+      Start-Sleep -Milliseconds 750
+      $confirmSnapshot = Get-ConfiguredLogSnapshot
+      $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
+        -MaxLines $ErrorSignatureLineLimit `
+        -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+      $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+      if (-not (Test-SignatureChanged -Baseline $activeBaselineSignature -Current $confirmSignature `
+            -BaselineEvidenceKey $activeBaselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
+            -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange))) {
+        Write-Verbose "Transient signature change detected; continuing."
+        continue
+      }
+
+      # * Try to identify culprit mods from Fabric dependency errors.
+      $newModIds = Get-FabricRequiringModIds -Lines $snapshot.Lines
+      $missingDepIds = Get-FabricMissingDependencyIds -Lines $snapshot.Lines
+      $newModIdsArr = @($newModIds)
+      $missingDepIdsArr = @($missingDepIds)
+
+      # * Special-case: if the "error change" is a missing dependency introduced by removing a library,
+      # * then the removed jar is NOT the culprit. Restore it and instead isolate the requiring mod(s).
+      $removedJarProvides = @()
+      $removedItem = $null
+      for ($i = $movedItems.Count - 1; $i -ge 0; $i--) {
+        if ($movedItems[$i].JarName -eq $mod.Name) { $removedItem = $movedItems[$i]; break }
+      }
+      if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+        $removedJarProvides = Get-FabricModIdsFromJar -JarPath $removedItem.GameQuarantine
+      }
+      $removedJarProvidesArr = @($removedJarProvides)
+
+      $isLikelyRemovedDep = $false
+      if ($newModIdsArr.Count -gt 0 -and $missingDepIdsArr.Count -gt 0) {
+        if ($removedJarProvidesArr.Count -gt 0) {
+          $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingDepIdsArr
+        }
+        if (-not $isLikelyRemovedDep) {
+          $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr
+        }
+      }
+
+      if ($isLikelyRemovedDep) {
+        Write-Host ("Detected missing dependency caused by removed library '{0}'. Restoring it and isolating requiring mod(s)." -f $mod.Name) -ForegroundColor Cyan
+
+        # * Restore removed dependency jar back to active mods (and storage if applicable).
+        if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+          [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+          $removedItem.GameQuarantine = $null
+        }
+        if ($useStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+          [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+          $removedItem.StorageQuarantine = $null
+        }
+
+        # * Isolate the requiring mods instead.
+        $searchDirs = @($GameModsDir)
+        if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+        if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+        $requiringJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
+        $requiringJars = Select-QuickIsolateJarsByTier -Jars $requiringJars -Context "dependency signature"
+        if ($requiringJars -and $requiringJars.Count -gt 0) {
+          $culpritJarNames = @()
+          foreach ($rj in $requiringJars) {
+            Write-Host ("Isolating requiring mod: {0}" -f $rj.Name) -ForegroundColor Cyan
+            $rDest = Move-ToQuarantine -SourcePath $rj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            $rStorageDest = $null
+            if ($useStorage) {
+              $rStoragePath = Join-Path -Path $StorageModsDir -ChildPath $rj.Name
+              if (Test-Path -LiteralPath $rStoragePath) {
+                $rStorageDest = Move-ToQuarantine -SourcePath $rStoragePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+              }
+            }
+            [void](Add-MovedItemRecord -JarName $rj.Name `
+                -GameSource $rj.FullName `
+                -GameQuarantine $rDest `
+                -StorageSource $(if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $rj.Name } else { $null }) `
+                -StorageQuarantine $rStorageDest)
+            $script:pinnedJarNameSet[$rj.Name.ToLowerInvariant()] = $rj.Name
+            $culpritJarNames += @($rj.Name)
+          }
+          return [pscustomobject]@{
+            Found = $true
+            CulpritJarNames = @($culpritJarNames)
+            StopReason = "fabric_missing_dependency"
+          }
+        }
+
+        # ! If we cannot map requiring mod IDs to jar files, do NOT blame the removed library.
+        # ! The safest behavior is to continue isolation with the library restored.
+        Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
+        continue
+      }
+
+      $movedExtra = $false
+      if ($newModIds -and $newModIds.Count -gt 0) {
+        Write-Host ("Fabric dependency error detected. Mods requiring missing deps: {0}" -f ($newModIds -join ", ")) -ForegroundColor Yellow
+        $searchDirs = @($GameModsDir)
+        if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+        if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+        $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIds -AllowTokenFallback:$false
+        $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency signature"
+        if ($culpritJars -and $culpritJars.Count -gt 0) {
+          foreach ($cj in $culpritJars) {
+            # * Skip if already moved.
+            if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
+
+            Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
+            $script:phase = "quick_isolate_move"
+            $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            if ($null -ne $qDest) {
+              [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null)
+              $script:pinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+              $movedExtra = $true
+            }
+          }
+        }
+      }
+      if ($movedExtra) {
+        # * Continue isolation with newly identified mods removed.
+        Write-Host "Continuing isolation after quick-isolate..." -ForegroundColor Cyan
+        continue
+      }
+      return [pscustomobject]@{
+        Found = $true
+        CulpritJarNames = @($mod.Name)
+        StopReason = "error_changed"
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    Found = $false
+    CulpritJarNames = @()
+    StopReason = ""
+  }
+}
+
+# * Runs tiered hybrid isolation (exponential/binary within tiers, then linear).
+function Invoke-HybridIsolation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [object[]]$Mods,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineSignature,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineEvidenceKey
+  )
+
+  $result = [pscustomobject]@{
+    Found = $false
+    CulpritJarNames = @()
+    StopReason = ""
+  }
+
+  if (-not $Mods -or $Mods.Count -eq 0) { return $result }
+
+  $maxTier = 4
+  for ($tier = 1; $tier -le $maxTier; $tier++) {
+    $script:currentDependencyTier = $tier
+    $tierMods = @($Mods | Where-Object {
+        if ($_.PSObject.Properties.Name -contains "DependentModTier") {
+          $_.DependentModTier -eq $tier
+        } else {
+          $fallbackTier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
+          $fallbackTier -eq $tier
+        }
+      })
+    if (-not $tierMods -or $tierMods.Count -eq 0) { continue }
+
+    Write-Host ("Tier {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Gray
+
+    $pinnedJarNames = @()
+    if ($pinnedJarNameSet.Count -gt 0) {
+      $pinnedJarNames = @($pinnedJarNameSet.Values)
+    }
+
+    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+
+    if (-not $baselineSucceeded) {
+      $pinnedKey = Get-PinnedJarNameKey
+      if (-not [string]::Equals($pinnedKey, $script:lastBaselinePinnedKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $refresh = Invoke-LinearBaselineRefresh -PhasePrefix ("tier{0}_baseline" -f $tier)
+        if (-not $refresh.ShouldContinue) {
+          if ($script:blockedByDependency) {
+            $result.StopReason = "dependency_dialog_tier_baseline"
+          }
+          $script:currentDependencyTier = 0
+          return $result
+        }
+      }
+    }
+
+    $tierCandidates = @($tierMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
+    if (-not $tierCandidates -or $tierCandidates.Count -eq 0) { continue }
+
+    $tierRemaining = $tierCandidates
+    if ($DependencyAwareExponentialMaxTier -gt 0 -and $tier -le $DependencyAwareExponentialMaxTier) {
+      Write-Host ("Tier {0}: exponential isolation enabled. Candidates: {1}" -f $tier, $tierCandidates.Count) -ForegroundColor Gray
+      $tierBaselineSignature = if ([string]::IsNullOrWhiteSpace($script:activeBaselineSignature)) { $BaselineSignature } else { $script:activeBaselineSignature }
+      $tierBaselineEvidenceKey = if ([string]::IsNullOrWhiteSpace($script:activeBaselineEvidenceKey)) { $BaselineEvidenceKey } else { $script:activeBaselineEvidenceKey }
+      $exponentialResult = Invoke-ExponentialIsolation -Mods $tierCandidates `
+        -BaselineSignature $tierBaselineSignature `
+        -BaselineEvidenceKey $tierBaselineEvidenceKey `
+        -PinnedJarNames $pinnedJarNames
+      $tierRemaining = @($exponentialResult.Remaining)
+      Write-Host ("Tier {0}: exponential isolation completed. Linear with {1} mod(s) ({2})." -f $tier, $tierRemaining.Count, $exponentialResult.Reason) -ForegroundColor Gray
+    }
+
+    if (-not $tierRemaining -or $tierRemaining.Count -eq 0) { continue }
+
+    if (-not $baselineSucceeded) {
+      $pinnedKey = Get-PinnedJarNameKey
+      if (-not [string]::Equals($pinnedKey, $script:lastBaselinePinnedKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $refresh = Invoke-LinearBaselineRefresh -PhasePrefix ("tier{0}_linear" -f $tier)
+        if (-not $refresh.ShouldContinue) {
+          if ($script:blockedByDependency) {
+            $result.StopReason = "dependency_dialog_tier_linear"
+          }
+          $script:currentDependencyTier = 0
+          return $result
+        }
+      }
+    }
+
+    $linearResult = Invoke-LinearIsolation -Mods $tierRemaining
+    if ($linearResult.Found) {
+      $script:currentDependencyTier = 0
+      return $linearResult
+    }
+
+    $pinnedJarNames = @()
+    if ($pinnedJarNameSet.Count -gt 0) {
+      $pinnedJarNames = @($pinnedJarNameSet.Values)
+    }
+    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+  }
+
+  $script:currentDependencyTier = 0
+  return $result
+}
+
 if (-not (Test-Path -LiteralPath $GameModsDir)) {
   throw ("GameModsDir not found: {0}" -f $GameModsDir)
 }
@@ -2178,6 +3656,16 @@ if ($useStorage -and (-not (Test-Path -LiteralPath $StorageModsDir))) {
 $candidateMods = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File -ErrorAction Stop |
     Sort-Object -Property LastWriteTime -Descending)
 
+$script:dependencyAwareTierByJarName = @{}
+$script:currentDependencyTier = 0
+$script:dependencyMapByModId = @{}
+$script:dependencyMapProvidedIdsByJar = @{}
+$script:dependencyMapScanPath = ""
+$script:blockedByDependency = $false
+$script:blockedDependencyMissing = @()
+$script:blockedDependencyRequiring = @()
+$script:blockedDependencyContext = ""
+
 if ($ExcludeJarNames -and $ExcludeJarNames.Count -gt 0) {
   $excludeSet = @{}
   foreach ($name in $ExcludeJarNames) {
@@ -2190,6 +3678,89 @@ if ($ExcludeJarNames -and $ExcludeJarNames.Count -gt 0) {
 
 if ($MaxModsToTest -gt 0 -and $candidateMods.Count -gt $MaxModsToTest) {
   $candidateMods = @($candidateMods | Select-Object -First $MaxModsToTest)
+}
+
+# * Apply dependency-aware ordering (tiers by number of incoming dependents).
+if ($UseDependencyAwareOrdering -and $candidateMods -and $candidateMods.Count -gt 0) {
+  try {
+    if ($DependencyAwareTier2MaxDependents -lt 0) { $DependencyAwareTier2MaxDependents = 0 }
+    if ($DependencyAwareTier3MaxDependents -lt $DependencyAwareTier2MaxDependents) {
+      $DependencyAwareTier3MaxDependents = $DependencyAwareTier2MaxDependents
+    }
+    if ($DependencyAwareExponentialMaxTier -lt 0) { $DependencyAwareExponentialMaxTier = 0 }
+    if ($DependencyAwareExponentialMaxTier -gt 4) { $DependencyAwareExponentialMaxTier = 4 }
+    if ($DependencyAwareQuickIsolateMaxTier -lt 0) { $DependencyAwareQuickIsolateMaxTier = 0 }
+    if ($DependencyAwareQuickIsolateMaxTier -gt 4) { $DependencyAwareQuickIsolateMaxTier = 4 }
+
+    $countMode = $DependencyAwareOrderingCountMode
+    if ([string]::IsNullOrWhiteSpace($countMode)) { $countMode = "RequiredOnly" }
+
+    $dependencyMap = $null
+    if ($DependencyMapSource -ne "Internal") {
+      $dependencyMap = Get-DependencyMapFromSource -ScanPath $GameModsDir
+    }
+
+    if ($dependencyMap) {
+      Initialize-DependencyMapCache -DependencyMap $dependencyMap
+      $depMap = Get-DependentModCountsFromDependencyMap -DependencyMap $dependencyMap -CountMode $countMode
+
+      $mapScanPath = ""
+      if ($dependencyMap.PSObject.Properties.Name -contains "Scan") {
+        $mapScanPath = [string]$dependencyMap.Scan.Path
+      }
+      if (-not [string]::IsNullOrWhiteSpace($mapScanPath) -and (-not [string]::Equals($mapScanPath, $GameModsDir, [System.StringComparison]::OrdinalIgnoreCase))) {
+        Write-Host ("Warning: dependency map scan path differs from GameModsDir: {0}" -f $mapScanPath) -ForegroundColor Yellow
+      } else {
+        Write-Host ("Dependency map loaded from source: {0}" -f $DependencyMapSource) -ForegroundColor Gray
+      }
+    } else {
+      if ($DependencyMapSource -ne "Internal") {
+        Write-Host ("Warning: dependency map unavailable from source '{0}'. Falling back to internal parser." -f $DependencyMapSource) -ForegroundColor Yellow
+      }
+      $depMap = Get-DependentModCountsByJarName -ModsDir $GameModsDir -CountMode $countMode
+    }
+    if ($depMap -and $depMap.Count -gt 0) {
+      foreach ($jarKey in $depMap.Keys) {
+        $depCount = [int]$depMap[$jarKey].DependentCount
+        $known = [bool]$depMap[$jarKey].Known
+        if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
+          $depCount = 0
+          $known = $true
+        }
+        $script:dependencyAwareTierByJarName[$jarKey] = Get-DependencyAwareTier -DependentCount $depCount -Known $known
+      }
+
+      foreach ($mod in $candidateMods) {
+        $jarKey = $mod.Name.ToLowerInvariant()
+        $depCount = -1
+        $known = $false
+        if ($depMap.ContainsKey($jarKey)) {
+          $depCount = [int]$depMap[$jarKey].DependentCount
+          $known = [bool]$depMap[$jarKey].Known
+        }
+
+        if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
+          $depCount = 0
+          $known = $true
+        }
+
+        $tier = Get-DependencyAwareTier -DependentCount $depCount -Known $known
+
+        Add-Member -InputObject $mod -NotePropertyName DependentModCount -NotePropertyValue $depCount -Force
+        Add-Member -InputObject $mod -NotePropertyName DependentModTier -NotePropertyValue $tier -Force
+        Add-Member -InputObject $mod -NotePropertyName DependentModCountKnown -NotePropertyValue $known -Force
+      }
+
+      $candidateMods = @($candidateMods | Sort-Object -Property `
+          @{ Expression = { $_.DependentModTier }; Ascending = $true }, `
+          @{ Expression = { $_.LastWriteTime }; Descending = $true }, `
+          @{ Expression = { $_.Name }; Ascending = $true })
+    } else {
+      Write-Host "Dependency-aware ordering enabled, but dependency map is empty. Using date ordering." -ForegroundColor Gray
+    }
+  } catch {
+    Write-Host ("Warning: dependency-aware ordering failed: {0}. Using date ordering." -f $_.Exception.Message) -ForegroundColor Yellow
+  }
 }
 
 if (-not $candidateMods -or $candidateMods.Count -eq 0) {
@@ -2217,10 +3788,21 @@ Write-Host ("Isolation strategy: {0}" -f $effectiveIsolationStrategy) -Foregroun
 if ($effectiveIsolationStrategy -eq "Exponential") {
   Write-Host ("Binary refinement threshold: {0}" -f $BinaryLinearThreshold) -ForegroundColor Gray
 }
+if ($effectiveIsolationStrategy -eq "Hybrid") {
+  $linearTierStart = if ($DependencyAwareExponentialMaxTier -lt 1) { 1 } else { [Math]::Min(4, $DependencyAwareExponentialMaxTier + 1) }
+  Write-Host ("Hybrid tiers: exponential<= {0}, linear>= {1}" -f $DependencyAwareExponentialMaxTier, $linearTierStart) -ForegroundColor Gray
+  if ($DependencyAwareExponentialMaxTier -gt 0) {
+    Write-Host ("Binary refinement threshold: {0}" -f $BinaryLinearThreshold) -ForegroundColor Gray
+  }
+}
 
 if ($DryRun) {
   foreach ($mod in $candidateMods) {
-    Write-Host ("Plan: {0} ({1})" -f $mod.Name, $mod.LastWriteTime) -ForegroundColor Gray
+    if ($mod.PSObject.Properties.Name -contains "DependentModTier") {
+      Write-Host ("Plan: {0} | tier={1} | dependents={2} | known={3} | mtime={4}" -f $mod.Name, $mod.DependentModTier, $mod.DependentModCount, $mod.DependentModCountKnown, $mod.LastWriteTime) -ForegroundColor Gray
+    } else {
+      Write-Host ("Plan: {0} ({1})" -f $mod.Name, $mod.LastWriteTime) -ForegroundColor Gray
+    }
   }
   Write-Host "Dry run complete. No changes made." -ForegroundColor Green
   exit 0
@@ -2249,6 +3831,8 @@ if ($PrintCursorOffset) {
 
 $movedItems = New-Object System.Collections.Generic.List[object]
 $movedJarNameSet = @{}
+$pinnedJarNameSet = @{}
+$script:lastBaselinePinnedKey = ""
 $baselineSignature = ""
 $baselineEvidenceKey = ""
 $activeBaselineSignature = ""
@@ -2262,6 +3846,7 @@ $stopReason = ""
 $hadError = $false
 $script:lastOutcomeHandleId = 0
 $baselineSucceeded = $false
+$skipIsolation = $false
 $phase = "init"
 
 function Write-ErrorDump {
@@ -2381,6 +3966,11 @@ try {
     $phase = "baseline_read_logs"
     $baselineSnapshot = Get-ConfiguredLogSnapshot
 
+    if (Test-DependencyDialogBlock -Context "baseline" -Lines $baselineSnapshot.Lines) {
+      $stopReason = "dependency_dialog_baseline"
+      $skipIsolation = $true
+    }
+
     $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $baselineSnapshot.Lines
 
     $baselineSignature = Get-ErrorSignature -Lines $baselineSnapshot.Lines `
@@ -2398,7 +3988,7 @@ try {
 
     $pinnedJarNameSet = @{}
 
-    if ($PreIsolateJarNames -and $PreIsolateJarNames.Count -gt 0) {
+    if (-not $skipIsolation -and $PreIsolateJarNames -and $PreIsolateJarNames.Count -gt 0) {
       $canFastForward = $true
       if (-not [string]::IsNullOrWhiteSpace($PreIsolateBaselineEvidenceKey) -and -not [string]::IsNullOrWhiteSpace($baselineEvidenceKey)) {
         if (-not [string]::Equals($PreIsolateBaselineEvidenceKey, $baselineEvidenceKey, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -2459,6 +4049,17 @@ try {
       $pinnedJarNames = @($pinnedJarNameSet.Values)
     }
 
+    if (-not $skipIsolation) {
+    if ($effectiveIsolationStrategy -eq "Hybrid") {
+      $hybridResult = Invoke-HybridIsolation -Mods $candidateMods `
+        -BaselineSignature $baselineSignature `
+        -BaselineEvidenceKey $baselineEvidenceKey
+      if ($hybridResult.Found) {
+        $culpritJarNames = @($hybridResult.CulpritJarNames)
+        $stopReason = $hybridResult.StopReason
+      }
+    } else {
+
     $didExponential = $false
     if ($effectiveIsolationStrategy -eq "Exponential") {
       $exponentialCandidates = @($candidateMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
@@ -2515,6 +4116,10 @@ try {
         Start-Sleep -Seconds $LogPostRunDelaySeconds
         $phase = "linear_phase_baseline_read_logs"
         $linearBaselineSnapshot = Get-ConfiguredLogSnapshot
+        if (Test-DependencyDialogBlock -Context "linear phase baseline" -Lines $linearBaselineSnapshot.Lines) {
+          $stopReason = "dependency_dialog_linear_baseline"
+          $candidateMods = @()
+        }
         $activeBaselineSignature = Get-ErrorSignature -Lines $linearBaselineSnapshot.Lines `
           -MaxLines $ErrorSignatureLineLimit `
           -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
@@ -2662,7 +4267,11 @@ try {
 
         if ($newModIdsArr.Count -gt 0) {
           Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($newModIdsArr -join ", ")) -ForegroundColor Cyan
-          $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $newModIdsArr
+          $searchDirs = @($GameModsDir)
+          if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+          if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+          $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
+          $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "fabric dialog"
           if ($culpritJars -and $culpritJars.Count -gt 0) {
             foreach ($cj in $culpritJars) {
               if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
@@ -2674,7 +4283,7 @@ try {
               }
             }
           } else {
-            Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
+            Write-Host ("Warning: could not resolve or filtered requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
           }
           Write-Host "Continuing isolation after Fabric quick-isolate..." -ForegroundColor Cyan
           continue
@@ -2752,7 +4361,10 @@ try {
             }
 
             # * Isolate the requiring mods instead.
-            $requiringJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $newModIdsArr
+            $searchDirs = @($GameModsDir)
+            if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+            if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+            $requiringJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
             if ($requiringJars -and $requiringJars.Count -gt 0) {
               $culpritJarNames = @()
               foreach ($rj in $requiringJars) {
@@ -2785,7 +4397,11 @@ try {
         $movedExtra = $false
         if ($newModIds -and $newModIds.Count -gt 0) {
           Write-Host ("Fabric dependency error detected. Mods requiring missing deps: {0}" -f ($newModIds -join ", ")) -ForegroundColor Yellow
-          $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $newModIds
+          $searchDirs = @($GameModsDir)
+          if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
+          if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+          $culpritJars = Find-ModJarsByIdsBestEffort -Dirs $searchDirs -ModIds $newModIds -AllowTokenFallback:$false
+          $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency signature"
           if ($culpritJars -and $culpritJars.Count -gt 0) {
             foreach ($cj in $culpritJars) {
               # * Skip if already moved.
@@ -2811,6 +4427,8 @@ try {
         break
       }
     }
+  }
+  }
   }
 } catch {
   $hadError = $true
@@ -2845,7 +4463,7 @@ try {
         if ($excludeSet.Count -gt 0 -and $excludeSet.ContainsKey($item.JarName)) {
           continue
         }
-        if ($null -ne $item.GameQuarantine) {
+        if (-not [string]::IsNullOrWhiteSpace($item.GameQuarantine)) {
           $restoreGame = Restore-FromQuarantine -SourcePath $item.GameQuarantine `
             -DestDir $GameModsDir `
             -IsDryRun $false `
@@ -2855,7 +4473,7 @@ try {
             Write-Verbose ("Restored game mod: {0}" -f $restoreGame)
           }
         }
-        if ($useStorage -and $null -ne $item.StorageQuarantine) {
+        if ($useStorage -and -not [string]::IsNullOrWhiteSpace($item.StorageQuarantine)) {
           $restoreStorage = Restore-FromQuarantine -SourcePath $item.StorageQuarantine `
             -DestDir $StorageModsDir `
             -IsDryRun $false `
@@ -2999,18 +4617,29 @@ try {
   }
 }
 
-if ($baselineSucceeded) {
+if ($script:blockedByDependency) {
+  $missLabel = if ($script:blockedDependencyMissing.Count -gt 0) { $script:blockedDependencyMissing -join ", " } else { "<none>" }
+  $reqLabel = if ($script:blockedDependencyRequiring.Count -gt 0) { $script:blockedDependencyRequiring -join ", " } else { "<none>" }
+  $ctxLabel = if ([string]::IsNullOrWhiteSpace($script:blockedDependencyContext)) { "baseline" } else { $script:blockedDependencyContext }
+  Write-Host ("Isolation stopped due to dependency dialog in {0}. Missing deps: {1}; Requiring mods: {2}" -f $ctxLabel, $missLabel, $reqLabel) -ForegroundColor Yellow
+  if ([string]::IsNullOrWhiteSpace($stopReason)) {
+    $stopReason = "dependency_dialog"
+  }
+  $exitCode = 2
+} elseif ($baselineSucceeded) {
   Write-Host "Baseline launch succeeded. No isolation needed." -ForegroundColor Green
   $exitCode = 0
 }
 
-if ($culpritJarNames -and $culpritJarNames.Count -gt 0) {
-  Write-Host ("Culprit candidate(s): {0}" -f (($culpritJarNames | Sort-Object -Unique) -join ", ")) -ForegroundColor Green
-  Write-Host ("Stop reason: {0}" -f $stopReason) -ForegroundColor Cyan
-  $exitCode = 0
-} elseif (-not $hadError) {
-  Write-Host "No error change or successful launch detected." -ForegroundColor Yellow
-  $exitCode = 2
+if (-not $script:blockedByDependency) {
+  if ($culpritJarNames -and $culpritJarNames.Count -gt 0) {
+    Write-Host ("Culprit candidate(s): {0}" -f (($culpritJarNames | Sort-Object -Unique) -join ", ")) -ForegroundColor Green
+    Write-Host ("Stop reason: {0}" -f $stopReason) -ForegroundColor Cyan
+    $exitCode = 0
+  } elseif (-not $hadError) {
+    Write-Host "No error change or successful launch detected." -ForegroundColor Yellow
+    $exitCode = 2
+  }
 }
 
 if ($EmitResultObject) {

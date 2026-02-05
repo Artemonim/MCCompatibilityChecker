@@ -199,6 +199,14 @@ function Get-FabricModIdsFromJar {
         if (-not [string]::IsNullOrWhiteSpace($value)) {
           $ids[$value.ToLowerInvariant()] = $true
         }
+      } elseif ($obj.provides -is [System.Collections.IDictionary] -or $obj.provides -is [System.Management.Automation.PSCustomObject]) {
+        # * In fabric.mod.json, "provides" can be a map of ID to version.
+        foreach ($prop in $obj.provides.psobject.properties) {
+          $value = [string]$prop.Name
+          if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $ids[$value.ToLowerInvariant()] = $true
+          }
+        }
       } else {
         foreach ($entryId in $obj.provides) {
           $value = [string]$entryId
