@@ -67,7 +67,7 @@ Optional click offset for closing crash dialog (relative to crash window).
 Crash dialog title fragments.
 
 .PARAMETER FabricWindowTitlePatterns
-Fabric error dialog title fragments.
+Fabric or dependency dialog title fragments.
 
 .PARAMETER CheckScriptPath
 Path to compatibility script.
@@ -85,6 +85,12 @@ Path to isolation script.
 
 .PARAMETER IsolateScriptArguments
 Additional arguments to pass to Isolate-Incompatible-Mod.ps1.
+
+.PARAMETER UseLinearIsolation
+If set, passes -UseLinearIsolation to Isolate-Incompatible-Mod.ps1 (disables exponential probing).
+
+.PARAMETER BinaryLinearThreshold
+If set (>0), passes -BinaryLinearThreshold to Isolate-Incompatible-Mod.ps1 for binary refinement.
 
 .PARAMETER LogPath
 Optional log path to pass into Check-Mod-Compatibility.ps1.
@@ -199,9 +205,9 @@ param(
   [Parameter(Mandatory = $false)]
   [string[]]$CrashWindowTitlePatterns = @("Что-то сломалось"),
 
-  # * Fabric error dialog title fragments.
+  # * Fabric or dependency dialog title fragments.
   [Parameter(Mandatory = $false)]
-  [string[]]$FabricWindowTitlePatterns = @("Fabric Loader"),
+  [string[]]$FabricWindowTitlePatterns = @("Fabric Loader", "owo-sentinel"),
 
   # * Path to compatibility script.
   [Parameter(Mandatory = $false)]
@@ -222,6 +228,14 @@ param(
   # * Additional arguments to pass to Isolate-Incompatible-Mod.ps1.
   [Parameter(Mandatory = $false)]
   [string[]]$IsolateScriptArguments = @(),
+
+  # * If set, forces linear isolation in Isolate-Incompatible-Mod.ps1.
+  [Parameter(Mandatory = $false)]
+  [switch]$UseLinearIsolation,
+
+  # * If set (>0), overrides binary-to-linear threshold for refinement in Isolate-Incompatible-Mod.ps1.
+  [Parameter(Mandatory = $false)]
+  [int]$BinaryLinearThreshold = 0,
 
   # * Additional arguments to pass to Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
@@ -1050,6 +1064,12 @@ while ($true) {
             if ($CrashCloseDelaySeconds -gt 0) {
               $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
             }
+            if ($UseLinearIsolation) {
+              $isolateParams["UseLinearIsolation"] = $true
+            }
+            if ($BinaryLinearThreshold -gt 0) {
+              $isolateParams["BinaryLinearThreshold"] = $BinaryLinearThreshold
+            }
             if ($LauncherWindowTimeoutSeconds -gt 0) {
               $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
             }
@@ -1193,6 +1213,12 @@ while ($true) {
         if ($CrashCloseDelaySeconds -gt 0) {
           $isolateParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds
         }
+        if ($UseLinearIsolation) {
+          $isolateParams["UseLinearIsolation"] = $true
+        }
+        if ($BinaryLinearThreshold -gt 0) {
+          $isolateParams["BinaryLinearThreshold"] = $BinaryLinearThreshold
+        }
         if ($LauncherWindowTimeoutSeconds -gt 0) {
           $isolateParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds
         }
@@ -1290,6 +1316,7 @@ while ($true) {
       }
       $sessionIsolationCulpritByJar = @{}
     }
+    Write-Host "Если скрипт не устранил проблему или сломался об некоторые моды и их зависимости - на период работы скрипта изолируйте эти токсичные моды вручную." -ForegroundColor Yellow
     Write-Host "Stopping by user choice." -ForegroundColor Yellow
     exit 0
   }

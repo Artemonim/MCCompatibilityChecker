@@ -1,9 +1,11 @@
 <#
 .SYNOPSIS
-Isolates a crashing mod by moving jars to Legacy one by one.
+Isolates a crashing mod by moving jars to Legacy (binary or linear).
 
 .DESCRIPTION
-Moves mods from GameModsDir into a per-run Legacy\temp quarantine, starting from the newest jar,
+Moves mods from GameModsDir into a per-run Legacy\temp quarantine, using either:
+  - binary halving (default), or
+  - linear one-by-one (UseLinearIsolation),
 launches the game each time, and stops when either:
   - the launch succeeds (no crash dialog within the timeout), or
   - the error signature from logs changes compared to the baseline.
@@ -119,6 +121,12 @@ How many times to attempt triggering Play per launch attempt when no game start 
 .PARAMETER RequireGameStartForTimeout
 If true (default), a Timeout outcome is only treated as success when a game start is detected.
 
+.PARAMETER UseLinearIsolation
+If set, uses the legacy linear isolation (one mod per attempt) instead of exponential probing with binary refinement.
+
+.PARAMETER BinaryLinearThreshold
+When binary refinement is active, falls back to linear once the remaining candidate set is at or below this size.
+
 .PARAMETER UseEnterFallback
 If true, sends ENTER when play element is not found.
 
@@ -134,7 +142,7 @@ If PlayClickOffsetX/Y are not set, uses the captured offsets for click.
 Crash dialog title fragments.
 
 .PARAMETER FabricWindowTitlePatterns
-Fabric error dialog title fragments.
+Fabric or dependency dialog title fragments.
 
 .PARAMETER CrashCloseClickOffsetX
 Optional click offset for closing crash dialog (relative to crash window).
@@ -302,6 +310,14 @@ param(
   [Parameter(Mandatory = $false)]
   [bool]$RequireGameStartForTimeout = $true,
 
+  # * If set, uses linear isolation instead of exponential probing.
+  [Parameter(Mandatory = $false)]
+  [switch]$UseLinearIsolation,
+
+  # * When binary refinement is active, switch to linear at or below this count.
+  [Parameter(Mandatory = $false)]
+  [int]$BinaryLinearThreshold = 8,
+
   # * If true, sends ENTER when play element is not found.
   [Parameter(Mandatory = $false)]
   [bool]$UseEnterFallback = $true,
@@ -318,9 +334,9 @@ param(
   [Parameter(Mandatory = $false)]
   [string[]]$CrashWindowTitlePatterns = @("Что-то сломалось"),
 
-  # * Fabric error dialog title fragments.
+  # * Fabric or dependency dialog title fragments.
   [Parameter(Mandatory = $false)]
-  [string[]]$FabricWindowTitlePatterns = @("Fabric Loader"),
+  [string[]]$FabricWindowTitlePatterns = @("Fabric Loader", "owo-sentinel"),
 
   # * Optional click offsets for closing crash dialog (relative to crash window).
   [Parameter(Mandatory = $false)]
@@ -398,6 +414,9 @@ if ($Help) {
   Get-Help -Full -Name $PSCommandPath
   return
 }
+
+$effectiveIsolationStrategy = if ($UseLinearIsolation) { "Linear" } else { "Exponential" }
+if ($BinaryLinearThreshold -lt 1) { $BinaryLinearThreshold = 1 }
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName System.Windows.Forms
@@ -556,7 +575,7 @@ function Test-ProcessLooksLikeMinecraftGame {
   if ($processId -le 0) { return $false }
 
   try {
-    $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop
+    $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop -Verbose:$false
   } catch {
     return $false
   }
@@ -1073,6 +1092,10 @@ function Close-OutcomeWindow {
     [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
     Start-Sleep -Milliseconds 500
   }
+
+  if (Test-WindowStillExists -HandleId $handleId) {
+    Request-UserToCloseBlockingWindow -HandleId $handleId -WindowTitle $Outcome.Window.Title
+  }
 }
 
 function Test-WindowStillExists {
@@ -1089,6 +1112,79 @@ function Test-WindowStillExists {
     }
   }
   return $false
+}
+
+function Request-UserToCloseBlockingWindow {
+  param(
+    [Parameter(Mandatory = $true)]
+    [long]$HandleId,
+    [Parameter(Mandatory = $false)]
+    [string]$WindowTitle = ""
+  )
+
+  if ($HandleId -eq 0) { return }
+
+  $label = if ([string]::IsNullOrWhiteSpace($WindowTitle)) { "неизвестное мешающее окно" } else { $WindowTitle }
+  $message = "Не удалось закрыть мешающее окно автоматически. Закройте его вручную и нажмите OK для продолжения.`nОкно: {0}" -f $label
+
+  while (Test-WindowStillExists -HandleId $HandleId) {
+    [void][System.Windows.Forms.MessageBox]::Show(
+      $message,
+      "Требуется действие пользователя",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    Start-Sleep -Milliseconds 300
+  }
+}
+
+function Wait-ForLauncherWindowInteractive {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$TitlePattern,
+    [Parameter(Mandatory = $true)]
+    [string[]]$CrashPatterns,
+    [Parameter(Mandatory = $true)]
+    [string[]]$FabricPatterns,
+    [Parameter(Mandatory = $true)]
+    [int]$PollSeconds
+  )
+
+  $promptMessage = "Не удалось увидеть окно лаунчера. Закройте неизвестное мешающее окно (включая игру, если она запущена) и нажмите OK для продолжения."
+  while ($true) {
+    $fabricWindow = Select-WindowByTitlePatterns -Patterns $FabricPatterns
+    if ($null -ne $fabricWindow) {
+      Write-Host ("Blocking Fabric dialog detected: {0}" -f $fabricWindow.Title) -ForegroundColor Yellow
+      Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $fabricWindow }) `
+        -DelaySeconds 0 `
+        -OffsetX -1 `
+        -OffsetY -1
+      Start-Sleep -Seconds $PollSeconds
+      continue
+    }
+
+    $crashWindow = Select-WindowByTitlePatterns -Patterns $CrashPatterns
+    if ($null -ne $crashWindow) {
+      Write-Host ("Blocking crash dialog detected: {0}" -f $crashWindow.Title) -ForegroundColor Yellow
+      Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow }) `
+        -DelaySeconds 0 `
+        -OffsetX -1 `
+        -OffsetY -1
+      Start-Sleep -Seconds $PollSeconds
+      continue
+    }
+
+    $launcherWindow = Select-WindowByTitlePatterns -Patterns @($TitlePattern)
+    if ($null -ne $launcherWindow) { return $launcherWindow }
+
+    [void][System.Windows.Forms.MessageBox]::Show(
+      $promptMessage,
+      "Требуется действие пользователя",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    Start-Sleep -Seconds $PollSeconds
+  }
 }
 
 function Invoke-LaunchAttempt {
@@ -1592,6 +1688,8 @@ function Get-FabricMissingDependencyIds {
   $requiresMissingPattern = "requires\s+version\s+.+?\s+of\s+(?<id>[a-z0-9_\-\.]+),\s+which\s+is\s+missing"
   # * Pattern: "Could not find required mod: libjf-base"
   $couldNotFindPattern = "Could not find required mod:\s+(?<id>[a-z0-9_\-\.]+)\b"
+  # * Pattern: "owo-lib is required to run the following mods"
+  $requiredToRunPattern = "(?<id>[a-z0-9_\-\.]+)\s+is\s+required\s+to\s+run\s+the\s+following\s+mods?\b"
 
   foreach ($line in $Lines) {
     $m = [regex]::Match($line, $requiresMissingPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
@@ -1600,6 +1698,11 @@ function Get-FabricMissingDependencyIds {
       continue
     }
     $m = [regex]::Match($line, $couldNotFindPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
+      continue
+    }
+    $m = [regex]::Match($line, $requiredToRunPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
@@ -1802,15 +1905,20 @@ function Get-ErrorSignature {
     [bool]$IncludeWarnMixins
   )
 
+  $safeLines = @($Lines)
   $parts = New-Object System.Collections.Generic.List[string]
-  $modIds = Get-IncompatibleModIdsFromLog -Lines $Lines -IncludeWarnMixins $IncludeWarnMixins
+  $modIds = @(Get-IncompatibleModIdsFromLog -Lines $safeLines -IncludeWarnMixins $IncludeWarnMixins)
+  if ($modIds.Count -eq 1 -and $null -ne $modIds[0] -and ($modIds[0] -is [System.Collections.IEnumerable]) -and -not ($modIds[0] -is [string])) {
+    $modIds = @($modIds[0])
+  }
+  $modIds = @($modIds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   if ($modIds.Count -gt 0) {
     $parts.Add(("mods: {0}" -f ($modIds -join ", ")))
   }
 
-  $lines = Select-ErrorEvidenceLines -Lines $Lines -MaxLines $MaxLines
-  if ($lines.Count -gt 0) {
-    $parts.Add(("lines: {0}" -f ($lines -join " | ")))
+  $evidenceLines = @(Select-ErrorEvidenceLines -Lines $safeLines -MaxLines $MaxLines)
+  if ($evidenceLines.Count -gt 0) {
+    $parts.Add(("lines: {0}" -f ($evidenceLines -join " | ")))
   }
 
   if ($parts.Count -eq 0) { return "" }
@@ -1825,7 +1933,8 @@ function Get-ErrorEvidenceKey {
     [int]$MaxLines
   )
 
-  $evidenceLines = Select-ErrorEvidenceLines -Lines $Lines -MaxLines $MaxLines
+  $safeLines = @($Lines)
+  $evidenceLines = @(Select-ErrorEvidenceLines -Lines $safeLines -MaxLines $MaxLines)
   if (-not $evidenceLines -or $evidenceLines.Count -eq 0) { return "" }
 
   $norm = @()
@@ -1931,6 +2040,638 @@ function Restore-FromQuarantine {
   return $destPath
 }
 
+function Get-MovedItemByJarName {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarName
+  )
+
+  foreach ($item in $movedItems) {
+    if ($null -eq $item) { continue }
+    if ([string]$item.JarName -eq $JarName) { return $item }
+  }
+  return $null
+}
+
+function Update-QuarantineState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$DesiredJarNames,
+    [Parameter(Mandatory = $false)]
+    [string[]]$PinnedJarNames = @()
+  )
+
+  $desiredSet = @{}
+  foreach ($name in $PinnedJarNames) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $desiredSet[$name.ToLowerInvariant()] = $name
+  }
+  foreach ($name in $DesiredJarNames) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $desiredSet[$name.ToLowerInvariant()] = $name
+  }
+
+  foreach ($item in $movedItems) {
+    if ($null -eq $item) { continue }
+    $jarName = [string]$item.JarName
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $key = $jarName.ToLowerInvariant()
+    if ($desiredSet.ContainsKey($key)) { continue }
+
+    if ($null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
+      $restoreGame = Restore-FromQuarantine -SourcePath $item.GameQuarantine `
+        -DestDir $GameModsDir `
+        -IsDryRun $false `
+        -AllowOverwrite ([bool]$ForceRestore)
+      if ($restoreGame -and (-not (Test-Path -LiteralPath $item.GameQuarantine))) {
+        $item.GameQuarantine = $null
+      }
+    }
+    if ($useStorage -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
+      $restoreStorage = Restore-FromQuarantine -SourcePath $item.StorageQuarantine `
+        -DestDir $StorageModsDir `
+        -IsDryRun $false `
+        -AllowOverwrite ([bool]$ForceRestore)
+      if ($restoreStorage -and (-not (Test-Path -LiteralPath $item.StorageQuarantine))) {
+        $item.StorageQuarantine = $null
+      }
+    }
+
+    if ($movedJarNameSet.ContainsKey($jarName)) {
+      $null = $movedJarNameSet.Remove($jarName)
+    }
+  }
+
+  foreach ($key in $desiredSet.Keys) {
+    $jarName = $desiredSet[$key]
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+
+    $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
+    $storagePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $jarName } else { $null }
+    $gameDest = $null
+    $storageDest = $null
+
+    if (Test-Path -LiteralPath $gamePath) {
+      $gameDest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    }
+    if ($useStorage -and $storagePath -and (Test-Path -LiteralPath $storagePath)) {
+      $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    }
+
+    if ($null -ne $gameDest -or $null -ne $storageDest) {
+      $item = Get-MovedItemByJarName -JarName $jarName
+      if ($null -eq $item) {
+        $item = [pscustomobject]@{
+            JarName = $jarName
+            GameSource = $gamePath
+            GameQuarantine = $gameDest
+            StorageSource = if ($useStorage) { $storagePath } else { $null }
+            StorageQuarantine = $storageDest
+          }
+        $movedItems.Add($item)
+      } else {
+        if ($gameDest) {
+          $item.GameSource = $gamePath
+          $item.GameQuarantine = $gameDest
+        }
+        if ($storageDest) {
+          $item.StorageSource = if ($useStorage) { $storagePath } else { $null }
+          $item.StorageQuarantine = $storageDest
+        }
+      }
+      $movedJarNameSet[$jarName] = $true
+    } else {
+      $item = Get-MovedItemByJarName -JarName $jarName
+      if ($null -ne $item -and (-not $movedJarNameSet.ContainsKey($jarName))) {
+        $movedJarNameSet[$jarName] = $true
+      }
+    }
+  }
+}
+
+# * Runs a single isolation probe and returns whether the test group matches the baseline issue.
+function Invoke-IsolationProbe {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$TestJarNames,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineSignature,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineEvidenceKey,
+    [Parameter(Mandatory = $false)]
+    [string]$PhasePrefix = "isolation_probe",
+    [Parameter(Mandatory = $false)]
+    [string[]]$PinnedJarNames = @()
+  )
+
+  Update-QuarantineState -DesiredJarNames $TestJarNames -PinnedJarNames $PinnedJarNames
+
+  if ([string]::IsNullOrWhiteSpace($PhasePrefix)) {
+    $PhasePrefix = "isolation_probe"
+  }
+
+  $ignoreHandles = @()
+  if ($script:lastOutcomeHandleId -ne 0) {
+    $ignoreHandles = @($script:lastOutcomeHandleId)
+  }
+
+  $attemptStart = Get-Date
+  $script:phase = ("{0}_invoke_launch" -f $PhasePrefix)
+  $outcome = Invoke-LaunchAttempt -LauncherTitlePattern $LauncherWindowTitlePattern `
+    -LauncherPath $LauncherExePath `
+    -LauncherArgs $LauncherArguments `
+    -AppendAutoLaunch ([bool]$UseAutoLaunch) `
+    -LauncherTimeoutSeconds $LauncherWindowTimeoutSeconds `
+    -ButtonNames $PlayButtonNames `
+    -ClickOffsetX $PlayClickOffsetX `
+    -ClickOffsetY $PlayClickOffsetY `
+    -EnableEnterFallback $UseEnterFallback `
+    -AllowBroadSearch ([bool]$EnableBroadUiSearch) `
+    -CrashPatterns $CrashWindowTitlePatterns `
+    -FabricPatterns $FabricWindowTitlePatterns `
+    -OutcomeTimeoutSeconds $OutcomeTimeoutSeconds `
+    -PollSeconds $PollIntervalSeconds `
+    -IgnoreHandleIds $ignoreHandles
+
+  if ($outcome.Type -ne "FabricDialog") {
+    $fabricWindowNow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    if ($null -ne $fabricWindowNow) {
+      Write-Host ("Detected Fabric dialog after outcome: {0}" -f $fabricWindowNow.Title) -ForegroundColor Yellow
+      $outcome = [pscustomobject]@{
+        Type = "FabricDialog"
+        Window = $fabricWindowNow
+      }
+    }
+  }
+
+  Write-Host ("Outcome: {0}" -f $outcome.Type) -ForegroundColor $(if ($outcome.Type -eq "Timeout") { "Green" } else { "Yellow" })
+
+  if ($outcome.Type -ne "Timeout" -and $null -ne $outcome.Window) {
+    Write-Host ("Closing outcome window: {0} ({1})" -f $outcome.Type, $outcome.Window.Title) -ForegroundColor Gray
+    $script:lastOutcomeHandleId = [long]$outcome.Window.Handle.ToInt64()
+    $script:phase = ("{0}_close_outcome_window" -f $PhasePrefix)
+    Close-OutcomeWindow -Outcome $outcome `
+      -DelaySeconds $CrashCloseDelaySeconds `
+      -OffsetX $CrashCloseClickOffsetX `
+      -OffsetY $CrashCloseClickOffsetY
+
+    $extraFabricWindow = Select-WindowByTitlePatterns -Patterns $FabricWindowTitlePatterns
+    if ($null -ne $extraFabricWindow) {
+      Write-Host ("Closing extra Fabric Loader dialog: {0}" -f $extraFabricWindow.Title) -ForegroundColor Gray
+      Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $extraFabricWindow }) `
+        -DelaySeconds 0 `
+        -OffsetX -1 `
+        -OffsetY -1
+    }
+
+    if (Test-WindowStillExists -HandleId $script:lastOutcomeHandleId) {
+      Write-Host ("Warning: outcome window did not close ({0}). It will be detected again on next attempt." -f $outcome.Type) -ForegroundColor Yellow
+      $script:lastOutcomeHandleId = 0
+    }
+  }
+
+  if ($outcome.Type -ne "Timeout") {
+    $script:phase = ("{0}_wait_game_exit" -f $PhasePrefix)
+    $exited = Wait-ForGameProcessesToExit -Names $GameProcessNames `
+      -StartedAfter $attemptStart `
+      -TimeoutSeconds $WaitForGameExitSeconds `
+      -PollSeconds $GameExitPollSeconds
+    if (-not $exited) {
+      Write-Host ("Warning: game processes still running after {0}s. Next file move may fail due to locks." -f $WaitForGameExitSeconds) -ForegroundColor Yellow
+    }
+  }
+
+  if ($outcome.Type -eq "FabricDialog") {
+    Start-Sleep -Seconds $LogPostRunDelaySeconds
+    $script:phase = ("{0}_read_dependency_logs" -f $PhasePrefix)
+    $snapshot = Get-LogSnapshot -PrimaryLogPath $LogPath `
+      -GameModsDir $GameModsDir `
+      -SkipGameLogs ([bool]$SkipGameLogs) `
+      -LogMaxAgeMinutes $LogMaxAgeMinutes `
+      -LogReadRetryCount $LogReadRetryCount `
+      -LogReadRetryDelayMs $LogReadRetryDelayMs
+    $requiringModIds = @(Get-FabricRequiringModIds -Lines $snapshot.Lines) |
+      Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    $missingDepIds = @(Get-FabricMissingDependencyIds -Lines $snapshot.Lines) |
+      Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    [void](Wait-ForLauncherWindowInteractive -TitlePattern $LauncherWindowTitlePattern `
+        -CrashPatterns $CrashWindowTitlePatterns `
+        -FabricPatterns $FabricWindowTitlePatterns `
+        -PollSeconds $PollIntervalSeconds)
+    return [pscustomobject]@{
+      Outcome = $outcome
+      GroupMatches = $false
+      Mode = "DependencyDialog"
+      RequiringModIds = @($requiringModIds)
+      MissingDepIds = @($missingDepIds)
+    }
+  }
+
+  $groupMatches = $false
+  if ($outcome.Type -eq "Timeout") {
+    $groupMatches = $true
+  } else {
+    Start-Sleep -Seconds $LogPostRunDelaySeconds
+    $script:phase = ("{0}_read_logs" -f $PhasePrefix)
+    $snapshot = Get-LogSnapshot -PrimaryLogPath $LogPath `
+      -GameModsDir $GameModsDir `
+      -SkipGameLogs ([bool]$SkipGameLogs) `
+      -LogMaxAgeMinutes $LogMaxAgeMinutes `
+      -LogReadRetryCount $LogReadRetryCount `
+      -LogReadRetryDelayMs $LogReadRetryDelayMs
+
+    if ($script:mcVersionForLegacy -eq "unknown") {
+      $script:mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
+    }
+
+    $signature = Get-ErrorSignature -Lines $snapshot.Lines `
+      -MaxLines $ErrorSignatureLineLimit `
+      -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+    $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $ErrorSignatureLineLimit
+
+    Write-Verbose ("Signature: {0}" -f $signature)
+    $signatureChanged = Test-SignatureChanged -Baseline $BaselineSignature -Current $signature `
+      -BaselineEvidenceKey $BaselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
+      -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)
+    if ($signatureChanged) {
+      Start-Sleep -Milliseconds 750
+      $confirmSnapshot = Get-LogSnapshot -PrimaryLogPath $LogPath `
+        -GameModsDir $GameModsDir `
+        -SkipGameLogs ([bool]$SkipGameLogs) `
+        -LogMaxAgeMinutes $LogMaxAgeMinutes `
+        -LogReadRetryCount $LogReadRetryCount `
+        -LogReadRetryDelayMs $LogReadRetryDelayMs
+      $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
+        -MaxLines $ErrorSignatureLineLimit `
+        -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+      $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+      if (-not (Test-SignatureChanged -Baseline $BaselineSignature -Current $confirmSignature `
+          -BaselineEvidenceKey $BaselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
+          -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange))) {
+        Write-Verbose "Signature change not confirmed; treating as unchanged."
+        $signatureChanged = $false
+      }
+    }
+    $groupMatches = $signatureChanged
+  }
+
+  [void](Wait-ForLauncherWindowInteractive -TitlePattern $LauncherWindowTitlePattern `
+      -CrashPatterns $CrashWindowTitlePatterns `
+      -FabricPatterns $FabricWindowTitlePatterns `
+      -PollSeconds $PollIntervalSeconds)
+
+  return [pscustomobject]@{
+    Outcome = $outcome
+    GroupMatches = $groupMatches
+    Mode = "Ok"
+  }
+}
+
+# * Handles Fabric dependency dialogs by restoring removed deps and quick-isolating requiring mods.
+function Invoke-FabricDependencyRecovery {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$RequiringModIds,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$MissingDepIds,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$RemovedJarNames,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$PinnedJarNameSet,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$ProtectedJarNameSet
+  )
+
+  $changes = $false
+  $pinnedAdded = New-Object System.Collections.Generic.List[string]
+  $protectedAdded = New-Object System.Collections.Generic.List[string]
+
+  $requiringArr = @($RequiringModIds)
+  $missingArr = @($MissingDepIds)
+  $requiringLabel = if ($requiringArr.Count -gt 0) { $requiringArr -join ", " } else { "<none>" }
+  $missingLabel = if ($missingArr.Count -gt 0) { $missingArr -join ", " } else { "<none>" }
+  Write-Host ("Fabric dialog info. Requiring mods: {0}; Missing deps: {1}" -f $requiringLabel, $missingLabel) -ForegroundColor Gray
+
+  $removedArr = @($RemovedJarNames)
+  if ($missingArr.Count -gt 0 -and $removedArr.Count -gt 0) {
+    foreach ($jarName in $removedArr) {
+      if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+      $key = $jarName.ToLowerInvariant()
+      if ($ProtectedJarNameSet.ContainsKey($key)) { continue }
+
+      $removedItem = Get-MovedItemByJarName -JarName $jarName
+      if ($null -eq $removedItem) { continue }
+
+      $removedJarProvides = @()
+      if ($null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+        $removedJarProvides = Get-FabricModIdsFromJar -JarPath $removedItem.GameQuarantine
+      }
+      $removedJarProvidesArr = @($removedJarProvides)
+
+      $isLikelyRemovedDep = $false
+      if ($removedJarProvidesArr.Count -gt 0) {
+        $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingArr
+      }
+      if (-not $isLikelyRemovedDep) {
+        $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $jarName -Ids $missingArr
+      }
+      if (-not $isLikelyRemovedDep) { continue }
+
+      Write-Host ("Fabric missing dependency '{0}' appears caused by removing '{1}'. Restoring dependency." -f ($missingArr -join ", "), $jarName) -ForegroundColor Cyan
+
+      if ($null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
+        [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+        $removedItem.GameQuarantine = $null
+      }
+      if ($useStorage -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+        [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+        $removedItem.StorageQuarantine = $null
+      }
+      if ($movedJarNameSet.ContainsKey($jarName)) {
+        $null = $movedJarNameSet.Remove($jarName)
+      }
+
+      $ProtectedJarNameSet[$key] = $jarName
+      $protectedAdded.Add($jarName)
+      $changes = $true
+    }
+  }
+
+  if ($requiringArr.Count -gt 0) {
+    Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($requiringArr -join ", ")) -ForegroundColor Cyan
+    $culpritJars = Find-ModJarsByIdsBestEffort -ModsDir $GameModsDir -ModIds $requiringArr
+    if ($culpritJars -and $culpritJars.Count -gt 0) {
+      foreach ($cj in $culpritJars) {
+        if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
+
+        Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
+        $script:phase = "quick_isolate_move"
+        $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+        if ($null -ne $qDest) {
+          $movedItems.Add([pscustomobject]@{
+              JarName = $cj.Name
+              GameSource = $cj.FullName
+              GameQuarantine = $qDest
+              StorageSource = $null
+              StorageQuarantine = $null
+            })
+          $movedJarNameSet[$cj.Name] = $true
+          $PinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+          $pinnedAdded.Add($cj.Name)
+          $changes = $true
+        }
+      }
+    } else {
+      Write-Host ("Warning: could not resolve requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($requiringArr -join ", ")) -ForegroundColor Yellow
+    }
+  }
+
+  return [pscustomobject]@{
+    Changes = $changes
+    PinnedAdded = @($pinnedAdded.ToArray() | Sort-Object -Unique)
+    ProtectedAdded = @($protectedAdded.ToArray() | Sort-Object -Unique)
+  }
+}
+
+function Invoke-BinaryIsolation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object[]]$Mods,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineSignature,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineEvidenceKey,
+    [Parameter(Mandatory = $false)]
+    [string[]]$PinnedJarNames = @()
+  )
+
+  $pinnedJarNameSet = @{}
+  foreach ($name in $PinnedJarNames) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $pinnedJarNameSet[$name.ToLowerInvariant()] = $name
+  }
+  $protectedJarNameSet = @{}
+
+  $remaining = @($Mods)
+  if ($pinnedJarNameSet.Count -gt 0) {
+    $remaining = @($remaining | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
+  }
+  if (-not $remaining -or $remaining.Count -eq 0) {
+    return [pscustomobject]@{
+      Mode = "ContinueLinear"
+      Remaining = @()
+      Reason = "empty"
+    }
+  }
+
+  $attemptIndex = 0
+  while ($remaining.Count -gt $BinaryLinearThreshold) {
+    if ($remaining.Count -le 1) { break }
+
+    $attemptIndex++
+    $halfCount = [Math]::Ceiling($remaining.Count / 2)
+    $testGroup = @($remaining | Select-Object -First $halfCount)
+    $otherGroup = @($remaining | Select-Object -Skip $halfCount)
+    if (-not $otherGroup -or $otherGroup.Count -eq 0) { break }
+
+    Write-Host ("Binary isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
+
+    $testNames = @($testGroup | ForEach-Object { $_.Name })
+    $pinnedJarNames = @($pinnedJarNameSet.Values)
+    $probeResult = Invoke-IsolationProbe -TestJarNames $testNames `
+      -BaselineSignature $BaselineSignature `
+      -BaselineEvidenceKey $BaselineEvidenceKey `
+      -PhasePrefix "binary_attempt" `
+      -PinnedJarNames $pinnedJarNames
+
+    if ($probeResult.Mode -eq "DependencyDialog") {
+      $recovery = Invoke-FabricDependencyRecovery -RequiringModIds $probeResult.RequiringModIds `
+        -MissingDepIds $probeResult.MissingDepIds `
+        -RemovedJarNames $testNames `
+        -PinnedJarNameSet $pinnedJarNameSet `
+        -ProtectedJarNameSet $protectedJarNameSet
+      if ($recovery.Changes) {
+        $pinnedJarNames = @($pinnedJarNameSet.Values)
+        Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+        $remaining = @($remaining | Where-Object {
+            $key = $_.Name.ToLowerInvariant()
+            -not $pinnedJarNameSet.ContainsKey($key) -and -not $protectedJarNameSet.ContainsKey($key)
+          })
+        if (-not $remaining -or $remaining.Count -eq 0) {
+          return [pscustomobject]@{
+            Mode = "ContinueLinear"
+            Remaining = @()
+            Reason = "dependency_recovery_empty"
+          }
+        }
+        continue
+      }
+      Write-Host "Warning: dependency dialog detected but no recovery actions were taken. Continuing binary refinement." -ForegroundColor Yellow
+      $groupMatches = $false
+    } else {
+      $groupMatches = [bool]$probeResult.GroupMatches
+    }
+
+    if ($groupMatches) {
+      $remaining = $testGroup
+    } else {
+      $remaining = $otherGroup
+    }
+  }
+
+  $pinnedJarNames = @($pinnedJarNameSet.Values)
+  Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+  return [pscustomobject]@{
+    Mode = "ContinueLinear"
+    Remaining = $remaining
+    Reason = "threshold"
+  }
+}
+
+function Invoke-ExponentialIsolation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object[]]$Mods,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineSignature,
+    [Parameter(Mandatory = $true)]
+    [string]$BaselineEvidenceKey,
+    [Parameter(Mandatory = $false)]
+    [string[]]$PinnedJarNames = @()
+  )
+
+  $pinnedJarNameSet = @{}
+  foreach ($name in $PinnedJarNames) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $pinnedJarNameSet[$name.ToLowerInvariant()] = $name
+  }
+  $protectedJarNameSet = @{}
+
+  $remaining = @($Mods)
+  if ($pinnedJarNameSet.Count -gt 0) {
+    $remaining = @($remaining | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
+  }
+  if (-not $remaining -or $remaining.Count -eq 0) {
+    return [pscustomobject]@{
+      Mode = "ContinueLinear"
+      Remaining = @()
+      Reason = "empty"
+    }
+  }
+
+  $totalCount = $remaining.Count
+  $probeMax = [Math]::Floor($totalCount / 2)
+  if ($probeMax -lt 1) { $probeMax = 1 }
+  if ($probeMax -gt $totalCount) { $probeMax = $totalCount }
+
+  Write-Host ("Exponential probe max: {0}" -f $probeMax) -ForegroundColor Gray
+
+  $probeSize = 1
+  $previousSize = 0
+  $attemptIndex = 0
+  $selectedChunk = $null
+  $selectedReason = "exponential_miss"
+
+  while ($probeSize -le $probeMax) {
+    if ($probeSize -gt $totalCount) { $probeSize = $totalCount }
+
+    $attemptIndex++
+    $testGroup = @($remaining | Select-Object -First $probeSize)
+    if (-not $testGroup -or $testGroup.Count -eq 0) { break }
+
+    Write-Host ("Exponential isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
+
+    $testNames = @($testGroup | ForEach-Object { $_.Name })
+    $pinnedJarNames = @($pinnedJarNameSet.Values)
+    $probeResult = Invoke-IsolationProbe -TestJarNames $testNames `
+      -BaselineSignature $BaselineSignature `
+      -BaselineEvidenceKey $BaselineEvidenceKey `
+      -PhasePrefix "exponential_attempt" `
+      -PinnedJarNames $pinnedJarNames
+
+    if ($probeResult.Mode -eq "DependencyDialog") {
+      $recovery = Invoke-FabricDependencyRecovery -RequiringModIds $probeResult.RequiringModIds `
+        -MissingDepIds $probeResult.MissingDepIds `
+        -RemovedJarNames $testNames `
+        -PinnedJarNameSet $pinnedJarNameSet `
+        -ProtectedJarNameSet $protectedJarNameSet
+      if ($recovery.Changes) {
+        $pinnedJarNames = @($pinnedJarNameSet.Values)
+        Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+        $remaining = @($remaining | Where-Object {
+            $key = $_.Name.ToLowerInvariant()
+            -not $pinnedJarNameSet.ContainsKey($key) -and -not $protectedJarNameSet.ContainsKey($key)
+          })
+        $totalCount = $remaining.Count
+        if ($totalCount -eq 0) {
+          return [pscustomobject]@{
+            Mode = "ContinueLinear"
+            Remaining = @()
+            Reason = "dependency_recovery_empty"
+          }
+        }
+        $probeMax = [Math]::Floor($totalCount / 2)
+        if ($probeMax -lt 1) { $probeMax = 1 }
+        if ($probeMax -gt $totalCount) { $probeMax = $totalCount }
+        $probeSize = 1
+        $previousSize = 0
+        Write-Host ("Exponential isolation restarted after dependency recovery. Remaining: {0}" -f $totalCount) -ForegroundColor Gray
+        continue
+      }
+      Write-Host "Warning: dependency dialog detected but no recovery actions were taken. Continuing exponential probing." -ForegroundColor Yellow
+      $previousSize = $probeSize
+      $probeSize = $probeSize * 2
+      continue
+    }
+
+    if ([bool]$probeResult.GroupMatches) {
+      $chunkSize = $probeSize - $previousSize
+      if ($chunkSize -le 0) { $chunkSize = $probeSize }
+      $selectedChunk = @($remaining | Select-Object -Skip $previousSize -First $chunkSize)
+      $selectedReason = "exponential_match"
+      break
+    }
+
+    $previousSize = $probeSize
+    $probeSize = $probeSize * 2
+  }
+
+  if ($null -eq $selectedChunk) {
+    $selectedChunk = @($remaining | Select-Object -Skip $previousSize)
+  }
+
+  if (-not $selectedChunk -or $selectedChunk.Count -eq 0) {
+    $pinnedJarNames = @($pinnedJarNameSet.Values)
+    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+    return [pscustomobject]@{
+      Mode = "ContinueLinear"
+      Remaining = @()
+      Reason = "empty"
+    }
+  }
+
+  if ($selectedReason -eq "exponential_match") {
+    Write-Host ("Exponential isolation selected last chunk: {0} mod(s)" -f $selectedChunk.Count) -ForegroundColor Gray
+  } else {
+    Write-Host ("Exponential isolation selected remaining group: {0} mod(s)" -f $selectedChunk.Count) -ForegroundColor Gray
+  }
+
+  $pinnedJarNames = @($pinnedJarNameSet.Values)
+  $binaryResult = Invoke-BinaryIsolation -Mods $selectedChunk `
+    -BaselineSignature $BaselineSignature `
+    -BaselineEvidenceKey $BaselineEvidenceKey `
+    -PinnedJarNames $pinnedJarNames
+  return [pscustomobject]@{
+    Mode = $binaryResult.Mode
+    Remaining = $binaryResult.Remaining
+    Reason = ("{0}/{1}" -f $selectedReason, $binaryResult.Reason)
+  }
+}
+
 if (-not (Test-Path -LiteralPath $GameModsDir)) {
   throw ("GameModsDir not found: {0}" -f $GameModsDir)
 }
@@ -1978,6 +2719,10 @@ Write-Host ("Mods to test: {0}" -f $candidateMods.Count) -ForegroundColor Cyan
 Write-Host ("Quarantine dir: {0}" -f $gameQuarantineDir) -ForegroundColor Gray
 if ($useStorage) {
   Write-Host ("Storage quarantine dir: {0}" -f $storageQuarantineDir) -ForegroundColor Gray
+}
+Write-Host ("Isolation strategy: {0}" -f $effectiveIsolationStrategy) -ForegroundColor Gray
+if ($effectiveIsolationStrategy -eq "Exponential") {
+  Write-Host ("Binary refinement threshold: {0}" -f $BinaryLinearThreshold) -ForegroundColor Gray
 }
 
 if ($DryRun) {
@@ -2185,6 +2930,8 @@ try {
       Write-Verbose ("Baseline signature: {0}" -f $baselineSignature)
     }
 
+    $pinnedJarNameSet = @{}
+
     if ($PreIsolateJarNames -and $PreIsolateJarNames.Count -gt 0) {
       $canFastForward = $true
       if (-not [string]::IsNullOrWhiteSpace($PreIsolateBaselineEvidenceKey) -and -not [string]::IsNullOrWhiteSpace($baselineEvidenceKey)) {
@@ -2241,8 +2988,31 @@ try {
               IsFastForward = $true
             })
           $movedJarNameSet[$jarName] = $true
+          $pinnedJarNameSet[$jarName.ToLowerInvariant()] = $jarName
           Write-Verbose ("Fast-forward moved: {0} -> {1}" -f $jarName, $ffGameDest)
         }
+      }
+    }
+
+    $pinnedJarNames = @()
+    if ($pinnedJarNameSet.Count -gt 0) {
+      $pinnedJarNames = @($pinnedJarNameSet.Values)
+    }
+
+    if ($effectiveIsolationStrategy -eq "Exponential") {
+      $exponentialCandidates = @($candidateMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
+      if ($exponentialCandidates.Count -gt 0) {
+        Write-Host ("Exponential isolation enabled. Candidates: {0}" -f $exponentialCandidates.Count) -ForegroundColor Gray
+      } else {
+        Write-Host "Exponential isolation enabled, but no candidates remain after pinned exclusions." -ForegroundColor Yellow
+      }
+      if ($exponentialCandidates.Count -gt 0) {
+        $exponentialResult = Invoke-ExponentialIsolation -Mods $exponentialCandidates `
+          -BaselineSignature $baselineSignature `
+          -BaselineEvidenceKey $baselineEvidenceKey `
+          -PinnedJarNames $pinnedJarNames
+        $candidateMods = @($exponentialResult.Remaining)
+        Write-Host ("Exponential isolation completed. Switching to linear with {0} mod(s) ({1})." -f $candidateMods.Count, $exponentialResult.Reason) -ForegroundColor Gray
       }
     }
 
@@ -2345,6 +3115,11 @@ try {
           Write-Host ("Warning: game processes still running after {0}s. Next file move may fail due to locks." -f $WaitForGameExitSeconds) -ForegroundColor Yellow
         }
       }
+
+      [void](Wait-ForLauncherWindowInteractive -TitlePattern $LauncherWindowTitlePattern `
+          -CrashPatterns $CrashWindowTitlePatterns `
+          -FabricPatterns $FabricWindowTitlePatterns `
+          -PollSeconds $PollIntervalSeconds)
 
       if ($outcome.Type -eq "Timeout") {
         $culpritJarNames = @($mod.Name)
