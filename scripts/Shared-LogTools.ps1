@@ -53,9 +53,13 @@ function Get-AdditionalGameLogPath {
 
   $crashDir = Join-Path -Path $gameRoot -ChildPath "crash-reports"
   if (Test-Path -LiteralPath $crashDir) {
-    $latestCrash = Get-ChildItem -LiteralPath $crashDir -Filter "*.txt" -File -ErrorAction SilentlyContinue |
-      Sort-Object -Property LastWriteTime -Descending |
-      Select-Object -First 1
+    # ! Avoid Select-Object -First which can emit PipelineStoppedException under $ErrorActionPreference='Stop'.
+    $crashFiles = @(Get-ChildItem -LiteralPath $crashDir -Filter "*.txt" -File -ErrorAction SilentlyContinue |
+        Sort-Object -Property LastWriteTime -Descending)
+    $latestCrash = $null
+    if ($crashFiles -and $crashFiles.Count -gt 0) {
+      $latestCrash = $crashFiles[0]
+    }
     if ($latestCrash) { $paths.Add($latestCrash.FullName) }
   }
 

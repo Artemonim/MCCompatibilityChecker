@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Detects incompatible Minecraft mods from Fabric/TLauncher logs.
 
@@ -398,7 +398,8 @@ function Build-ModIdToJarMap {
   foreach ($d in $ExcludeDirNames) { $excludeSet[$d.ToLowerInvariant()] = $true }
 
   $map = @{}
-  $files = Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction Stop
+  $files = Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction Stop |
+    Sort-Object -Property LastWriteTime -Descending
   foreach ($f in $files) {
     $ids = Get-FabricModIdsFromJar -JarPath $f.FullName
     if (-not $ids -or $ids.Count -eq 0) { continue }
@@ -408,6 +409,22 @@ function Build-ModIdToJarMap {
     }
   }
   return $map
+}
+
+function Get-LastWriteTimeSafe {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+    return [datetime]::MinValue
+  }
+  try {
+    return (Get-Item -LiteralPath $Path -ErrorAction Stop).LastWriteTime
+  } catch {
+    return [datetime]::MinValue
+  }
 }
 
 function Move-OrDelete {
@@ -500,10 +517,8 @@ if ($nonFabricJarNames.Count -gt 0) {
   $nonFabricJarNames = @($nonFabricJarNames | Select-Object -Unique)
 }
 
-if ($compatLogsEnabled) {
-  $legacyLogPath = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
-  Write-LegacyLog -EvidenceByModId $evidenceByModId -LogPath $legacyLogPath
-}
+# * Legacy.log is now maintained as a persistent culprit-move log by Auto-Run-LegacyLauncher.
+# * Evidence logging removed; culprit entries are appended by Layer-Mods / Isolate scripts.
 
 if ($evidenceByModId.Count -eq 0 -and (-not $TreatNonFabricAsIncompatible)) {
   Write-Host "No incompatible mods detected from current log patterns." -ForegroundColor Green
@@ -544,11 +559,38 @@ foreach ($p in $storageRootJars) {
 }
 $storageIdToJars = Build-ModIdToJarMap -DirPath $StorageModsDir
 
+$modIdOrder = New-Object System.Collections.Generic.List[object]
+foreach ($modId in $evidenceByModId.Keys) {
+  $latestWrite = [datetime]::MinValue
+  if ($gameIdToJars.ContainsKey($modId)) {
+    foreach ($jarPath in @($gameIdToJars[$modId])) {
+      $mtime = Get-LastWriteTimeSafe -Path $jarPath
+      if ($mtime -gt $latestWrite) { $latestWrite = $mtime }
+    }
+  }
+  $null = $modIdOrder.Add([pscustomobject]@{
+      ModId = $modId
+      LastWriteTime = $latestWrite
+    })
+}
+$modIdSortProps = @(
+  @{ Expression = { $_.LastWriteTime }; Descending = $true }
+  @{ Expression = { $_.ModId }; Ascending = $true }
+)
+$orderedModIds = @($modIdOrder | Sort-Object -Property $modIdSortProps | ForEach-Object { $_.ModId })
+
 $actions = New-Object System.Collections.Generic.List[object]
 
-foreach ($modId in ($evidenceByModId.Keys | Sort-Object)) {
+foreach ($modId in $orderedModIds) {
   $gameJarPaths = @()
   if ($gameIdToJars.ContainsKey($modId)) { $gameJarPaths = @($gameIdToJars[$modId]) }
+  if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
+    $gameJarSortProps = @(
+      @{ Expression = { Get-LastWriteTimeSafe -Path $_ }; Descending = $true }
+      @{ Expression = { $_ }; Ascending = $true }
+    )
+    $gameJarPaths = @($gameJarPaths | Sort-Object -Property $gameJarSortProps)
+  }
 
   if (-not $gameJarPaths -or $gameJarPaths.Count -eq 0) {
     $actions.Add([pscustomobject]@{
@@ -590,6 +632,26 @@ foreach ($modId in ($evidenceByModId.Keys | Sort-Object)) {
 }
 
 if ($TreatNonFabricAsIncompatible -and $nonFabricJarNames -and $nonFabricJarNames.Count -gt 0) {
+  $nonFabricOrder = New-Object System.Collections.Generic.List[object]
+  foreach ($jarName in $nonFabricJarNames) {
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
+    $storagePath = Join-Path -Path $StorageModsDir -ChildPath $jarName
+    $mtime = Get-LastWriteTimeSafe -Path $gamePath
+    if ($mtime -eq [datetime]::MinValue) {
+      $mtime = Get-LastWriteTimeSafe -Path $storagePath
+    }
+    $null = $nonFabricOrder.Add([pscustomobject]@{
+        JarName = $jarName
+        LastWriteTime = $mtime
+      })
+  }
+  $nonFabricSortProps = @(
+    @{ Expression = { $_.LastWriteTime }; Descending = $true }
+    @{ Expression = { $_.JarName }; Ascending = $true }
+  )
+  $nonFabricJarNames = @($nonFabricOrder | Sort-Object -Property $nonFabricSortProps | ForEach-Object { $_.JarName })
+
   foreach ($jarName in $nonFabricJarNames) {
     $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
     $storagePath = Join-Path -Path $StorageModsDir -ChildPath $jarName

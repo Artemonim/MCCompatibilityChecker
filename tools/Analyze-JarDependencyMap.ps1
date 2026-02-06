@@ -501,10 +501,13 @@ foreach ($jarFile in $jarFiles) {
             if (-not [string]::IsNullOrWhiteSpace($modId)) {
                 $providedIds.Add($modId) | Out-Null
             }
-            $providedFromJson = Get-ProvidedModIdList -ProvidesValue $modJson.provides
-            foreach ($item in $providedFromJson) {
-                if (-not [string]::IsNullOrWhiteSpace($item)) {
-                    $providedIds.Add($item) | Out-Null
+            # ! "provides" is optional in fabric.mod.json; guard before access.
+            if ($modJson.PSObject.Properties.Name -contains "provides") {
+                $providedFromJson = Get-ProvidedModIdList -ProvidesValue $modJson.provides
+                foreach ($item in $providedFromJson) {
+                    if (-not [string]::IsNullOrWhiteSpace($item)) {
+                        $providedIds.Add($item) | Out-Null
+                    }
                 }
             }
             $providedList = @($providedIds.ToArray() | Sort-Object -Unique)
@@ -553,7 +556,10 @@ foreach ($jarFile in $jarFiles) {
                 throw
             }
 
-            $loader = $modJson.quilt_loader
+            $loader = $null
+            if ($modJson.PSObject.Properties.Name -contains "quilt_loader") {
+                $loader = $modJson.quilt_loader
+            }
             if ($loader) {
                 $modId = ""
                 $modName = ""
@@ -585,10 +591,13 @@ foreach ($jarFile in $jarFiles) {
                 if (-not [string]::IsNullOrWhiteSpace($modId)) {
                     $providedIds.Add($modId) | Out-Null
                 }
-                $providedFromJson = Get-ProvidedModIdList -ProvidesValue $loader.provides
-                foreach ($item in $providedFromJson) {
-                    if (-not [string]::IsNullOrWhiteSpace($item)) {
-                        $providedIds.Add($item) | Out-Null
+                # ! "provides" is optional in quilt.mod.json; guard before access.
+                if ($loader.PSObject.Properties.Name -contains "provides") {
+                    $providedFromJson = Get-ProvidedModIdList -ProvidesValue $loader.provides
+                    foreach ($item in $providedFromJson) {
+                        if (-not [string]::IsNullOrWhiteSpace($item)) {
+                            $providedIds.Add($item) | Out-Null
+                        }
                     }
                 }
                 $providedList = @($providedIds.ToArray() | Sort-Object -Unique)

@@ -1,4 +1,58 @@
-﻿function Invoke-ConfiguredLaunchAttempt {
+# * Kills game processes (java/javaw/Minecraft) started after a given time.
+# * Filters using Test-ProcessLooksLikeMinecraftGame to avoid killing the launcher wrapper.
+function Stop-GameProcess {
+  [CmdletBinding(SupportsShouldProcess = $true)]
+  [OutputType([int])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Names,
+    [Parameter(Mandatory = $true)]
+    [datetime]$StartedAfter,
+    [Parameter(Mandatory = $false)]
+    [int]$WaitAfterKillSeconds = 3
+  )
+
+  $recent = Get-RecentProcessesByName -Names $Names -StartedAfter $StartedAfter
+  if (-not $recent -or $recent.Count -eq 0) { return 0 }
+
+  $killed = 0
+  foreach ($p in $recent) {
+    if (-not (Test-ProcessLooksLikeMinecraftGame -Process $p)) {
+      Write-Verbose ("Skipping non-game process: {0} (pid {1})" -f $p.Name, $p.Id)
+      continue
+    }
+    $label = "{0} (pid {1})" -f $p.Name, $p.Id
+    if (-not $PSCmdlet.ShouldProcess($label, "Kill game process")) { continue }
+    try {
+      Write-Host ("Stopping game process: {0}" -f $label) -ForegroundColor Gray
+      $p.Kill()
+      $killed++
+    } catch {
+      Write-Verbose ("Failed to kill process {0}: {1}" -f $label, $_.Exception.Message)
+    }
+  }
+
+  if ($killed -gt 0 -and $WaitAfterKillSeconds -gt 0) {
+    Start-Sleep -Seconds $WaitAfterKillSeconds
+  }
+
+  return $killed
+}
+
+# * Stops game processes using the configured names and waits for them to exit.
+function Stop-ConfiguredGameProcess {
+  [CmdletBinding(SupportsShouldProcess = $true)]
+  [OutputType([int])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [datetime]$StartedAfter
+  )
+
+  if (-not $PSCmdlet.ShouldProcess("Minecraft game processes", "Stop")) { return 0 }
+  return Stop-GameProcess -Names $GameProcessNames -StartedAfter $StartedAfter
+}
+
+function Invoke-ConfiguredLaunchAttempt {
   param(
     [Parameter(Mandatory = $false)]
     [long[]]$IgnoreHandleIds = @()
@@ -291,6 +345,39 @@ function Wait-ForOutcome {
     Start-Sleep -Seconds $PollSeconds
   }
 
+  # * Late outcome check: dialogs/process exit can occur at the timeout boundary.
+  $fabricWindowLate = Select-WindowByTitlePattern -Patterns $FabricPatterns
+  if ($null -ne $fabricWindowLate) {
+    return [pscustomobject]@{
+      Type = "FabricDialog"
+      Window = $fabricWindowLate
+      GameStarted = $gameStarted
+      LauncherClosed = $launcherClosed
+      LaunchObserved = $true
+    }
+  }
+
+  $crashWindowLate = Select-WindowByTitlePattern -Patterns $CrashPatterns
+  if ($null -ne $crashWindowLate) {
+    return [pscustomobject]@{
+      Type = "CrashDialog"
+      Window = $crashWindowLate
+      GameStarted = $gameStarted
+      LauncherClosed = $launcherClosed
+      LaunchObserved = $true
+    }
+  }
+
+  if ($gameObservedOnce -and $observedGamePids.Count -gt 0) {
+    foreach ($processId in @($observedGamePids.Keys)) {
+      $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+      if ($null -eq $proc) {
+        $null = $observedGamePids.Remove($processId)
+        $gameExited = $true
+      }
+    }
+  }
+
   $launchTriggered = $gameStarted -or $launcherClosed -or $logUpdated
   if ($RequireGameStartForTimeout -and (-not $gameStarted)) {
     return [pscustomobject]@{
@@ -409,6 +496,12 @@ function Wait-ForLauncherWindowInteractive {
   )
 
   $promptMessage = "Не удалось увидеть окно лаунчера. Закройте неизвестное мешающее окно (включая игру, если она запущена) и нажмите OK для продолжения."
+  # * Retry counter: wait and retry before prompting the user.
+  # * The launcher may be temporarily invisible while re-rendering or
+  # * a transient overlay window (e.g. from the game restart) may block detection.
+  $unknownRetryCount = 0
+  $unknownRetryMax = 3
+  $unknownRetryDelaySeconds = 5
   while ($true) {
     $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns
     if ($null -ne $fabricWindow) {
@@ -418,6 +511,7 @@ function Wait-ForLauncherWindowInteractive {
         -OffsetX -1 `
         -OffsetY -1
       Start-Sleep -Seconds $PollSeconds
+      $unknownRetryCount = 0
       continue
     }
 
@@ -429,11 +523,20 @@ function Wait-ForLauncherWindowInteractive {
         -OffsetX -1 `
         -OffsetY -1
       Start-Sleep -Seconds $PollSeconds
+      $unknownRetryCount = 0
       continue
     }
 
     $launcherWindow = Select-WindowByTitlePattern -Patterns @($TitlePattern)
     if ($null -ne $launcherWindow) { return $launcherWindow }
+
+    # * No known window found. Retry silently before prompting the user.
+    $unknownRetryCount++
+    if ($unknownRetryCount -le $unknownRetryMax) {
+      Write-Host ("Launcher window not found (attempt {0}/{1}). Retrying in {2}s..." -f $unknownRetryCount, $unknownRetryMax, $unknownRetryDelaySeconds) -ForegroundColor Yellow
+      Start-Sleep -Seconds $unknownRetryDelaySeconds
+      continue
+    }
 
     [void][System.Windows.Forms.MessageBox]::Show(
       $promptMessage,
@@ -442,6 +545,8 @@ function Wait-ForLauncherWindowInteractive {
       [System.Windows.Forms.MessageBoxIcon]::Warning
     )
     Start-Sleep -Seconds $PollSeconds
+    # * Reset counter after the user acknowledges — they may have closed the blocker.
+    $unknownRetryCount = 0
   }
 }
 

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Automates Legacy Launcher runs and triggers mod cleanup on crash dialog.
 
@@ -237,6 +237,25 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$BinaryLinearThreshold = 0,
 
+  # * Enables extended stability confirmation (60s) in Layer-Mods.ps1 instead of the default 20s.
+  [Parameter(Mandatory = $false)]
+  [switch]$ThoroughStabilityCheck,
+
+  # * If true, uses MCCC.json in GameModsDir to skip previously passed mods (by SHA256).
+  [Parameter(Mandatory = $false)]
+  [bool]$UseHashCache = $true,
+
+  # * Cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$HashCacheFileName = "MCCC.json",
+
+  # * File hash retry settings (handles transient locks).
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryCount = 3,
+
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryDelayMs = 200,
+
   # * Additional arguments to pass to Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
   [string[]]$CheckScriptArguments = @(),
@@ -288,6 +307,150 @@ $ErrorActionPreference = "Stop"
 $transcriptLogPath = Join-Path -Path $PSScriptRoot -ChildPath "MCCC.log"
 $enableTranscript = $PSBoundParameters.ContainsKey("Verbose")
 $transcriptStarted = $false
+$script:OutcomeTimeoutSecondsBound = $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
+
+# * Keeps session report data initialized for early exits.
+$sessionIsolationCulpritByJar = @{}
+$sessionIsolationCulpritHistoryByJar = @{}
+$sessionRecoveredJarNames = @{}
+$sessionMixinConflicts = @()
+
+# * Hash-cache session controls (auto-disable after an unresolved crash).
+$script:hashCacheAttemptedThisSession = $false
+$script:hashCacheDisabledThisSession = $false
+
+# * Session timing (initialized early so it's available in finally block).
+$sessionStartTime = Get-Date
+
+# * Session summary helpers.
+function Get-LatestCompatReportPath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ReportDir
+  )
+
+  if (-not (Test-Path -LiteralPath $ReportDir)) { return "" }
+  $reports = Get-ChildItem -LiteralPath $ReportDir -Filter "compat-report-*.json" -File -ErrorAction SilentlyContinue |
+    Sort-Object -Property LastWriteTime -Descending
+  if (-not $reports -or $reports.Count -eq 0) { return "" }
+  return [string]$reports[0].FullName
+}
+
+function Write-SessionReport {
+  param(
+    [Parameter(Mandatory = $true)]
+    [hashtable]$CulpritHistoryByJar,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$CulpritCurrentByJar,
+    [Parameter(Mandatory = $false)]
+    [string]$CompatReportPath = "",
+    [Parameter(Mandatory = $false)]
+    [datetime]$SessionStartTime = [datetime]::MinValue,
+    [Parameter(Mandatory = $false)]
+    [hashtable]$RecoveredJarNames = @{},
+    [Parameter(Mandatory = $false)]
+    [array]$MixinConflicts = @()
+  )
+
+  Write-Host ""
+  Write-Host "Session report" -ForegroundColor Cyan
+  $endTime = Get-Date
+  Write-Host ("End time: {0}" -f $endTime.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
+  if ($SessionStartTime -ne [datetime]::MinValue) {
+    $elapsed = $endTime - $SessionStartTime
+    $parts = @()
+    if ($elapsed.Hours -gt 0) { $parts += ("{0}h" -f $elapsed.Hours) }
+    if ($elapsed.Minutes -gt 0) { $parts += ("{0}m" -f $elapsed.Minutes) }
+    $parts += ("{0}s" -f $elapsed.Seconds)
+    Write-Host ("Elapsed: {0}" -f ($parts -join " ")) -ForegroundColor Gray
+  }
+  if (-not [string]::IsNullOrWhiteSpace($CompatReportPath)) {
+    Write-Host ("Compatibility report: {0}" -f $CompatReportPath) -ForegroundColor Gray
+  }
+
+  $historyMoves = @($CulpritHistoryByJar.Values | Where-Object { $null -ne $_ })
+  if (-not $historyMoves -or $historyMoves.Count -eq 0) {
+    Write-Host "No culprits detected in this session." -ForegroundColor Green
+  } else {
+    # * Group culprits by stage for detailed report.
+    $byStage = @{}
+    foreach ($move in $historyMoves) {
+      if ($null -eq $move) { continue }
+      $jarName = [string]$move.JarName
+      if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+      $stage = "unknown"
+      if ($move | Get-Member -Name "Stage" -MemberType NoteProperty, Property) {
+        $s = [string]$move.Stage
+        if (-not [string]::IsNullOrWhiteSpace($s)) { $stage = $s }
+      }
+      if (-not $byStage.ContainsKey($stage)) { $byStage[$stage] = @() }
+      $byStage[$stage] += @($move)
+    }
+
+    $uniqueMoves = @($historyMoves | Sort-Object -Property JarName -Unique)
+    Write-Host ("Culprits detected: {0}" -f $uniqueMoves.Count) -ForegroundColor Yellow
+
+    # * Display by stage.
+    $stageLabels = @{
+      "mixin-analysis" = "Mixin analysis"
+      "layering"       = "Layering"
+      "isolation"      = "Subtractive isolation"
+      "recovery"       = "Recovery (root cause)"
+      "unknown"        = "Other"
+    }
+    foreach ($stage in @("mixin-analysis", "layering", "isolation", "recovery", "unknown")) {
+      if (-not $byStage.ContainsKey($stage)) { continue }
+      $stageLabel = if ($stageLabels.ContainsKey($stage)) { $stageLabels[$stage] } else { $stage }
+      $stageMoves = @($byStage[$stage])
+      Write-Host ("  [{0}] ({1}):" -f $stageLabel, $stageMoves.Count) -ForegroundColor Gray
+      foreach ($move in ($stageMoves | Sort-Object -Property JarName)) {
+        $jarName = [string]$move.JarName
+        $locations = New-Object System.Collections.Generic.List[string]
+        $storagePath = [string]$move.StorageLegacyPath
+        $gamePath = [string]$move.GameLegacyPath
+        if (-not [string]::IsNullOrWhiteSpace($storagePath)) { $locations.Add(("storage: {0}" -f $storagePath)) }
+        if (-not [string]::IsNullOrWhiteSpace($gamePath)) { $locations.Add(("game: {0}" -f $gamePath)) }
+        $locationLabel = if ($locations.Count -gt 0) { $locations -join "; " } else { "location unknown" }
+        Write-Host ("    - {0} ({1})" -f $jarName, $locationLabel) -ForegroundColor Gray
+      }
+    }
+  }
+
+  # * Show recovered (restored) mods from phantom culprit recovery.
+  if ($RecoveredJarNames -and $RecoveredJarNames.Count -gt 0) {
+    $recoveredNames = @($RecoveredJarNames.Values | Sort-Object -Unique)
+    Write-Host ("Recovered (restored from false positive): {0}" -f $recoveredNames.Count) -ForegroundColor Green
+    foreach ($rn in $recoveredNames) {
+      Write-Host ("  + {0}" -f $rn) -ForegroundColor Green
+    }
+  }
+
+  # * Show Mixin conflict info and developer notification recommendation.
+  if ($MixinConflicts -and $MixinConflicts.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Mixin conflicts detected ({0}):" -f $MixinConflicts.Count) -ForegroundColor Cyan
+    foreach ($conflict in $MixinConflicts) {
+      $srcLabel = [string]$conflict.SourceModId
+      $srcJar = [string]$conflict.SourceJar
+      $tgtLabel = if (-not [string]::IsNullOrWhiteSpace([string]$conflict.TargetModId)) { [string]$conflict.TargetModId } else { [string]$conflict.TargetClass }
+      $tgtJar = [string]$conflict.TargetJar
+      $srcDisplay = if (-not [string]::IsNullOrWhiteSpace($srcJar)) { "{0} ({1})" -f $srcLabel, $srcJar } else { $srcLabel }
+      $tgtDisplay = if (-not [string]::IsNullOrWhiteSpace($tgtJar)) { "{0} ({1})" -f $tgtLabel, $tgtJar } else { $tgtLabel }
+      Write-Host ("  {0} → {1}" -f $srcDisplay, $tgtDisplay) -ForegroundColor Gray
+    }
+    Write-Host ""
+    Write-Host "Please report these incompatibilities to the developers of the affected mods" -ForegroundColor Yellow
+    Write-Host "so they can fix the broken Mixin references in future updates." -ForegroundColor Yellow
+  }
+
+  $currentNames = @($CulpritCurrentByJar.Values |
+      ForEach-Object { $_.JarName } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+      Sort-Object -Unique)
+  if ($currentNames -and $currentNames.Count -gt 0) {
+    Write-Host ("Currently isolated mods: {0}" -f ($currentNames -join ", ")) -ForegroundColor Yellow
+  }
+}
 
 try {
   if ($enableTranscript) {
@@ -297,6 +460,10 @@ try {
     Start-Transcript -Path $transcriptLogPath -Force | Out-Null
     $transcriptStarted = $true
   }
+
+  # * Write session header to legacy.log (append-only, session-divided).
+  $legacyLogPath = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
+  Add-Content -LiteralPath $legacyLogPath -Value ("" + [Environment]::NewLine + (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
 
   $effectiveAutoLaunch = ([bool]$UseAutoLaunch) -and (-not [bool]$DisableAutoLaunch)
 
@@ -312,6 +479,14 @@ if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
 }
 . $sharedConfigPath
 
+# * Optional: MCCC.json hash cache helpers (used to speed up layering/isolation).
+$sharedIsolationHashCachePath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-HashCache.ps1"
+if (Test-Path -LiteralPath $sharedIsolationHashCachePath) {
+  . $sharedIsolationHashCachePath
+} elseif ($UseHashCache) {
+  throw ("Shared hash cache helpers not found: {0}" -f $sharedIsolationHashCachePath)
+}
+
 $projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
 if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
   Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
@@ -323,6 +498,30 @@ if (-not $PSBoundParameters.ContainsKey("LauncherExePath")) {
 }
 if (-not $PSBoundParameters.ContainsKey("LogPath")) {
   $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
+}
+
+$script:hashCacheGameModsDir = ""
+$script:hashCachePath = ""
+$script:hashCacheObject = $null
+if (-not $DryRun -and $UseHashCache) {
+  $defaultGameModsDir = Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods'
+  $cfgGameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default ""
+  $script:hashCacheGameModsDir = $(if (-not [string]::IsNullOrWhiteSpace($cfgGameModsDir)) { $cfgGameModsDir } else { $defaultGameModsDir })
+  if (Test-Path -LiteralPath $script:hashCacheGameModsDir) {
+    $script:hashCachePath = Get-McccHashCachePath -GameModsDir $script:hashCacheGameModsDir -FileName $HashCacheFileName
+    $script:hashCacheObject = Read-McccHashCache -Path $script:hashCachePath
+    try {
+      if (-not (Test-Path -LiteralPath $script:hashCachePath)) {
+        Write-McccHashCache -Path $script:hashCachePath -Cache $script:hashCacheObject
+      }
+    } catch {
+      Write-Host ("Warning: failed to create hash cache file: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+      $script:hashCacheObject = $null
+    }
+  } else {
+    Write-Host ("Warning: GameModsDir not found; hash cache disabled: {0}" -f $script:hashCacheGameModsDir) -ForegroundColor Yellow
+    $script:hashCacheObject = $null
+  }
 }
 
 # * Load shared UI helpers.
@@ -349,6 +548,18 @@ if ($effectiveIsolateOnNoChanges) {
     throw ("Isolation script not found: {0}" -f $IsolateScriptPath)
   }
 }
+
+# * Layering script: fallback strategy that adds mods in exponential batches.
+$LayerScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Layer-Mods.ps1"
+$layeringAvailable = Test-Path -LiteralPath $LayerScriptPath
+
+# * Mixin analysis script: targeted Mixin error resolution (runs before layering).
+$MixinAnalysisScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Analyze-MixinErrors.ps1"
+$mixinAnalysisAvailable = Test-Path -LiteralPath $MixinAnalysisScriptPath
+
+# * Recovery script: post-isolation phantom culprit recovery.
+$RecoveryScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Recover-PhantomCulprits.ps1"
+$recoveryAvailable = Test-Path -LiteralPath $RecoveryScriptPath
 
 function Get-CompatibilityArg {
   $compatArgs = @()
@@ -478,7 +689,124 @@ function Get-IsolationParam {
       $isolateParams["PreIsolateBaselineEvidenceKey"] = $sessionIsolationFastForwardEvidenceKey
     }
   }
+
+  $effectiveHashCache = ([bool]$UseHashCache) -and (-not [bool]$script:hashCacheDisabledThisSession)
+  $isolateParams["UseHashCache"] = [bool]$effectiveHashCache
+  if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $isolateParams["HashCacheFileName"] = $HashCacheFileName }
+  if ($HashCacheHashRetryCount -gt 0) { $isolateParams["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
+  if ($HashCacheHashRetryDelayMs -ge 0) { $isolateParams["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
   return $isolateParams
+}
+
+function Get-LayeringParam {
+  param(
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeEmitResultObject = $false,
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeKeepCulpritInGameLegacy = $false
+  )
+
+  $layerParams = @{}
+  if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) {
+    $layerParams["LauncherExePath"] = $LauncherExePath
+  }
+  if ($LauncherArguments -and $LauncherArguments.Count -gt 0) {
+    $layerParams["LauncherArguments"] = $LauncherArguments
+  }
+  if ($effectiveAutoLaunch) {
+    $layerParams["UseAutoLaunch"] = $true
+  }
+  if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) {
+    $layerParams["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern
+  }
+  if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) {
+    $layerParams["PlayButtonNames"] = $PlayButtonNames
+  }
+  if ($PlayClickOffsetX -ge 0) { $layerParams["PlayClickOffsetX"] = $PlayClickOffsetX }
+  if ($PlayClickOffsetY -ge 0) { $layerParams["PlayClickOffsetY"] = $PlayClickOffsetY }
+  if (-not $UseEnterFallback) { $layerParams["UseEnterFallback"] = $false }
+  if ($EnableBroadUiSearch) { $layerParams["EnableBroadUiSearch"] = $true }
+  if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
+    $layerParams["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
+  }
+  if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) {
+    $layerParams["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns
+  }
+  if ($CrashCloseClickOffsetX -ge 0) { $layerParams["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX }
+  if ($CrashCloseClickOffsetY -ge 0) { $layerParams["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY }
+  if ($CrashCloseDelaySeconds -gt 0) { $layerParams["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds }
+  if ($LauncherWindowTimeoutSeconds -gt 0) { $layerParams["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds }
+  if ($script:OutcomeTimeoutSecondsBound -and $OutcomeTimeoutSeconds -gt 0) { $layerParams["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds }
+  if ($PollIntervalSeconds -gt 0) { $layerParams["PollIntervalSeconds"] = $PollIntervalSeconds }
+  if (-not [string]::IsNullOrWhiteSpace($LogPath)) { $layerParams["LogPath"] = $LogPath }
+  if ($PSBoundParameters.ContainsKey("Verbose")) { $layerParams["Verbose"] = $true }
+  if ($IncludeKeepCulpritInGameLegacy -and $GameLegacy) {
+    $layerParams["KeepCulpritInGameLegacy"] = $true
+  }
+  if ($ThoroughStabilityCheck) { $layerParams["ThoroughStabilityCheck"] = $true }
+  if ($IncludeEmitResultObject) { $layerParams["EmitResultObject"] = $true }
+
+  $effectiveHashCache = ([bool]$UseHashCache) -and (-not [bool]$script:hashCacheDisabledThisSession)
+  $layerParams["UseHashCache"] = [bool]$effectiveHashCache
+  if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $layerParams["HashCacheFileName"] = $HashCacheFileName }
+  if ($HashCacheHashRetryCount -gt 0) { $layerParams["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
+  if ($HashCacheHashRetryDelayMs -ge 0) { $layerParams["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
+
+  return $layerParams
+}
+
+function Get-MixinAnalysisParam {
+  # * Builds parameter hashtable for Analyze-MixinErrors.ps1.
+  $p = @{}
+  if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) { $p["LauncherExePath"] = $LauncherExePath }
+  if ($LauncherArguments -and $LauncherArguments.Count -gt 0) { $p["LauncherArguments"] = $LauncherArguments }
+  if ($effectiveAutoLaunch) { $p["UseAutoLaunch"] = $true }
+  if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) { $p["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern }
+  if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) { $p["PlayButtonNames"] = $PlayButtonNames }
+  if ($PlayClickOffsetX -ge 0) { $p["PlayClickOffsetX"] = $PlayClickOffsetX }
+  if ($PlayClickOffsetY -ge 0) { $p["PlayClickOffsetY"] = $PlayClickOffsetY }
+  if (-not $UseEnterFallback) { $p["UseEnterFallback"] = $false }
+  if ($EnableBroadUiSearch) { $p["EnableBroadUiSearch"] = $true }
+  if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) { $p["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns }
+  if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) { $p["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns }
+  if ($CrashCloseClickOffsetX -ge 0) { $p["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX }
+  if ($CrashCloseClickOffsetY -ge 0) { $p["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY }
+  if ($CrashCloseDelaySeconds -gt 0) { $p["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds }
+  if ($LauncherWindowTimeoutSeconds -gt 0) { $p["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds }
+  if ($script:OutcomeTimeoutSecondsBound -and $OutcomeTimeoutSeconds -gt 0) { $p["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds }
+  if ($PollIntervalSeconds -gt 0) { $p["PollIntervalSeconds"] = $PollIntervalSeconds }
+  if (-not [string]::IsNullOrWhiteSpace($LogPath)) { $p["LogPath"] = $LogPath }
+  if ($PSBoundParameters.ContainsKey("Verbose")) { $p["Verbose"] = $true }
+  if ($GameLegacy) { $p["KeepCulpritInGameLegacy"] = $true }
+  $p["EmitResultObject"] = $true
+  return $p
+}
+
+function Get-RecoveryParam {
+  # * Builds parameter hashtable for Recover-PhantomCulprits.ps1.
+  $p = @{}
+  if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) { $p["LauncherExePath"] = $LauncherExePath }
+  if ($LauncherArguments -and $LauncherArguments.Count -gt 0) { $p["LauncherArguments"] = $LauncherArguments }
+  if ($effectiveAutoLaunch) { $p["UseAutoLaunch"] = $true }
+  if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) { $p["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern }
+  if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) { $p["PlayButtonNames"] = $PlayButtonNames }
+  if ($PlayClickOffsetX -ge 0) { $p["PlayClickOffsetX"] = $PlayClickOffsetX }
+  if ($PlayClickOffsetY -ge 0) { $p["PlayClickOffsetY"] = $PlayClickOffsetY }
+  if (-not $UseEnterFallback) { $p["UseEnterFallback"] = $false }
+  if ($EnableBroadUiSearch) { $p["EnableBroadUiSearch"] = $true }
+  if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) { $p["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns }
+  if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) { $p["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns }
+  if ($CrashCloseClickOffsetX -ge 0) { $p["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX }
+  if ($CrashCloseClickOffsetY -ge 0) { $p["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY }
+  if ($CrashCloseDelaySeconds -gt 0) { $p["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds }
+  if ($LauncherWindowTimeoutSeconds -gt 0) { $p["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds }
+  if ($script:OutcomeTimeoutSecondsBound -and $OutcomeTimeoutSeconds -gt 0) { $p["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds }
+  if ($PollIntervalSeconds -gt 0) { $p["PollIntervalSeconds"] = $PollIntervalSeconds }
+  if ($PSBoundParameters.ContainsKey("Verbose")) { $p["Verbose"] = $true }
+  if ($GameLegacy) { $p["KeepCulpritInGameLegacy"] = $true }
+  $p["DependencyMapSource"] = "File"
+  $p["EmitResultObject"] = $true
+  return $p
 }
 
 function Format-IsolationParamsForDisplay {
@@ -729,6 +1057,7 @@ if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset
 $sessionIsolationFastForwardJarNames = @()
 $sessionIsolationFastForwardEvidenceKey = ""
 $sessionIsolationCulpritByJar = @{}
+$sessionIsolationCulpritHistoryByJar = @{}
 
 $attempt = 0
 while ($true) {
@@ -777,6 +1106,11 @@ while ($true) {
   if ($outcome.Type -eq "CrashDialog") {
     Write-Host "Outcome: crash dialog detected. Running compatibility cleanup." -ForegroundColor Yellow
 
+    if (([bool]$UseHashCache) -and $script:hashCacheAttemptedThisSession -and (-not $script:hashCacheDisabledThisSession)) {
+      Write-Host "Hash cache did not resolve the crash in this session. Retrying without hashes." -ForegroundColor Yellow
+      $script:hashCacheDisabledThisSession = $true
+    }
+
     if (-not $DryRun) {
       $compatArgs = Get-CompatibilityArg
       $forwardVerbose = [bool]$PSBoundParameters.ContainsKey("Verbose")
@@ -793,37 +1127,390 @@ while ($true) {
       if ($compatExitCode -ne 0) {
         if ($compatExitCode -eq 3) {
           if ($effectiveIsolateOnNoChanges) {
-            Write-Host "Compatibility cleanup made no changes. Running isolation." -ForegroundColor Cyan
-            $isolateParams = Get-IsolationParam -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
-            $isolateExtraArgs = Get-IsolationExtraArg
+            # * Step 1: Try targeted Mixin analysis before heavy isolation.
+            $ranMixinAnalysis = $false
+            $mixinResolved = $false
+            if ($mixinAnalysisAvailable) {
+              Write-Host "Compatibility cleanup made no changes. Trying Mixin error analysis." -ForegroundColor Cyan
+              $mixinParams = Get-MixinAnalysisParam
+              $mixinResult = $null
+              $mixinExitCode = 1
+              try {
+                $mixinResult = & $MixinAnalysisScriptPath @mixinParams
+                $mixinExitCode = $LASTEXITCODE
+              } catch [System.Management.Automation.PipelineStoppedException] {
+                Write-Host "Mixin analysis interrupted by user (Ctrl+C)." -ForegroundColor Yellow
+              } catch {
+                Write-Host ("Warning: Mixin analysis failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+              }
+              $ranMixinAnalysis = $true
 
-            $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
-            $isolateExitCode = $LASTEXITCODE
-            if ($isolateExitCode -ne 0) {
-              Write-Host ("Isolation failed with exit code {0}. Stopping." -f $isolateExitCode) -ForegroundColor Red
-              exit $isolateExitCode
-            }
-
-            $isolationResultObj = $isolationResult
-            if ($isolationResultObj -is [System.Array]) {
-              $isolationResultObj = $isolationResultObj | Select-Object -Last 1
-            }
-            if ($null -ne $isolationResultObj -and ($isolationResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
-              if ($isolationResultObj.Type -eq "IsolationResult") {
-                $sessionIsolationFastForwardJarNames = @($isolationResultObj.FastForwardJarNames)
-                $sessionIsolationFastForwardEvidenceKey = [string]$isolationResultObj.BaselineEvidenceKey
-                foreach ($move in @($isolationResultObj.CulpritMoves)) {
-                  if ($null -eq $move) { continue }
-                  $name = [string]$move.JarName
-                  if ([string]::IsNullOrWhiteSpace($name)) { continue }
-                  $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+              $mixinResultObj = $mixinResult
+              if ($mixinResultObj -is [System.Array]) {
+                if ($mixinResultObj.Count -gt 0) { $mixinResultObj = $mixinResultObj[$mixinResultObj.Count - 1] }
+                else { $mixinResultObj = $null }
+              }
+              if ($null -ne $mixinResultObj -and ($mixinResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
+                # * Collect Mixin conflict info regardless of resolution outcome.
+                if ($mixinResultObj.Type -eq "MixinAnalysisResult" -and ($mixinResultObj | Get-Member -Name "MixinConflicts" -MemberType NoteProperty, Property)) {
+                  $conflicts = @($mixinResultObj.MixinConflicts)
+                  if ($conflicts.Count -gt 0) {
+                    $sessionMixinConflicts = @($conflicts)
+                  }
                 }
+
+                if ($mixinResultObj.Type -eq "MixinAnalysisResult" -and $mixinResultObj.Resolved) {
+                  foreach ($move in @($mixinResultObj.CulpritMoves)) {
+                    if ($null -eq $move) { continue }
+                    $name = [string]$move.JarName
+                    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                    $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+                    $sessionIsolationCulpritHistoryByJar[$name.ToLowerInvariant()] = $move
+                  }
+                  $mixinResolved = $true
+                  Write-Host "Mixin analysis resolved the crash. Returning to main loop." -ForegroundColor Cyan
+                  Start-Sleep -Seconds 2
+                  continue
+                }
+              }
+              if (-not $mixinResolved -and $ranMixinAnalysis) {
+                Write-Host ("Mixin analysis did not resolve (exit {0}). Proceeding to layering." -f $mixinExitCode) -ForegroundColor Gray
               }
             }
 
-            Write-Host "Isolation completed. Returning to main loop." -ForegroundColor Cyan
-            Start-Sleep -Seconds 2
-            continue
+            # * Step 2: Try layering (additive strategy), then fall back to subtractive isolation.
+            $ranLayering = $false
+            if ($layeringAvailable) {
+              Write-Host "Running layering strategy." -ForegroundColor Cyan
+              $layerParams = Get-LayeringParam -IncludeEmitResultObject $true -IncludeKeepCulpritInGameLegacy $true
+              $usedHashCacheNow = $false
+              if ($layerParams.ContainsKey("UseHashCache")) {
+                $usedHashCacheNow = [bool]$layerParams["UseHashCache"]
+              }
+              if ($usedHashCacheNow) { $script:hashCacheAttemptedThisSession = $true }
+
+              $layeringResult = $null
+              $layerExitCode = 1
+              try {
+                $layeringResult = & $LayerScriptPath @layerParams
+                $layerExitCode = $LASTEXITCODE
+              } catch [System.Management.Automation.PipelineStoppedException] {
+                Write-Host "Layering interrupted by user (Ctrl+C)." -ForegroundColor Yellow
+                $layerExitCode = 1
+              } catch {
+                Write-Host ("Warning: layering failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                $layerExitCode = 1
+              }
+              $ranLayering = $true
+
+              $layeringResultObj = $layeringResult
+              if ($layeringResultObj -is [System.Array]) {
+                if ($layeringResultObj.Count -gt 0) {
+                  $layeringResultObj = $layeringResultObj[$layeringResultObj.Count - 1]
+                } else {
+                  $layeringResultObj = $null
+                }
+              }
+              $layerCulpritCount = 0
+              $layerSkippedCount = 0
+              if ($null -ne $layeringResultObj -and ($layeringResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
+                if ($layeringResultObj.Type -eq "LayeringResult") {
+                  try {
+                    $layerSkippedCount = @($layeringResultObj.HashCacheSkippedJarNames).Count
+                  } catch {
+                    $layerSkippedCount = 0
+                  }
+                  foreach ($move in @($layeringResultObj.CulpritMoves)) {
+                    if ($null -eq $move) { continue }
+                    $name = [string]$move.JarName
+                    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                    $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+                    $sessionIsolationCulpritHistoryByJar[$name.ToLowerInvariant()] = $move
+                    $layerCulpritCount++
+                  }
+                  if ($layerCulpritCount -eq 0) {
+                    foreach ($name in @($layeringResultObj.CulpritJarNames)) {
+                      $n = [string]$name
+                      if ([string]::IsNullOrWhiteSpace($n)) { continue }
+                      $move = [pscustomobject]@{
+                        JarName = $n
+                        GameModsDir = [string]$layeringResultObj.GameModsDir
+                        StorageModsDir = [string]$layeringResultObj.StorageModsDir
+                        StorageLegacyPath = ""
+                        GameLegacyPath = ""
+                        Minecraft = [string]$layeringResultObj.Minecraft
+                        KeepCulpritInGameLegacy = $true
+                        CrashEvidenceKey = ""
+                        Stage = "layering"
+                      }
+                      $sessionIsolationCulpritByJar[$n.ToLowerInvariant()] = $move
+                      $sessionIsolationCulpritHistoryByJar[$n.ToLowerInvariant()] = $move
+                      $layerCulpritCount++
+                    }
+                  }
+                }
+              }
+
+              if ($usedHashCacheNow -and $layerExitCode -eq 0 -and $layerCulpritCount -eq 0 -and $layerSkippedCount -gt 0) {
+                Write-Host "Layering with hash cache skipped mods but found no culprits. Retrying without hashes." -ForegroundColor Yellow
+                $script:hashCacheDisabledThisSession = $true
+
+                $layerParams = Get-LayeringParam -IncludeEmitResultObject $true -IncludeKeepCulpritInGameLegacy $true
+                $usedHashCacheNow = $false
+
+                $layeringResult = $null
+                $layerExitCode = 1
+                try {
+                  $layeringResult = & $LayerScriptPath @layerParams
+                  $layerExitCode = $LASTEXITCODE
+                } catch [System.Management.Automation.PipelineStoppedException] {
+                  Write-Host "Layering retry interrupted by user (Ctrl+C)." -ForegroundColor Yellow
+                  $layerExitCode = 1
+                } catch {
+                  Write-Host ("Warning: layering retry failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                  $layerExitCode = 1
+                }
+
+                $layeringResultObj = $layeringResult
+                if ($layeringResultObj -is [System.Array]) {
+                  if ($layeringResultObj.Count -gt 0) {
+                    $layeringResultObj = $layeringResultObj[$layeringResultObj.Count - 1]
+                  } else {
+                    $layeringResultObj = $null
+                  }
+                }
+
+                if ($null -ne $layeringResultObj -and ($layeringResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
+                  if ($layeringResultObj.Type -eq "LayeringResult") {
+                    foreach ($move in @($layeringResultObj.CulpritMoves)) {
+                      if ($null -eq $move) { continue }
+                      $name = [string]$move.JarName
+                      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                      $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+                      $sessionIsolationCulpritHistoryByJar[$name.ToLowerInvariant()] = $move
+                    }
+                    foreach ($name in @($layeringResultObj.CulpritJarNames)) {
+                      $n = [string]$name
+                      if ([string]::IsNullOrWhiteSpace($n)) { continue }
+                      if ($sessionIsolationCulpritHistoryByJar.ContainsKey($n.ToLowerInvariant())) { continue }
+                      $move = [pscustomobject]@{
+                        JarName = $n
+                        GameModsDir = [string]$layeringResultObj.GameModsDir
+                        StorageModsDir = [string]$layeringResultObj.StorageModsDir
+                        StorageLegacyPath = ""
+                        GameLegacyPath = ""
+                        Minecraft = [string]$layeringResultObj.Minecraft
+                        KeepCulpritInGameLegacy = $true
+                        CrashEvidenceKey = ""
+                        Stage = "layering"
+                      }
+                      $sessionIsolationCulpritByJar[$n.ToLowerInvariant()] = $move
+                      $sessionIsolationCulpritHistoryByJar[$n.ToLowerInvariant()] = $move
+                    }
+                  }
+                }
+              }
+
+              if ($layerExitCode -eq 0) {
+                # * Step 3: Recovery — try to restore phantom culprits.
+                if ($recoveryAvailable -and $sessionIsolationCulpritHistoryByJar.Count -ge 3) {
+                  Write-Host "Running phantom culprit recovery analysis." -ForegroundColor Cyan
+                  $recParams = Get-RecoveryParam
+                  $culpritDataForRecovery = @($sessionIsolationCulpritHistoryByJar.Values | ForEach-Object {
+                      [pscustomobject]@{
+                        JarName = [string]$_.JarName
+                        CrashEvidenceKey = if ($_ | Get-Member -Name "CrashEvidenceKey" -MemberType NoteProperty, Property) { [string]$_.CrashEvidenceKey } else { "" }
+                        StorageLegacyPath = [string]$_.StorageLegacyPath
+                        GameLegacyPath = [string]$_.GameLegacyPath
+                      }
+                    })
+                  $recParams["CulpritDataJson"] = ($culpritDataForRecovery | ConvertTo-Json -Compress -Depth 5)
+                  $firstCulpritMove = $sessionIsolationCulpritHistoryByJar.Values | Select-Object -First 1
+                  if ($null -ne $firstCulpritMove) {
+                    $recParams["Minecraft"] = if ($firstCulpritMove | Get-Member -Name "Minecraft" -MemberType NoteProperty, Property) { [string]$firstCulpritMove.Minecraft } else { "unknown" }
+                  }
+                  try {
+                    $recResult = & $RecoveryScriptPath @recParams
+                    $recObj = $recResult
+                    if ($recObj -is [System.Array] -and $recObj.Count -gt 0) { $recObj = $recObj[$recObj.Count - 1] }
+                    if ($null -ne $recObj -and ($recObj | Get-Member -Name "Type" -MemberType NoteProperty, Property) -and $recObj.Type -eq "RecoveryResult") {
+                      foreach ($restored in @($recObj.RestoredJarNames)) {
+                        $rk = [string]$restored
+                        if (-not [string]::IsNullOrWhiteSpace($rk)) {
+                          $sessionIsolationCulpritByJar.Remove($rk.ToLowerInvariant())
+                          $sessionIsolationCulpritHistoryByJar.Remove($rk.ToLowerInvariant())
+                          $sessionRecoveredJarNames[$rk.ToLowerInvariant()] = $rk
+                        }
+                      }
+                      foreach ($newCulprit in @($recObj.NewCulpritJarNames)) {
+                        $nk = [string]$newCulprit
+                        if ([string]::IsNullOrWhiteSpace($nk)) { continue }
+                        $move = [pscustomobject]@{
+                          JarName = $nk; GameModsDir = ""; StorageModsDir = ""; StorageLegacyPath = ""
+                          GameLegacyPath = ""; Minecraft = ""; KeepCulpritInGameLegacy = $true
+                          CrashEvidenceKey = ""; Stage = "recovery"
+                        }
+                        $sessionIsolationCulpritByJar[$nk.ToLowerInvariant()] = $move
+                        $sessionIsolationCulpritHistoryByJar[$nk.ToLowerInvariant()] = $move
+                      }
+                    }
+                  } catch {
+                    Write-Host ("Warning: recovery failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                  }
+                }
+                Write-Host "Layering completed. Returning to main loop." -ForegroundColor Cyan
+                Start-Sleep -Seconds 2
+                continue
+              }
+              Write-Host ("Layering finished with exit code {0}. Falling back to isolation." -f $layerExitCode) -ForegroundColor Yellow
+            }
+
+            if (-not $ranLayering -or $layerExitCode -ne 0) {
+              Write-Host "Running subtractive isolation." -ForegroundColor Cyan
+              $isolateParams = Get-IsolationParam -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
+              $usedHashCacheNow = $false
+              if ($isolateParams.ContainsKey("UseHashCache")) {
+                $usedHashCacheNow = [bool]$isolateParams["UseHashCache"]
+              }
+              if ($usedHashCacheNow) { $script:hashCacheAttemptedThisSession = $true }
+
+              $isolateExtraArgs = Get-IsolationExtraArg
+
+              $isolationResult = $null
+              $isolateExitCode = 1
+              try {
+                $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
+                $isolateExitCode = $LASTEXITCODE
+              } catch [System.Management.Automation.PipelineStoppedException] {
+                Write-Host "Isolation interrupted by user (Ctrl+C)." -ForegroundColor Yellow
+                $isolateExitCode = 1
+              } catch {
+                Write-Host ("Warning: isolation failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                $isolateExitCode = 1
+              }
+
+              $isolationResultObj = $isolationResult
+              if ($isolationResultObj -is [System.Array]) {
+                if ($isolationResultObj.Count -gt 0) {
+                  $isolationResultObj = $isolationResultObj[$isolationResultObj.Count - 1]
+                } else {
+                  $isolationResultObj = $null
+                }
+              }
+
+              $isolateSkippedCount = 0
+              $isolateCulpritCount = 0
+              if ($null -ne $isolationResultObj -and ($isolationResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
+                if ($isolationResultObj.Type -eq "IsolationResult") {
+                  try {
+                    $isolateSkippedCount = @($isolationResultObj.HashCacheSkippedJarNames).Count
+                  } catch {
+                    $isolateSkippedCount = 0
+                  }
+                  $sessionIsolationFastForwardJarNames = @($isolationResultObj.FastForwardJarNames)
+                  $sessionIsolationFastForwardEvidenceKey = [string]$isolationResultObj.BaselineEvidenceKey
+                  foreach ($move in @($isolationResultObj.CulpritMoves)) {
+                    if ($null -eq $move) { continue }
+                    $name = [string]$move.JarName
+                    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                    $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+                    $sessionIsolationCulpritHistoryByJar[$name.ToLowerInvariant()] = $move
+                    $isolateCulpritCount++
+                  }
+                  if ($isolateCulpritCount -eq 0) {
+                    foreach ($name in @($isolationResultObj.CulpritJarNames)) {
+                      $n = [string]$name
+                      if ([string]::IsNullOrWhiteSpace($n)) { continue }
+                      $move = [pscustomobject]@{
+                        JarName = $n
+                        GameModsDir = [string]$isolationResultObj.GameModsDir
+                        StorageModsDir = [string]$isolationResultObj.StorageModsDir
+                        StorageLegacyPath = ""
+                        GameLegacyPath = ""
+                        Minecraft = [string]$isolationResultObj.Minecraft
+                        KeepCulpritInGameLegacy = $true
+                        CrashEvidenceKey = ""
+                        Stage = "isolation"
+                      }
+                      $sessionIsolationCulpritByJar[$n.ToLowerInvariant()] = $move
+                      $sessionIsolationCulpritHistoryByJar[$n.ToLowerInvariant()] = $move
+                      $isolateCulpritCount++
+                    }
+                  }
+                }
+              }
+
+              if ($isolateExitCode -ne 0 -and $usedHashCacheNow -and $isolateSkippedCount -gt 0) {
+                Write-Host "Isolation with hash cache skipped mods but did not succeed. Retrying without hashes." -ForegroundColor Yellow
+                $script:hashCacheDisabledThisSession = $true
+
+                $isolateParams = Get-IsolationParam -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
+                $usedHashCacheNow = $false
+
+                $isolationResult = $null
+                $isolateExitCode = 1
+                try {
+                  $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
+                  $isolateExitCode = $LASTEXITCODE
+                } catch [System.Management.Automation.PipelineStoppedException] {
+                  Write-Host "Isolation retry interrupted by user (Ctrl+C)." -ForegroundColor Yellow
+                  $isolateExitCode = 1
+                } catch {
+                  Write-Host ("Warning: isolation retry failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                  $isolateExitCode = 1
+                }
+
+                $isolationResultObj = $isolationResult
+                if ($isolationResultObj -is [System.Array]) {
+                  if ($isolationResultObj.Count -gt 0) {
+                    $isolationResultObj = $isolationResultObj[$isolationResultObj.Count - 1]
+                  } else {
+                    $isolationResultObj = $null
+                  }
+                }
+
+                if ($null -ne $isolationResultObj -and ($isolationResultObj | Get-Member -Name "Type" -MemberType NoteProperty, Property)) {
+                  if ($isolationResultObj.Type -eq "IsolationResult") {
+                    $sessionIsolationFastForwardJarNames = @($isolationResultObj.FastForwardJarNames)
+                    $sessionIsolationFastForwardEvidenceKey = [string]$isolationResultObj.BaselineEvidenceKey
+                    foreach ($move in @($isolationResultObj.CulpritMoves)) {
+                      if ($null -eq $move) { continue }
+                      $name = [string]$move.JarName
+                      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                      $sessionIsolationCulpritByJar[$name.ToLowerInvariant()] = $move
+                      $sessionIsolationCulpritHistoryByJar[$name.ToLowerInvariant()] = $move
+                    }
+                    foreach ($name in @($isolationResultObj.CulpritJarNames)) {
+                      $n = [string]$name
+                      if ([string]::IsNullOrWhiteSpace($n)) { continue }
+                      if ($sessionIsolationCulpritHistoryByJar.ContainsKey($n.ToLowerInvariant())) { continue }
+                      $move = [pscustomobject]@{
+                        JarName = $n
+                        GameModsDir = [string]$isolationResultObj.GameModsDir
+                        StorageModsDir = [string]$isolationResultObj.StorageModsDir
+                        StorageLegacyPath = ""
+                        GameLegacyPath = ""
+                        Minecraft = [string]$isolationResultObj.Minecraft
+                        KeepCulpritInGameLegacy = $true
+                        CrashEvidenceKey = ""
+                        Stage = "isolation"
+                      }
+                      $sessionIsolationCulpritByJar[$n.ToLowerInvariant()] = $move
+                      $sessionIsolationCulpritHistoryByJar[$n.ToLowerInvariant()] = $move
+                    }
+                  }
+                }
+              }
+
+              if ($isolateExitCode -ne 0) {
+                Write-Host ("Isolation failed with exit code {0}. Stopping." -f $isolateExitCode) -ForegroundColor Red
+                exit $isolateExitCode
+              }
+
+              Write-Host "Isolation completed. Returning to main loop." -ForegroundColor Cyan
+              Start-Sleep -Seconds 2
+              continue
+            }
           }
           Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop." -ForegroundColor Yellow
           exit 3
@@ -918,6 +1605,48 @@ while ($true) {
   }
 }
 } finally {
+  try {
+    if ($sessionIsolationCulpritHistoryByJar.Count -eq 0 -and (Test-Path -LiteralPath $transcriptLogPath)) {
+      try {
+        $lines = Get-Content -LiteralPath $transcriptLogPath -ErrorAction Stop
+        foreach ($line in $lines) {
+          $m = [regex]::Match([string]$line, "^\s*Culprit identified:\s+(?<jar>.+?\.jar)\s*$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+          if (-not $m.Success) { continue }
+          $jarName = [string]$m.Groups["jar"].Value
+          if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+          $key = $jarName.ToLowerInvariant()
+          if ($sessionIsolationCulpritHistoryByJar.ContainsKey($key)) { continue }
+          $move = [pscustomobject]@{
+            JarName = $jarName
+            GameModsDir = $script:hashCacheGameModsDir
+            StorageModsDir = ""
+            StorageLegacyPath = ""
+            GameLegacyPath = ""
+            Minecraft = ""
+            KeepCulpritInGameLegacy = $true
+            CrashEvidenceKey = ""
+            Stage = "unknown"
+          }
+          $sessionIsolationCulpritHistoryByJar[$key] = $move
+        }
+      } catch {
+        Write-Verbose ("Failed to infer culprits from transcript: {0}" -f $_.Exception.Message)
+      }
+    }
+
+    $latestCompatReportPath = Get-LatestCompatReportPath -ReportDir $PSScriptRoot
+    $reportParams = @{
+      CulpritHistoryByJar = $sessionIsolationCulpritHistoryByJar
+      CulpritCurrentByJar = $sessionIsolationCulpritByJar
+      CompatReportPath = $latestCompatReportPath
+      SessionStartTime = $sessionStartTime
+      RecoveredJarNames = $sessionRecoveredJarNames
+      MixinConflicts = $sessionMixinConflicts
+    }
+    Write-SessionReport @reportParams
+  } catch {
+    Write-Host ("Warning: failed to generate session report: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+  }
   if ($transcriptStarted) {
     Stop-Transcript | Out-Null
   }

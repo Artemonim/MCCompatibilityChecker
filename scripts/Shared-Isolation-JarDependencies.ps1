@@ -44,9 +44,27 @@ function Test-JarNameMatchesAnyId {
 
     if ($AllowTokenMatch) {
       # * Token match for cases like: missing dep "libjf-base" vs jar "libjf-3.19.3+backport.jar".
+      # ! Avoid overly generic token matches that can accidentally match most jars (e.g. "fabric").
+      $stopTokens = @{
+        "api"       = $true
+        "client"    = $true
+        "common"    = $true
+        "core"      = $true
+        "fabric"    = $true
+        "forge"     = $true
+        "loader"    = $true
+        "mc"        = $true
+        "minecraft" = $true
+        "mod"       = $true
+        "mods"      = $true
+        "neoforge"  = $true
+        "quilt"     = $true
+        "server"    = $true
+      }
       $tokens = $idLower -split "[-_\\.]"
       foreach ($t in $tokens) {
         if ($t.Length -lt 3) { continue }
+        if ($stopTokens.ContainsKey($t)) { continue }
         if ($name -like ("*{0}*" -f $t)) { return $true }
       }
     }

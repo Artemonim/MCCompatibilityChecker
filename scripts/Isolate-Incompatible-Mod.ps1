@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Isolates a crashing mod by moving jars to Legacy (binary or linear).
 
@@ -434,6 +434,21 @@ param(
   [Parameter(Mandatory = $false)]
   [string[]]$ExcludeJarNames = @(),
 
+  # * If true, uses MCCC.json in GameModsDir to skip previously passed mods (by SHA256).
+  [Parameter(Mandatory = $false)]
+  [bool]$UseHashCache = $true,
+
+  # * Cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$HashCacheFileName = "MCCC.json",
+
+  # * File hash retry settings (handles transient locks).
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryCount = 3,
+
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryDelayMs = 200,
+
   # * Optional jar file names to quarantine after baseline (fast-forward resume).
   [Parameter(Mandatory = $false)]
   [string[]]$PreIsolateJarNames = @(),
@@ -536,6 +551,12 @@ if (-not (Test-Path -LiteralPath $sharedIsolationErrorDumpPath)) {
 }
 . $sharedIsolationErrorDumpPath
 
+$sharedIsolationHashCachePath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-HashCache.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationHashCachePath)) {
+  throw ("Shared hash cache helpers not found: {0}" -f $sharedIsolationHashCachePath)
+}
+. $sharedIsolationHashCachePath
+
 $projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
 if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
   Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
@@ -631,6 +652,48 @@ if ($ExcludeJarNames -and $ExcludeJarNames.Count -gt 0) {
 
 if ($MaxModsToTest -gt 0 -and $candidateMods.Count -gt $MaxModsToTest) {
   $candidateMods = @($candidateMods | Select-Object -First $MaxModsToTest)
+}
+
+# * Optional: skip mods that already passed in prior sessions (MCCC.json SHA256 cache).
+$script:mcccCacheEnabled = $false
+$script:mcccCachePath = ""
+$script:mcccCache = $null
+$script:mcccKnownGoodJarNameSet = @{}
+
+if ((-not $DryRun) -and $UseHashCache) {
+  $script:mcccCachePath = Get-McccHashCachePath -GameModsDir $GameModsDir -FileName $HashCacheFileName
+  $script:mcccCache = Read-McccHashCache -Path $script:mcccCachePath
+  $script:mcccCacheEnabled = $true
+
+  # * Ensure the cache file exists so it can be inspected/edited by the user.
+  try {
+    if (-not [string]::IsNullOrWhiteSpace($script:mcccCachePath) -and -not (Test-Path -LiteralPath $script:mcccCachePath)) {
+      Write-McccHashCache -Path $script:mcccCachePath -Cache $script:mcccCache
+    }
+  } catch {
+    Write-Host ("Warning: failed to create hash cache file: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    $script:mcccCacheEnabled = $false
+  }
+
+  $passedCount = 0
+  if ($script:mcccCacheEnabled -and $null -ne $script:mcccCache -and $script:mcccCache.ContainsKey("passed") -and ($script:mcccCache["passed"] -is [hashtable])) {
+    $passedCount = $script:mcccCache["passed"].Count
+  }
+
+  if ($script:mcccCacheEnabled -and $passedCount -gt 0 -and $candidateMods -and $candidateMods.Count -gt 0) {
+    foreach ($mod in $candidateMods) {
+      $hash = Get-Sha256LowerHex -Path $mod.FullName -Retries $HashCacheHashRetryCount -DelayMs $HashCacheHashRetryDelayMs
+      if ([string]::IsNullOrWhiteSpace($hash)) { continue }
+      if (Test-McccHashPassed -Cache $script:mcccCache -Sha256LowerHex $hash) {
+        $script:mcccKnownGoodJarNameSet[$mod.Name.ToLowerInvariant()] = $hash
+      }
+    }
+
+    if ($script:mcccKnownGoodJarNameSet.Count -gt 0) {
+      $candidateMods = @($candidateMods | Where-Object { -not $script:mcccKnownGoodJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
+      Write-Host ("Hash cache: skipping {0} previously passed mod(s)." -f $script:mcccKnownGoodJarNameSet.Count) -ForegroundColor Gray
+    }
+  }
 }
 
 # * Apply dependency-aware ordering (tiers by number of incoming dependents).
@@ -789,6 +852,10 @@ $script:lastBaselinePinnedKey = ""
 $baselineSignature = ""
 $baselineEvidenceKey = ""
 $activeBaselineSignature = ""
+# * Used by dot-sourced Shared-Isolation-Strategy.ps1 (hybrid isolation).
+# * PSScriptAnalyzer cannot see cross-script usage; suppress with explicit reference.
+$script:activeBaselineEvidenceKey = ""
+$null = $script:activeBaselineEvidenceKey
 $baselineOutcome = "Unknown"
 $mcVersionForLegacy = "unknown"
 $exitCode = 0
@@ -796,6 +863,7 @@ $culpritJarNames = @()
 $culpritMoves = New-Object System.Collections.Generic.List[object]
 $stopReason = ""
 $hadError = $false
+$wasCtrlC = $false
 $script:lastOutcomeHandleId = 0
 $baselineSucceeded = $false
 $skipIsolation = $false
@@ -844,6 +912,7 @@ try {
       -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
     $baselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
     $activeBaselineSignature = $baselineSignature
+    $script:activeBaselineEvidenceKey = $baselineEvidenceKey
 
     if ([string]::IsNullOrWhiteSpace($baselineSignature)) {
       Write-Host "Baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
@@ -988,6 +1057,7 @@ try {
         $activeBaselineSignature = Get-ErrorSignature -Lines $linearBaselineSnapshot.Lines `
           -MaxLines $ErrorSignatureLineLimit `
           -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+        $script:activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $linearBaselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
         if ([string]::IsNullOrWhiteSpace($activeBaselineSignature)) {
           Write-Host "Linear phase baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
         } else {
@@ -1004,6 +1074,13 @@ try {
   }
   }
   }
+} catch [System.Management.Automation.PipelineStoppedException] {
+  # * User pressed Ctrl+C. Restore all mods; skip error dump.
+  # * Write-Host during PipelineStoppedException may not appear in the transcript.
+  # * The user-facing message is emitted from the finally block instead.
+  $hadError = $true
+  $wasCtrlC = $true
+  $exitCode = 1
 } catch {
   $hadError = $true
   $dumpDir = $gameQuarantineDir
@@ -1021,6 +1098,11 @@ try {
   }
   $exitCode = 1
 } finally {
+  if ($wasCtrlC) {
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "Isolation interrupted by user (Ctrl+C). Restoring mods..." -ForegroundColor Yellow
+    Write-Host ("Phase at interruption: {0}" -f $phase) -ForegroundColor Gray
+  }
   if (-not $DryRun -and $movedItems.Count -gt 0) {
     if ($hadError -and $KeepMovedModsOnFailure) {
       Write-Host "Keeping moved mods due to failure." -ForegroundColor Yellow
@@ -1102,6 +1184,9 @@ try {
           $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
           Move-Item -LiteralPath $item.StorageQuarantine -Destination $destPath -Force -ErrorAction Stop
           Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
+          # * Append to persistent legacy.log.
+          $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
+          Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
           $culpritStorageLegacyPath = $destPath
           $movedStorageLegacy = $true
         }
@@ -1113,6 +1198,9 @@ try {
           $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
           Move-Item -LiteralPath $storagePath -Destination $destPath -Force -ErrorAction Stop
           Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
+          # * Append to persistent legacy.log.
+          $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
+          Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
           $culpritStorageLegacyPath = $destPath
           $movedStorageLegacy = $true
         } else {
@@ -1178,6 +1266,7 @@ try {
         }
       }
 
+      $evKey = if ($script:activeBaselineEvidenceKey) { $script:activeBaselineEvidenceKey } else { "" }
       $culpritMoves.Add([pscustomobject]@{
           JarName = $culpritName
           GameModsDir = $GameModsDir
@@ -1186,6 +1275,8 @@ try {
           GameLegacyPath = $culpritGameLegacyPath
           Minecraft = $mcVersionForLegacy
           KeepCulpritInGameLegacy = [bool]$keepGameLegacyEffective
+          CrashEvidenceKey = $evKey
+          Stage = "isolation"
         })
     }
   }
@@ -1243,6 +1334,9 @@ if ($EmitResultObject) {
       GameModsDir = $GameModsDir
       StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
       Minecraft = $mcVersionForLegacy
+      HashCacheEnabled = [bool]$script:mcccCacheEnabled
+      HashCachePath = $script:mcccCachePath
+      HashCacheSkippedJarNames = @($script:mcccKnownGoodJarNameSet.Keys | Sort-Object)
       BaselineOutcome = $baselineOutcome
       BaselineSignature = $baselineSignature
       BaselineEvidenceKey = $baselineEvidenceKey

@@ -190,8 +190,10 @@ function Get-FabricMissingDependencyId {
   )
 
   $ids = @{}
-  # * Pattern: "... requires version ... of libjf-base, which is missing!"
-  $requiresMissingPattern = "requires\s+version\s+.+?\s+of\s+(?<id>[a-z0-9_\-\.]+),\s+which\s+is\s+missing"
+  # * Pattern: "... requires any version of modmenu, which is missing!"
+  # * Pattern: "... requires version 3.11.0 or later of resourcefullib, which is missing!"
+  # * Pattern: "... requires version 1.21.1 of 'Minecraft' (minecraft), which is missing!"
+  $requiresMissingPattern = "requires\s+.+?\s+of\s+(?:['""][^'""]+['""]\s+)?\(?\s*(?<id>[a-z0-9_\-\.]+)\s*\)?,?\s+which\s+is\s+missing"
   # * Pattern: "Could not find required mod: libjf-base"
   $couldNotFindPattern = "Could not find required mod:\s+(?<id>[a-z0-9_\-\.]+)\b"
   # * Pattern: "owo-lib is required to run the following mods"
@@ -411,4 +413,76 @@ function Test-DependencyDialogBlock {
   $script:blockedDependencyRequiring = @($info.RequiringModIds)
   $script:blockedDependencyContext = $Context
   return $true
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# * Mixin error parsing.
+# ────────────────────────────────────────────────────────────────────────────
+
+function Get-MixinErrorsFromLog {
+  <#
+  .SYNOPSIS
+  Parses Fabric Mixin errors from crash log lines.
+  Returns structured objects with source mod ID, target class, and the error line.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines
+  )
+
+  $results = New-Object System.Collections.Generic.List[pscustomobject]
+  $pattern = '@Mixin target\s+(?<targetClass>\S+)\s+was not found\s+(?<mixinJson>\S+?):(?<mixinClass>\S+)\s+from mod\s+(?<sourceModId>[a-z0-9_\-\.]+)'
+  $seen = @{}
+
+  foreach ($line in $Lines) {
+    $m = [regex]::Match($line, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $m.Success) { continue }
+    $sourceModId = $m.Groups["sourceModId"].Value.ToLowerInvariant()
+    $targetClass = $m.Groups["targetClass"].Value
+    $key = "{0}|{1}" -f $sourceModId, $targetClass
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    $results.Add([pscustomobject]@{
+        SourceModId = $sourceModId
+        TargetClass = $targetClass
+        MixinJson   = $m.Groups["mixinJson"].Value
+        MixinClass  = $m.Groups["mixinClass"].Value
+        ErrorLine   = $m.Value
+      })
+  }
+
+  return ,$results
+}
+
+function Resolve-ModIdFromClassName {
+  <#
+  .SYNOPSIS
+  Heuristically resolves a mod ID from a fully-qualified Java class name by matching
+  class-name segments against known mod IDs from the dependency map.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ClassName,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$KnownModIds
+  )
+
+  # * Split com.author.modname.package.Class into segments and check each.
+  $segments = $ClassName -split "\."
+  foreach ($seg in $segments) {
+    $key = $seg.ToLowerInvariant()
+    if ($KnownModIds.ContainsKey($key)) {
+      return $key
+    }
+  }
+
+  # * Fallback: try underscore-joined pairs (e.g., "item_borders").
+  for ($i = 0; $i -lt ($segments.Count - 1); $i++) {
+    $pair = ("{0}_{1}" -f $segments[$i], $segments[$i + 1]).ToLowerInvariant()
+    if ($KnownModIds.ContainsKey($pair)) {
+      return $pair
+    }
+  }
+
+  return $null
 }

@@ -44,6 +44,17 @@ function Invoke-IsolationProbe {
     }
   }
 
+  if ($outcome.Type -ne "FabricDialog" -and $outcome.Type -ne "CrashDialog") {
+    $crashWindowNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+    if ($null -ne $crashWindowNow) {
+      Write-Host ("Detected crash dialog after outcome: {0}" -f $crashWindowNow.Title) -ForegroundColor Yellow
+      $outcome = [pscustomobject]@{
+        Type = "CrashDialog"
+        Window = $crashWindowNow
+      }
+    }
+  }
+
   Write-Host ("Outcome: {0}" -f $outcome.Type) -ForegroundColor $(if ($outcome.Type -eq "Timeout") { "Green" } else { "Yellow" })
 
   if ($outcome.Type -ne "Timeout" -and $null -ne $outcome.Window) {
@@ -55,7 +66,13 @@ function Invoke-IsolationProbe {
       -CloseExtraFabricDialogs $true
   }
 
-  if ($outcome.Type -ne "Timeout") {
+  if ($outcome.Type -eq "Timeout") {
+    # * Game survived the probe window and is still running. Kill it so
+    # * the next iteration can move JAR files and launch a fresh instance.
+    $script:phase = ("{0}_stop_game_after_timeout" -f $PhasePrefix)
+    [void](Stop-ConfiguredGameProcess -StartedAfter $attemptStart)
+    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+  } else {
     $script:phase = ("{0}_wait_game_exit" -f $PhasePrefix)
     [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
   }
@@ -64,9 +81,9 @@ function Invoke-IsolationProbe {
     Start-Sleep -Seconds $LogPostRunDelaySeconds
     $script:phase = ("{0}_read_dependency_logs" -f $PhasePrefix)
     $snapshot = Get-ConfiguredLogSnapshot
-    $requiringModIds = @(Get-FabricRequiringModIds -Lines $snapshot.Lines) |
+    $requiringModIds = @(Get-FabricRequiringModId -Lines $snapshot.Lines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-    $missingDepIds = @(Get-FabricMissingDependencyIds -Lines $snapshot.Lines) |
+    $missingDepIds = @(Get-FabricMissingDependencyId -Lines $snapshot.Lines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
     Wait-ConfiguredLauncherInteractive
     return [pscustomobject]@{
@@ -174,7 +191,7 @@ function Invoke-FabricDependencyRecovery {
         $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingArr
       }
       if (-not $isLikelyRemovedDep) {
-        $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $jarName -Ids $missingArr
+        $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $jarName -Ids $missingArr -AllowTokenMatch:$false
       }
       if (-not $isLikelyRemovedDep) { continue }
 
@@ -268,14 +285,40 @@ function Invoke-BinaryIsolation {
     }
   }
 
+  # * Pre-check: remove ALL candidate mods at once. If the crash signature
+  # * does not change, the culprit is not in this set and binary search is futile.
+  if ($remaining.Count -gt 1) {
+    $allNames = @($remaining | ForEach-Object { $_.Name })
+    $pinnedJarNames = @($pinnedJarNameSet.Values)
+    Write-Host ("Binary isolation: verifying {0} candidate(s) removed at once..." -f $allNames.Count) -ForegroundColor Gray
+    $verifyResult = Invoke-IsolationProbe -TestJarNames $allNames `
+      -BaselineSignature $BaselineSignature `
+      -BaselineEvidenceKey $BaselineEvidenceKey `
+      -PhasePrefix "binary_verify_all" `
+      -PinnedJarNames $pinnedJarNames
+    if ($verifyResult.Mode -eq "DependencyDialog") {
+      Write-Host "Dependency dialog during verify-all probe. Proceeding to binary refinement." -ForegroundColor Yellow
+    } elseif (-not [bool]$verifyResult.GroupMatches) {
+      Write-Host "Removing all candidates did not change the crash. Culprit is not in this set." -ForegroundColor Yellow
+      $pinnedJarNames = @($pinnedJarNameSet.Values)
+      Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+      return [pscustomobject]@{
+        Mode = "ContinueLinear"
+        Remaining = @()
+        Reason = "all_removed_no_change"
+      }
+    }
+  }
+
   $attemptIndex = 0
   while ($remaining.Count -gt $BinaryLinearThreshold) {
     if ($remaining.Count -le 1) { break }
 
     $attemptIndex++
     $halfCount = [Math]::Ceiling($remaining.Count / 2)
-    $testGroup = @($remaining | Select-Object -First $halfCount)
-    $otherGroup = @($remaining | Select-Object -Skip $halfCount)
+    # ! Avoid Select-Object -First which can emit PipelineStoppedException under $ErrorActionPreference='Stop'.
+    $testGroup = @($remaining[0..($halfCount - 1)])
+    $otherGroup = @($remaining[$halfCount..($remaining.Count - 1)])
     if (-not $otherGroup -or $otherGroup.Count -eq 0) { break }
 
     Write-Host ("Binary isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
@@ -380,7 +423,8 @@ function Invoke-ExponentialIsolation {
     if ($probeSize -gt $totalCount) { $probeSize = $totalCount }
 
     $attemptIndex++
-    $testGroup = @($remaining | Select-Object -First $probeSize)
+    # ! Avoid Select-Object -First which can emit PipelineStoppedException under $ErrorActionPreference='Stop'.
+    $testGroup = @($remaining[0..($probeSize - 1)])
     if (-not $testGroup -or $testGroup.Count -eq 0) { break }
 
     Write-Host ("Exponential isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
@@ -636,8 +680,8 @@ function Invoke-LinearIsolation {
     }
 
     # * Fabric signals (from window or from logs). This makes behavior visible in console output.
-    $fabricIdsFromLogs = Get-FabricRequiringModIds -Lines $snapshot.Lines
-    $fabricMissingIdsFromLogs = Get-FabricMissingDependencyIds -Lines $snapshot.Lines
+    $fabricIdsFromLogs = Get-FabricRequiringModId -Lines $snapshot.Lines
+    $fabricMissingIdsFromLogs = Get-FabricMissingDependencyId -Lines $snapshot.Lines
     $fabricWindowNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
     if (($null -ne $fabricWindowNow) -or ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) -or ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0)) {
       $reqText = if ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) { $fabricIdsFromLogs -join ", " } else { "" }
@@ -674,7 +718,7 @@ function Invoke-LinearIsolation {
           $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingDepIdsArr
         }
         if (-not $isLikelyRemovedDep) {
-          $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr
+          $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr -AllowTokenMatch:$false
         }
       }
 
@@ -747,8 +791,8 @@ function Invoke-LinearIsolation {
       }
 
       # * Try to identify culprit mods from Fabric dependency errors.
-      $newModIds = Get-FabricRequiringModIds -Lines $snapshot.Lines
-      $missingDepIds = Get-FabricMissingDependencyIds -Lines $snapshot.Lines
+      $newModIds = Get-FabricRequiringModId -Lines $snapshot.Lines
+      $missingDepIds = Get-FabricMissingDependencyId -Lines $snapshot.Lines
       $newModIdsArr = @($newModIds)
       $missingDepIdsArr = @($missingDepIds)
 
@@ -770,7 +814,7 @@ function Invoke-LinearIsolation {
           $isLikelyRemovedDep = Test-AnyIdOverlap -IdsA $removedJarProvidesArr -IdsB $missingDepIdsArr
         }
         if (-not $isLikelyRemovedDep) {
-          $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr
+          $isLikelyRemovedDep = Test-JarNameMatchesAnyId -JarName $mod.Name -Ids $missingDepIdsArr -AllowTokenMatch:$false
         }
       }
 
