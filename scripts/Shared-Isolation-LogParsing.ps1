@@ -2,7 +2,11 @@ function Get-ConfiguredLogSnapshot {
   param(
     [Parameter(Mandatory = $false)]
     [AllowEmptyString()]
-    [string]$PrimaryLogPath = $LogPath
+    [string]$PrimaryLogPath = $LogPath,
+    [Parameter(Mandatory = $false)]
+    [datetime]$SinceTimestamp = [datetime]::MinValue,
+    [Parameter(Mandatory = $false)]
+    [int]$SinceTimestampSkewSeconds = 120
   )
 
   return Get-LogSnapshot -PrimaryLogPath $PrimaryLogPath `
@@ -10,7 +14,9 @@ function Get-ConfiguredLogSnapshot {
     -SkipGameLogs ([bool]$SkipGameLogs) `
     -LogMaxAgeMinutes $LogMaxAgeMinutes `
     -LogReadRetryCount $LogReadRetryCount `
-    -LogReadRetryDelayMs $LogReadRetryDelayMs
+    -LogReadRetryDelayMs $LogReadRetryDelayMs `
+    -SinceTimestamp $SinceTimestamp `
+    -SinceTimestampSkewSeconds $SinceTimestampSkewSeconds
 }
 
 function Get-LogSnapshot {
@@ -27,14 +33,30 @@ function Get-LogSnapshot {
     [Parameter(Mandatory = $true)]
     [int]$LogReadRetryCount,
     [Parameter(Mandatory = $true)]
-    [int]$LogReadRetryDelayMs
+    [int]$LogReadRetryDelayMs,
+    [Parameter(Mandatory = $false)]
+    [datetime]$SinceTimestamp = [datetime]::MinValue,
+    [Parameter(Mandatory = $false)]
+    [int]$SinceTimestampSkewSeconds = 120
   )
 
   $resolvedPrimary = Get-LatestTLauncherLogPath -PreferredPath $PrimaryLogPath -AllowMissing $true
+  $primaryLastWrite = [datetime]::MinValue
+  if (-not [string]::IsNullOrWhiteSpace($resolvedPrimary) -and (Test-Path -LiteralPath $resolvedPrimary)) {
+    $primaryItem = Get-Item -LiteralPath $resolvedPrimary -ErrorAction SilentlyContinue
+    if ($null -ne $primaryItem) {
+      $primaryLastWrite = $primaryItem.LastWriteTime
+    }
+  }
+  $effectiveSince = $SinceTimestamp
+  if ($effectiveSince -eq [datetime]::MinValue -and $primaryLastWrite -ne [datetime]::MinValue) {
+    $effectiveSince = $primaryLastWrite
+  }
   $additionalLogPaths = @()
   if (-not $SkipGameLogs -and [string]::IsNullOrWhiteSpace($PrimaryLogPath)) {
     $additionalLogPaths = Get-AdditionalGameLogPath -GameModsDir $GameModsDir
-    $additionalLogPaths = Select-RecentLogPath -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
+    $additionalLogPaths = Select-RecentLogPath -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes `
+      -SinceTimestamp $effectiveSince -SinceSkewSeconds $SinceTimestampSkewSeconds
   }
   $resolvedLogPaths = Resolve-LogPath -PrimaryPath $resolvedPrimary -AdditionalPaths $additionalLogPaths
   $resolvedLogPaths = @($resolvedLogPaths)

@@ -54,6 +54,12 @@ Delay between log read retries.
 Maximum age (minutes) for additional game logs (latest.log, debug.log, crash reports).
 Set to 0 to disable age filtering.
 
+.PARAMETER LogSinceTimestamp
+If provided, additional game logs must be newer than this timestamp (with skew).
+
+.PARAMETER LogSinceSkewSeconds
+Allowed clock skew (seconds) when filtering by LogSinceTimestamp.
+
 .PARAMETER SkipGameLogs
 If set, skips scanning game logs when LogPath is empty.
 
@@ -130,6 +136,14 @@ param(
   # * Maximum age (minutes) for additional game logs (latest.log, crash reports).
   [Parameter(Mandatory = $false)]
   [int]$LogMaxAgeMinutes = 30,
+
+  # * Only include game logs written after this timestamp (optional).
+  [Parameter(Mandatory = $false)]
+  [datetime]$LogSinceTimestamp = [datetime]::MinValue,
+
+  # * Allowed time skew (seconds) when applying LogSinceTimestamp.
+  [Parameter(Mandatory = $false)]
+  [int]$LogSinceSkewSeconds = 120,
 
   # * If set, skips scanning game logs (latest.log, crash reports).
   [Parameter(Mandatory = $false)]
@@ -465,10 +479,22 @@ function Move-OrDelete {
 
 # * Resolve log paths (supports "latest tl-logger*.txt" fallback).
 $primaryLogPath = Get-LatestTLauncherLogPath -PreferredPath $LogPath
+$primaryLastWrite = [datetime]::MinValue
+if (-not [string]::IsNullOrWhiteSpace($primaryLogPath) -and (Test-Path -LiteralPath $primaryLogPath)) {
+  $primaryItem = Get-Item -LiteralPath $primaryLogPath -ErrorAction SilentlyContinue
+  if ($null -ne $primaryItem) {
+    $primaryLastWrite = $primaryItem.LastWriteTime
+  }
+}
+$effectiveSince = $LogSinceTimestamp
+if ($effectiveSince -eq [datetime]::MinValue -and $primaryLastWrite -ne [datetime]::MinValue) {
+  $effectiveSince = $primaryLastWrite
+}
 $additionalLogPaths = @()
 if (-not $SkipGameLogs -and [string]::IsNullOrWhiteSpace($LogPath)) {
   $additionalLogPaths = Get-AdditionalGameLogPath -GameModsDir $GameModsDir
-  $additionalLogPaths = Select-RecentLogPath -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes
+  $additionalLogPaths = Select-RecentLogPath -Paths $additionalLogPaths -MaxAgeMinutes $LogMaxAgeMinutes `
+    -SinceTimestamp $effectiveSince -SinceSkewSeconds $LogSinceSkewSeconds
 }
 $resolvedLogPaths = Resolve-LogPath -PrimaryPath $primaryLogPath -AdditionalPaths $additionalLogPaths
 $resolvedLogPaths = @($resolvedLogPaths)

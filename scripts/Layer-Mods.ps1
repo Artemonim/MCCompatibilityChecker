@@ -166,6 +166,9 @@ Output directory for dependency map tool reports.
 .PARAMETER ExcludeJarNames
 Array of jar file names to skip.
 
+.PARAMETER NoCache
+If set, disables the session launch-configuration cache and always re-runs launch checks.
+
 .PARAMETER MoveRetryCount
 How many times to retry moving a jar if locked.
 
@@ -367,6 +370,10 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$HashCacheHashRetryDelayMs = 200,
 
+  # * If set, disables the session launch-config cache and forces repeated checks.
+  [Parameter(Mandatory = $false)]
+  [switch]$NoCache,
+
   [Parameter(Mandatory = $false)]
   [switch]$EmitResultObject,
 
@@ -530,6 +537,14 @@ if ($useStorage -and (-not (Test-Path -LiteralPath $StorageModsDir))) {
   $useStorage = $false
 }
 
+$script:EnableSessionLaunchConfigCache = (-not $NoCache)
+$script:sessionSuccessfulLaunchConfigCache = @{}
+if ($script:EnableSessionLaunchConfigCache) {
+  Write-Host "Session launch-config cache: enabled." -ForegroundColor Gray
+} else {
+  Write-Host "Session launch-config cache: disabled (NoCache mode)." -ForegroundColor Gray
+}
+
 # ────────────────────────────────────────────────────────────────────────────
 # * Build candidate list and dependency map.
 # ────────────────────────────────────────────────────────────────────────────
@@ -631,7 +646,8 @@ if ($depMap -and $depMap.Count -gt 0) {
 $tier4Mods = @($candidateMods | Where-Object { $_.DependentModTier -eq 4 })
 $tier3Mods = @($candidateMods | Where-Object { $_.DependentModTier -eq 3 } | Sort-Object -Property LastWriteTime)
 $tier2Mods = @($candidateMods | Where-Object { $_.DependentModTier -eq 2 } | Sort-Object -Property LastWriteTime)
-$tier1Mods = @($candidateMods | Where-Object { $_.DependentModTier -eq 1 } | Sort-Object -Property LastWriteTime)
+$tier1AllMods = @($candidateMods | Where-Object { $_.DependentModTier -eq 1 } | Sort-Object -Property LastWriteTime)
+$tier1Mods = @($tier1AllMods)
 
 $nonCoreMods = @($tier3Mods) + @($tier2Mods) + @($tier1Mods)
 
@@ -852,6 +868,133 @@ function Move-CulpritToLegacy {
 }
 
 # ────────────────────────────────────────────────────────────────────────────
+# * Helper: Tier-1 narrowing for faster crash isolation.
+# ────────────────────────────────────────────────────────────────────────────
+
+function Invoke-Tier1BatchNarrowing {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$BatchJarNames
+  )
+
+  $batchSet = @{}
+  foreach ($name in @($BatchJarNames)) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $batchSet[$name.ToLowerInvariant()] = $true
+  }
+
+  $parked = New-Object System.Collections.Generic.List[string]
+
+  foreach ($tier1Mod in $tier1AllMods) {
+    $jarName = [string]$tier1Mod.Name
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $jarKey = $jarName.ToLowerInvariant()
+    if ($batchSet.ContainsKey($jarKey)) { continue }
+    if ($culpritJarNames.Contains($jarName)) { continue }
+    # * Already quarantined.
+    if ($movedJarNameSet.ContainsKey($jarName)) { continue }
+
+    $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
+    $storagePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $jarName } else { $null }
+    $gameDest = $null
+    $storageDest = $null
+
+    if (Test-Path -LiteralPath $gamePath) {
+      $gameDest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    }
+    if ($useStorage -and $storagePath -and (Test-Path -LiteralPath $storagePath) -and $storageQuarantineDir) {
+      $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    }
+
+    if ($null -ne $gameDest -or $null -ne $storageDest) {
+      [void](Add-MovedItemRecord -JarName $jarName `
+          -GameSource $gamePath `
+          -GameQuarantine $gameDest `
+          -StorageSource $storagePath `
+          -StorageQuarantine $storageDest)
+      $parked.Add($jarName)
+    }
+  }
+
+  if ($parked.Count -gt 0) {
+    Write-Host ("  Tier-1 narrowing: parked {0} active tier-1 mod(s) outside the current batch." -f $parked.Count) -ForegroundColor Gray
+  }
+
+  return @($parked.ToArray())
+}
+
+function Restore-Tier1BatchNarrowing {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$ParkedJarNames
+  )
+
+  $restored = 0
+  foreach ($jarName in @($ParkedJarNames | Sort-Object -Unique)) {
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+
+    $item = Get-MovedItemByJarName -JarName $jarName
+    if ($null -eq $item) { continue }
+
+    $didRestore = $false
+    if ($null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
+      [void](Restore-FromQuarantine -SourcePath $item.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+      $item.GameQuarantine = $null
+      $didRestore = $true
+    }
+    if ($useStorage -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
+      [void](Restore-FromQuarantine -SourcePath $item.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+      $item.StorageQuarantine = $null
+      $didRestore = $true
+    }
+
+    if ($didRestore) {
+      if ($movedJarNameSet.ContainsKey($jarName)) {
+        $null = $movedJarNameSet.Remove($jarName)
+      }
+      $restored++
+    }
+  }
+
+  if ($restored -gt 0) {
+    Write-Host ("  Tier-1 narrowing: restored {0} parked tier-1 mod(s)." -f $restored) -ForegroundColor Gray
+  }
+
+  return $restored
+}
+
+function Complete-Tier1BatchNarrowing {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$ParkedJarNames,
+    [Parameter(Mandatory = $true)]
+    [bool]$RunConsistencyProbe,
+    [Parameter(Mandatory = $false)]
+    [string]$ProbePhasePrefix = "tier1_narrowing_probe"
+  )
+
+  if (-not $ParkedJarNames -or $ParkedJarNames.Count -eq 0) {
+    return $true
+  }
+
+  [void](Restore-Tier1BatchNarrowing -ParkedJarNames $ParkedJarNames)
+
+  if (-not $RunConsistencyProbe) { return $true }
+
+  Write-Host "  Tier-1 narrowing: control launch with restored tier-1 baseline." -ForegroundColor Cyan
+  $probeResult = Invoke-LayeringLaunchAndCheck -PhasePrefix $ProbePhasePrefix
+  if ($probeResult.Type -eq "Success" -or $probeResult.Type -eq "UserExit") {
+    return $true
+  }
+
+  Write-Host ("  Tier-1 control launch failed after restoring parked mods: {0}" -f $probeResult.Type) -ForegroundColor Yellow
+  return $false
+}
+
+# ────────────────────────────────────────────────────────────────────────────
 # * Helper: Wait for game exit; force-kill if the process hangs after crash.
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -949,7 +1092,7 @@ function Invoke-LayeringLaunchAndCheck {
     $script:phase = ("{0}_wait_game_exit_fabric" -f $PhasePrefix)
     Wait-GameExitOrForceKill -StartedAfter $attemptStart
     Start-Sleep -Seconds $LogPostRunDelaySeconds
-    $snapshot = Get-ConfiguredLogSnapshot
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
     $requiringIds = @(Get-FabricRequiringModId -Lines $snapshot.Lines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
     $missingIds = @(Get-FabricMissingDependencyId -Lines $snapshot.Lines) |
@@ -981,7 +1124,7 @@ function Invoke-LayeringLaunchAndCheck {
         -OffsetX $CrashCloseClickOffsetX `
         -OffsetY $CrashCloseClickOffsetY `
         -CloseExtraFabricDialogs $true
-      $snapshot = Get-ConfiguredLogSnapshot
+      $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
       Wait-ConfiguredLauncherInteractive
       return [pscustomobject]@{
         Type = "Crash"
@@ -999,7 +1142,7 @@ function Invoke-LayeringLaunchAndCheck {
       }
     }
     # * No crash dialog, no launcher -> ambiguous. Read log and treat as crash.
-    $snapshot = Get-ConfiguredLogSnapshot
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
     Wait-ConfiguredLauncherInteractive
     return [pscustomobject]@{
       Type = "Crash"
@@ -1020,7 +1163,7 @@ function Invoke-LayeringLaunchAndCheck {
     $script:phase = ("{0}_wait_game_exit_crash" -f $PhasePrefix)
     Wait-GameExitOrForceKill -StartedAfter $attemptStart
     Start-Sleep -Seconds $LogPostRunDelaySeconds
-    $snapshot = Get-ConfiguredLogSnapshot
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
     Wait-ConfiguredLauncherInteractive
     return [pscustomobject]@{
       Type = "Crash"
@@ -1040,6 +1183,14 @@ function Invoke-LayeringLaunchAndCheck {
     [void](Stop-ConfiguredGameProcess -StartedAfter $layeringStartTime)
     [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart -WarningContext "Next layer")
     Wait-ConfiguredLauncherInteractive
+  }
+
+  $launchConfigKey = ""
+  if ($outcome | Get-Member -Name "LaunchConfigKey" -MemberType NoteProperty, Property) {
+    $launchConfigKey = [string]$outcome.LaunchConfigKey
+  }
+  if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
+    Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
   }
 
   return [pscustomobject]@{
@@ -1286,6 +1437,8 @@ try {
       $maxConsecutiveFabricFails = 3
 
       while ($remaining.Count -gt 0) {
+        if ($abortLayering) { break }
+
         $actualBatchSize = [Math]::Min($batchSize, $remaining.Count)
         $batch = @($remaining.GetRange(0, $actualBatchSize))
         $batchNames = @($batch | ForEach-Object { $_.Name })
@@ -1445,6 +1598,13 @@ try {
             continue
           }
 
+          # * Tier-1 optimization: for deep crash diagnosis, keep only the current
+          # * problematic batch active and park the rest of active tier-1 mods.
+          $tier1NarrowingParkedJarNames = @()
+          if ($tier -eq 1) {
+            $tier1NarrowingParkedJarNames = @(Invoke-Tier1BatchNarrowing -BatchJarNames $batchNames)
+          }
+
           # * Step B: binary isolation within the batch.
           if ($batch.Count -le 1) {
             # * Single mod batches can yield false positives when the crash persists for other reasons.
@@ -1478,6 +1638,17 @@ try {
               Move-CulpritToLegacy -JarName $singleJarName -EvidenceKey $singleEvKey
               $null = $remaining.RemoveAt(0)
               $batchSize = 1
+              if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
+                $tier1ProbeOk = Complete-Tier1BatchNarrowing `
+                  -ParkedJarNames $tier1NarrowingParkedJarNames `
+                  -RunConsistencyProbe $true `
+                  -ProbePhasePrefix ("tier{0}_single_probe_restored" -f $tier)
+                if (-not $tier1ProbeOk) {
+                  $abortLayering = $true
+                  $exitCode = 4
+                  break
+                }
+              }
               continue
             }
 
@@ -1495,6 +1666,12 @@ try {
             }
             if ($movedJarNameSet.ContainsKey($singleJarName)) {
               $null = $movedJarNameSet.Remove($singleJarName)
+            }
+
+            if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
+              [void](Complete-Tier1BatchNarrowing `
+                  -ParkedJarNames $tier1NarrowingParkedJarNames `
+                  -RunConsistencyProbe $false)
             }
 
             $abortLayering = $true
@@ -1603,7 +1780,14 @@ try {
             if ($binaryResolved) { break }
           }
 
-          if ($abortLayering) { break }
+          if ($abortLayering) {
+            if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
+              [void](Complete-Tier1BatchNarrowing `
+                  -ParkedJarNames $tier1NarrowingParkedJarNames `
+                  -RunConsistencyProbe $false)
+            }
+            break
+          }
 
           # * Post-resolution: update remaining list and hash cache.
           if ($binaryResolved -or $batchForBinary.Count -eq 0) {
@@ -1628,6 +1812,18 @@ try {
             $remaining = $newRemaining
           }
           $batchSize = 1
+          if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
+            $needTier1Probe = ($binaryResolved -or $batchForBinary.Count -eq 0)
+            $tier1ProbeOk = Complete-Tier1BatchNarrowing `
+              -ParkedJarNames $tier1NarrowingParkedJarNames `
+              -RunConsistencyProbe $needTier1Probe `
+              -ProbePhasePrefix ("tier{0}_binary_probe_restored" -f $tier)
+            if (-not $tier1ProbeOk) {
+              $abortLayering = $true
+              $exitCode = 4
+              break
+            }
+          }
           continue
         }
 

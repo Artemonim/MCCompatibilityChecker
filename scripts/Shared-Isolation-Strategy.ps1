@@ -72,6 +72,14 @@ function Invoke-IsolationProbe {
     $script:phase = ("{0}_stop_game_after_timeout" -f $PhasePrefix)
     [void](Stop-ConfiguredGameProcess -StartedAfter $attemptStart)
     [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+
+    $launchConfigKey = ""
+    if ($outcome | Get-Member -Name "LaunchConfigKey" -MemberType NoteProperty, Property) {
+      $launchConfigKey = [string]$outcome.LaunchConfigKey
+    }
+    if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
+      Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
+    }
   } else {
     $script:phase = ("{0}_wait_game_exit" -f $PhasePrefix)
     [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
@@ -80,7 +88,7 @@ function Invoke-IsolationProbe {
   if ($outcome.Type -eq "FabricDialog") {
     Start-Sleep -Seconds $LogPostRunDelaySeconds
     $script:phase = ("{0}_read_dependency_logs" -f $PhasePrefix)
-    $snapshot = Get-ConfiguredLogSnapshot
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
     $requiringModIds = @(Get-FabricRequiringModId -Lines $snapshot.Lines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
     $missingDepIds = @(Get-FabricMissingDependencyId -Lines $snapshot.Lines) |
@@ -101,7 +109,7 @@ function Invoke-IsolationProbe {
   } else {
     Start-Sleep -Seconds $LogPostRunDelaySeconds
     $script:phase = ("{0}_read_logs" -f $PhasePrefix)
-    $snapshot = Get-ConfiguredLogSnapshot
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
 
     if ($script:mcVersionForLegacy -eq "unknown") {
       $script:mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
@@ -118,7 +126,7 @@ function Invoke-IsolationProbe {
       -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)
     if ($signatureChanged) {
       Start-Sleep -Milliseconds 750
-      $confirmSnapshot = Get-ConfiguredLogSnapshot
+      $confirmSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
       $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
         -MaxLines $ErrorSignatureLineLimit `
         -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
@@ -546,6 +554,13 @@ function Invoke-LinearBaselineRefresh {
   } else {
     # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
     # ! Stop early to prevent moving a random mod to Legacy.
+    $launchConfigKey = ""
+    if ($baselineOutcomeObj | Get-Member -Name "LaunchConfigKey" -MemberType NoteProperty, Property) {
+      $launchConfigKey = [string]$baselineOutcomeObj.LaunchConfigKey
+    }
+    if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
+      Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
+    }
     Write-Host ("Warning: baseline issue not reproduced in {0}. Stopping isolation to avoid false culprit selection." -f $PhasePrefix) -ForegroundColor Yellow
     Wait-ConfiguredLauncherInteractive
     return [pscustomobject]@{
@@ -558,7 +573,7 @@ function Invoke-LinearBaselineRefresh {
 
   Start-Sleep -Seconds $LogPostRunDelaySeconds
   $script:phase = ("{0}_baseline_read_logs" -f $PhasePrefix)
-  $baselineSnapshot = Get-ConfiguredLogSnapshot
+  $baselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
   if (Test-DependencyDialogBlock -Context ("{0} baseline" -f $PhasePrefix) -Lines $baselineSnapshot.Lines) {
     return [pscustomobject]@{
       Outcome = $baselineOutcome
@@ -664,6 +679,13 @@ function Invoke-LinearIsolation {
     Wait-ConfiguredLauncherInteractive
 
     if ($outcome.Type -eq "Timeout") {
+      $launchConfigKey = ""
+      if ($outcome | Get-Member -Name "LaunchConfigKey" -MemberType NoteProperty, Property) {
+        $launchConfigKey = [string]$outcome.LaunchConfigKey
+      }
+      if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
+        Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
+      }
       return [pscustomobject]@{
         Found = $true
         CulpritJarNames = @($mod.Name)
@@ -673,7 +695,7 @@ function Invoke-LinearIsolation {
 
     Start-Sleep -Seconds $LogPostRunDelaySeconds
     $script:phase = "attempt_read_logs"
-    $snapshot = Get-ConfiguredLogSnapshot
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
 
     if ($mcVersionForLegacy -eq "unknown") {
       $script:mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
@@ -778,7 +800,7 @@ function Invoke-LinearIsolation {
         -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)) {
       # * Confirm signature change to avoid log-flush noise.
       Start-Sleep -Milliseconds 750
-      $confirmSnapshot = Get-ConfiguredLogSnapshot
+      $confirmSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
       $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
         -MaxLines $ErrorSignatureLineLimit `
         -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)

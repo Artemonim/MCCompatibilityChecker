@@ -170,6 +170,40 @@ function Get-ScaledLaunchWaitTime {
   return $scaledSeconds
 }
 
+function Wait-RecoveryOutcomeDialog {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$TimeoutSeconds,
+    [Parameter(Mandatory = $false)]
+    [int]$PollMilliseconds = 250
+  )
+
+  if ($TimeoutSeconds -lt 1) { return $null }
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    $crashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+    if ($null -ne $crashWindow) {
+      return [pscustomobject]@{
+        Type = "CrashDialog"
+        Window = $crashWindow
+      }
+    }
+
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+    if ($null -ne $fabricWindow) {
+      return [pscustomobject]@{
+        Type = "FabricDialog"
+        Window = $fabricWindow
+      }
+    }
+
+    Start-Sleep -Milliseconds $PollMilliseconds
+  }
+
+  return $null
+}
+
 $useDynamicOutcomeTimeout = -not $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
 $useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds")
 
@@ -434,15 +468,11 @@ foreach ($group in $qualifiedGroups) {
 
       if ($outcome.Type -eq "ProcessExit") {
         [void](Wait-ConfiguredGameExit -StartedAfter $launchStart -WarningContext "Recovery process exit")
-        # * Give launcher/crash UI time to present after java exit.
-        Start-Sleep -Seconds 2
-        $crashAfterExit = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-        if ($null -ne $crashAfterExit) {
-          Write-Host ("  Detected crash dialog after ProcessExit: {0}" -f $crashAfterExit.Title) -ForegroundColor Yellow
-          $outcome = [pscustomobject]@{
-            Type = "CrashDialog"
-            Window = $crashAfterExit
-          }
+        # * Some launchers show crash/fabric dialogs with delay after java exits.
+        $lateAfterExit = Wait-RecoveryOutcomeDialog -TimeoutSeconds 5
+        if ($null -ne $lateAfterExit) {
+          Write-Host ("  Detected {0} after ProcessExit: {1}" -f $lateAfterExit.Type, $lateAfterExit.Window.Title) -ForegroundColor Yellow
+          $outcome = $lateAfterExit
         }
       }
 
@@ -450,11 +480,11 @@ foreach ($group in $qualifiedGroups) {
 
       if ($outcome.Type -eq "Timeout") {
         Start-Sleep -Seconds $effectiveConfirmSeconds
-        $crashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-        if ($null -eq $crashNow) {
+        $lateAfterTimeout = Wait-RecoveryOutcomeDialog -TimeoutSeconds 3
+        if ($null -eq $lateAfterTimeout) {
           $isSuccess = $true
         } else {
-          Invoke-WindowClose -Handle $crashNow.Handle
+          $outcome = $lateAfterTimeout
         }
         [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
       }
@@ -467,11 +497,10 @@ foreach ($group in $qualifiedGroups) {
           -CloseExtraFabricDialogs $true
       }
 
-      Start-Sleep -Seconds 2
-      $postCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-      if ($null -ne $postCrash) {
+      $postDialog = Wait-RecoveryOutcomeDialog -TimeoutSeconds 2
+      if ($null -ne $postDialog -and $null -ne $postDialog.Window) {
         $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog `
-          -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $postCrash }) `
+          -Outcome $postDialog `
           -DelaySeconds $CrashCloseDelaySeconds `
           -OffsetX $CrashCloseClickOffsetX `
           -OffsetY $CrashCloseClickOffsetY `

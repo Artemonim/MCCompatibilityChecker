@@ -52,13 +52,98 @@ function Stop-ConfiguredGameProcess {
   return Stop-GameProcess -Names $GameProcessNames -StartedAfter $StartedAfter
 }
 
+function Get-SessionLaunchConfigKey {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$ModsDir = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return "" }
+  if (-not (Test-Path -LiteralPath $ModsDir)) { return "" }
+
+  $jarNames = @(
+    Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue |
+      ForEach-Object { [string]$_.Name } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      ForEach-Object { $_.ToLowerInvariant() } |
+      Sort-Object -Unique
+  )
+
+  if (-not $jarNames -or $jarNames.Count -eq 0) {
+    return "__empty__"
+  }
+
+  return ($jarNames -join "|")
+}
+
+function Get-SessionSuccessfulLaunchConfigCache {
+  $cacheVar = Get-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $cacheVar -and $cacheVar.Value -is [hashtable]) {
+    return [hashtable]$cacheVar.Value
+  }
+
+  $cache = @{}
+  Set-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -Value $cache
+  return $cache
+}
+
+function Register-SessionLaunchConfigSuccess {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$ConfigKey = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ConfigKey)) { return }
+
+  $cacheEnabled = $false
+  $cacheEnabledVar = Get-Variable -Name "EnableSessionLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $cacheEnabledVar) {
+    $cacheEnabled = [bool]$cacheEnabledVar.Value
+  }
+  if (-not $cacheEnabled) { return }
+
+  $cache = Get-SessionSuccessfulLaunchConfigCache
+  if (-not $cache.ContainsKey($ConfigKey)) {
+    $cache[$ConfigKey] = (Get-Date).ToString("o")
+  }
+}
+
 function Invoke-ConfiguredLaunchAttempt {
   param(
     [Parameter(Mandatory = $false)]
     [long[]]$IgnoreHandleIds = @()
   )
 
-  return Invoke-LaunchAttempt -LauncherTitlePattern $LauncherWindowTitlePattern `
+  $cacheEnabled = $false
+  $cacheEnabledVar = Get-Variable -Name "EnableSessionLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $cacheEnabledVar) {
+    $cacheEnabled = [bool]$cacheEnabledVar.Value
+  }
+
+  $configKey = ""
+  if ($cacheEnabled) {
+    $modsDirVar = Get-Variable -Name "GameModsDir" -Scope Script -ErrorAction SilentlyContinue
+    $modsDir = if ($null -ne $modsDirVar) { [string]$modsDirVar.Value } else { "" }
+    $configKey = Get-SessionLaunchConfigKey -ModsDir $modsDir
+
+    if (-not [string]::IsNullOrWhiteSpace($configKey)) {
+      $cache = Get-SessionSuccessfulLaunchConfigCache
+      if ($cache.ContainsKey($configKey)) {
+        Write-Host "Session launch cache: skipping already passed mod configuration (use -NoCache to force re-check)." -ForegroundColor Gray
+        return [pscustomobject]@{
+          Type = "Timeout"
+          Window = $null
+          GameStarted = $true
+          LauncherClosed = $false
+          LaunchObserved = $true
+          SkippedBySessionCache = $true
+          LaunchConfigKey = $configKey
+        }
+      }
+    }
+  }
+
+  $outcome = Invoke-LaunchAttempt -LauncherTitlePattern $LauncherWindowTitlePattern `
     -LauncherPath $LauncherExePath `
     -LauncherArgs $LauncherArguments `
     -AppendAutoLaunch ([bool]$UseAutoLaunch) `
@@ -73,6 +158,16 @@ function Invoke-ConfiguredLaunchAttempt {
     -OutcomeTimeoutSeconds $OutcomeTimeoutSeconds `
     -PollSeconds $PollIntervalSeconds `
     -IgnoreHandleIds $IgnoreHandleIds
+
+  if (-not [string]::IsNullOrWhiteSpace($configKey)) {
+    try {
+      Add-Member -InputObject $outcome -NotePropertyName "LaunchConfigKey" -NotePropertyValue $configKey -Force
+    } catch {
+      Write-Verbose ("Unable to annotate launch outcome with config key: {0}" -f $_.Exception.Message)
+    }
+  }
+
+  return $outcome
 }
 
 function Wait-ConfiguredLauncherInteractive {
@@ -313,6 +408,32 @@ function Wait-ForOutcome {
         $stillRunning = $true
       }
       if ($gameExited -and (-not $stillRunning)) {
+        # * Crash/Fabric dialogs may appear with delay after process exit.
+        $postExitDeadline = (Get-Date).AddSeconds(5)
+        while ((Get-Date) -lt $postExitDeadline) {
+          $fabricAfterExit = Select-WindowByTitlePattern -Patterns $FabricPatterns
+          if ($null -ne $fabricAfterExit) {
+            return [pscustomobject]@{
+              Type = "FabricDialog"
+              Window = $fabricAfterExit
+              GameStarted = $gameStarted
+              LauncherClosed = $launcherClosed
+              LaunchObserved = $true
+            }
+          }
+          $crashAfterExit = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+          if ($null -ne $crashAfterExit) {
+            return [pscustomobject]@{
+              Type = "CrashDialog"
+              Window = $crashAfterExit
+              GameStarted = $gameStarted
+              LauncherClosed = $launcherClosed
+              LaunchObserved = $true
+            }
+          }
+          Start-Sleep -Milliseconds 250
+        }
+
         return [pscustomobject]@{
           Type = "ProcessExit"
           Window = $null
@@ -389,6 +510,32 @@ function Wait-ForOutcome {
     }
   }
   if ($RequireGameStartForTimeout -and $gameObservedOnce -and $observedGamePids.Count -eq 0) {
+    # * Final boundary check: delayed dialogs can appear after game exit.
+    $postExitLateDeadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $postExitLateDeadline) {
+      $fabricAfterExitLate = Select-WindowByTitlePattern -Patterns $FabricPatterns
+      if ($null -ne $fabricAfterExitLate) {
+        return [pscustomobject]@{
+          Type = "FabricDialog"
+          Window = $fabricAfterExitLate
+          GameStarted = $gameStarted
+          LauncherClosed = $launcherClosed
+          LaunchObserved = $launchTriggered
+        }
+      }
+      $crashAfterExitLate = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+      if ($null -ne $crashAfterExitLate) {
+        return [pscustomobject]@{
+          Type = "CrashDialog"
+          Window = $crashAfterExitLate
+          GameStarted = $gameStarted
+          LauncherClosed = $launcherClosed
+          LaunchObserved = $launchTriggered
+        }
+      }
+      Start-Sleep -Milliseconds 250
+    }
+
     return [pscustomobject]@{
       Type = "ProcessExit"
       Window = $null

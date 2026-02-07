@@ -35,6 +35,12 @@ param(
   [int]$LogMaxAgeMinutes = 30,
 
   [Parameter(Mandatory = $false)]
+  [datetime]$LogSinceTimestamp = [datetime]::MinValue,
+
+  [Parameter(Mandatory = $false)]
+  [int]$LogSinceSkewSeconds = 120,
+
+  [Parameter(Mandatory = $false)]
   [int]$LogReadRetryCount = 5,
 
   [Parameter(Mandatory = $false)]
@@ -638,7 +644,7 @@ function Resolve-MixinCandidateJarName {
 # * Read crash log.
 # ────────────────────────────────────────────────────────────────────────────
 
-$logSnapshot = Get-ConfiguredLogSnapshot
+$logSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $LogSinceTimestamp -SinceTimestampSkewSeconds $LogSinceSkewSeconds
 if ($null -eq $logSnapshot -or $logSnapshot.Lines.Count -eq 0) {
   Write-Host "Mixin analysis: no crash log available." -ForegroundColor Gray
   if ($EmitResultObject) {

@@ -168,6 +168,9 @@ Limits how many mods are tested (newest first). Use 0 to test all.
 .PARAMETER ExcludeJarNames
 Array of jar file names to skip.
 
+.PARAMETER NoCache
+If set, disables the session launch-configuration cache and always re-runs launch checks.
+
 .PARAMETER ForceRestore
 If set, overwrites existing jars when restoring.
 
@@ -449,6 +452,10 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$HashCacheHashRetryDelayMs = 200,
 
+  # * If set, disables the session launch-config cache and forces repeated checks.
+  [Parameter(Mandatory = $false)]
+  [switch]$NoCache,
+
   # * Optional jar file names to quarantine after baseline (fast-forward resume).
   [Parameter(Mandatory = $false)]
   [string[]]$PreIsolateJarNames = @(),
@@ -625,6 +632,14 @@ $useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
 if ($useStorage -and (-not (Test-Path -LiteralPath $StorageModsDir))) {
   Write-Host ("Warning: StorageModsDir not found, storage operations are skipped: {0}" -f $StorageModsDir) -ForegroundColor Yellow
   $useStorage = $false
+}
+
+$script:EnableSessionLaunchConfigCache = (-not $NoCache)
+$script:sessionSuccessfulLaunchConfigCache = @{}
+if ($script:EnableSessionLaunchConfigCache) {
+  Write-Host "Session launch-config cache: enabled." -ForegroundColor Gray
+} else {
+  Write-Host "Session launch-config cache: disabled (NoCache mode)." -ForegroundColor Gray
 }
 
 $candidateMods = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File -ErrorAction Stop |
@@ -899,7 +914,7 @@ try {
   if (-not $baselineSucceeded) {
     Start-Sleep -Seconds $LogPostRunDelaySeconds
     $phase = "baseline_read_logs"
-    $baselineSnapshot = Get-ConfiguredLogSnapshot
+    $baselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $baselineAttemptStart
 
     if (Test-DependencyDialogBlock -Context "baseline" -Lines $baselineSnapshot.Lines) {
       $stopReason = "dependency_dialog_baseline"
@@ -1050,7 +1065,7 @@ try {
       if ($candidateMods -and $candidateMods.Count -gt 0 -and $linearBaselineOutcome -ne "Timeout") {
         Start-Sleep -Seconds $LogPostRunDelaySeconds
         $phase = "linear_phase_baseline_read_logs"
-        $linearBaselineSnapshot = Get-ConfiguredLogSnapshot
+        $linearBaselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $linearBaselineAttemptStart
         if (Test-DependencyDialogBlock -Context "linear phase baseline" -Lines $linearBaselineSnapshot.Lines) {
           $stopReason = "dependency_dialog_linear_baseline"
           $candidateMods = @()

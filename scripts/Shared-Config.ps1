@@ -135,3 +135,26 @@ function Get-IniValue {
   if (-not $Ini[$Section].ContainsKey($Key)) { return $Default }
   return [string]$Ini[$Section][$Key]
 }
+
+function Get-IniBool {
+  param(
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Ini,
+    [Parameter(Mandatory = $true)]
+    [string]$Section,
+    [Parameter(Mandatory = $true)]
+    [string]$Key,
+    [Parameter(Mandatory = $false)]
+    [bool]$Default = $false
+  )
+
+  $raw = Get-IniValue -Ini $Ini -Section $Section -Key $Key -Default $null
+  if ([string]::IsNullOrWhiteSpace($raw)) { return [bool]$Default }
+
+  $value = $raw.Trim().ToLowerInvariant()
+  switch -Regex ($value) {
+    "^(1|true|yes|y|on)$" { return $true }
+    "^(0|false|no|n|off)$" { return $false }
+    default { return [bool]$Default }
+  }
+}

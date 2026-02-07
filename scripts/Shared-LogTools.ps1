@@ -71,20 +71,29 @@ function Select-RecentLogPath {
     [Parameter(Mandatory = $true)]
     [string[]]$Paths,
     [Parameter(Mandatory = $true)]
-    [int]$MaxAgeMinutes
+    [int]$MaxAgeMinutes,
+    [Parameter(Mandatory = $false)]
+    [datetime]$SinceTimestamp = [datetime]::MinValue,
+    [Parameter(Mandatory = $false)]
+    [int]$SinceSkewSeconds = 120
   )
 
   if (-not $Paths -or $Paths.Count -eq 0) { return @() }
-  if ($MaxAgeMinutes -le 0) { return $Paths }
+  $applyMaxAge = ($MaxAgeMinutes -gt 0)
+  $applySince = ($SinceTimestamp -ne [datetime]::MinValue)
+  if (-not $applyMaxAge -and -not $applySince) { return $Paths }
 
-  $cutoff = (Get-Date).AddMinutes(-$MaxAgeMinutes)
+  $cutoff = if ($applyMaxAge) { (Get-Date).AddMinutes(-$MaxAgeMinutes) } else { [datetime]::MinValue }
+  $sinceCutoff = if ($applySince) { $SinceTimestamp.AddSeconds(-$SinceSkewSeconds) } else { [datetime]::MinValue }
   $recent = New-Object System.Collections.Generic.List[string]
   foreach ($path in $Paths) {
     if (-not (Test-Path -LiteralPath $path)) { continue }
     $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
-    if ($null -ne $item -and $item.LastWriteTime -ge $cutoff) {
-      $recent.Add($path)
-    }
+    if ($null -eq $item) { continue }
+    $lastWrite = $item.LastWriteTime
+    if ($applyMaxAge -and $lastWrite -lt $cutoff) { continue }
+    if ($applySince -and $lastWrite -lt $sinceCutoff) { continue }
+    $recent.Add($path)
   }
   return $recent
 }
