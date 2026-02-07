@@ -1659,7 +1659,8 @@ while ($true) {
       Write-Host ""
     }
   }
-  $requiresUserDecision = $hasSessionIsolants -or ($outcome.Type -eq "FabricDialog") -or ($outcome.Type -eq "NoLaunch")
+  $cleanOutcome = ($outcome.Type -eq "Timeout" -or $outcome.Type -eq "ProcessExit")
+  $requiresUserDecision = $hasSessionIsolants -or ($outcome.Type -eq "FabricDialog") -or ($outcome.Type -eq "NoLaunch") -or $cleanOutcome
   if (-not $requiresUserDecision) {
     Write-Host "No blocking errors and no isolated mods pending. Continuing automatically." -ForegroundColor Cyan
     Start-Sleep -Seconds 2
@@ -1671,6 +1672,8 @@ while ($true) {
     $prompt = $(if ($hasSessionIsolants) { "Запуск игры не обнаружен. Выберите действие для изолированных модов:" } else { "Запуск игры не обнаружен. Продолжить попытки? (y/n)" })
   } elseif ($outcome.Type -eq "FabricDialog") {
     $prompt = $(if ($hasSessionIsolants) { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Выберите действие для изолированных модов:" } else { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Продолжить попытки? (y/n)" })
+  } elseif ($cleanOutcome) {
+    $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Выберите действие для изолированных модов:" } else { "Краш не обнаружен. Похоже, проблемных модов нет. Продолжить попытки? (y/n)" })
   } else {
     $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Выберите действие для изолированных модов:" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
   }

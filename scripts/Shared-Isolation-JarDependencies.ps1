@@ -964,7 +964,7 @@ function Select-QuickIsolateJarsByTier {
   if ($skipped.Count -gt 0) {
     $contextLabel = if ([string]::IsNullOrWhiteSpace($Context)) { "" } else { " ({0})" -f $Context }
     $skippedLabel = ($skipped | Sort-Object -Unique) -join ", "
-    Write-Host ("Quick-isolate skipped core-tier mod(s){0}: {1}" -f $contextLabel, $skippedLabel) -ForegroundColor Gray
+    Write-Host ("Быстрая изоляция пропустила моды уровня core{0}: {1}" -f $contextLabel, $skippedLabel) -ForegroundColor Gray
   }
 
   return ,@($allowed.ToArray())

@@ -821,7 +821,7 @@ if ($effectiveIsolationStrategy -eq "Exponential") {
 }
 if ($effectiveIsolationStrategy -eq "Hybrid") {
   $linearTierStart = if ($DependencyAwareExponentialMaxTier -lt 1) { 1 } else { [Math]::Min(4, $DependencyAwareExponentialMaxTier + 1) }
-  Write-Host ("Hybrid tiers: exponential<= {0}, linear>= {1}" -f $DependencyAwareExponentialMaxTier, $linearTierStart) -ForegroundColor Gray
+  Write-Host ("Гибридные уровни: экспоненциально<= {0}, линейно>= {1}" -f $DependencyAwareExponentialMaxTier, $linearTierStart) -ForegroundColor Gray
   if ($DependencyAwareExponentialMaxTier -gt 0) {
     Write-Host ("Binary refinement threshold: {0}" -f $BinaryLinearThreshold) -ForegroundColor Gray
   }
@@ -830,7 +830,7 @@ if ($effectiveIsolationStrategy -eq "Hybrid") {
 if ($DryRun) {
   foreach ($mod in $candidateMods) {
     if ($mod.PSObject.Properties.Name -contains "DependentModTier") {
-      Write-Host ("Plan: {0} | tier={1} | dependents={2} | known={3} | mtime={4}" -f $mod.Name, $mod.DependentModTier, $mod.DependentModCount, $mod.DependentModCountKnown, $mod.LastWriteTime) -ForegroundColor Gray
+      Write-Host ("План: {0} | уровень={1} | dependents={2} | known={3} | mtime={4}" -f $mod.Name, $mod.DependentModTier, $mod.DependentModCount, $mod.DependentModCountKnown, $mod.LastWriteTime) -ForegroundColor Gray
     } else {
       Write-Host ("Plan: {0} ({1})" -f $mod.Name, $mod.LastWriteTime) -ForegroundColor Gray
     }

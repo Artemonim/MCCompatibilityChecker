@@ -969,7 +969,7 @@ function Invoke-HybridIsolation {
       })
     if (-not $tierMods -or $tierMods.Count -eq 0) { continue }
 
-    Write-Host ("Tier {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Gray
+    Write-Host ("Уровень {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Gray
 
     $pinnedJarNames = @()
     if ($pinnedJarNameSet.Count -gt 0) {
@@ -997,7 +997,7 @@ function Invoke-HybridIsolation {
 
     $tierRemaining = $tierCandidates
     if ($DependencyAwareExponentialMaxTier -gt 0 -and $tier -le $DependencyAwareExponentialMaxTier) {
-      Write-Host ("Tier {0}: exponential isolation enabled. Candidates: {1}" -f $tier, $tierCandidates.Count) -ForegroundColor Gray
+      Write-Host ("Уровень {0}: exponential isolation enabled. Candidates: {1}" -f $tier, $tierCandidates.Count) -ForegroundColor Gray
       $tierBaselineSignature = if ([string]::IsNullOrWhiteSpace($script:activeBaselineSignature)) { $BaselineSignature } else { $script:activeBaselineSignature }
       $tierBaselineEvidenceKey = if ([string]::IsNullOrWhiteSpace($script:activeBaselineEvidenceKey)) { $BaselineEvidenceKey } else { $script:activeBaselineEvidenceKey }
       $exponentialResult = Invoke-ExponentialIsolation -Mods $tierCandidates `
@@ -1005,7 +1005,7 @@ function Invoke-HybridIsolation {
         -BaselineEvidenceKey $tierBaselineEvidenceKey `
         -PinnedJarNames $pinnedJarNames
       $tierRemaining = @($exponentialResult.Remaining)
-      Write-Host ("Tier {0}: exponential isolation completed. Linear with {1} mod(s) ({2})." -f $tier, $tierRemaining.Count, $exponentialResult.Reason) -ForegroundColor Gray
+      Write-Host ("Уровень {0}: exponential isolation completed. Linear with {1} mod(s) ({2})." -f $tier, $tierRemaining.Count, $exponentialResult.Reason) -ForegroundColor Gray
     }
 
     if (-not $tierRemaining -or $tierRemaining.Count -eq 0) { continue }
