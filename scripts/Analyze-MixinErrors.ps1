@@ -158,35 +158,6 @@ $ErrorActionPreference = "Stop"
 $launchWaitBaseSeconds = 20
 $launchWaitPerModSeconds = 0.1
 
-function Get-ActiveModCount {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$ModsDir
-  )
-
-  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
-  if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
-  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
-  if ($null -eq $mods) { return 0 }
-  return @($mods).Count
-}
-
-function Get-ScaledLaunchWaitTime {
-  param(
-    [Parameter(Mandatory = $true)]
-    [int]$ActiveModCount,
-    [Parameter(Mandatory = $true)]
-    [double]$PerModSeconds,
-    [Parameter(Mandatory = $true)]
-    [int]$BaseSeconds
-  )
-
-  $rawSeconds = $BaseSeconds + ($ActiveModCount * $PerModSeconds)
-  $scaledSeconds = [int][Math]::Ceiling($rawSeconds)
-  if ($scaledSeconds -lt $BaseSeconds) { $scaledSeconds = $BaseSeconds }
-  return $scaledSeconds
-}
-
 $useDynamicOutcomeTimeout = -not $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
 $useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds")
 
@@ -207,17 +178,28 @@ $sharedJarDepPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-J
 $sharedLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LogTools.ps1"
 if (-not (Test-Path -LiteralPath $sharedLogPath)) { throw ("Shared log helpers not found: {0}" -f $sharedLogPath) }
 . $sharedLogPath
+$sharedLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
+if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy helpers not found: {0}" -f $sharedLegacyPath) }
+. $sharedLegacyPath
 
-$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
-$configIni = $projectConfig.Ini
-
-if ([string]::IsNullOrWhiteSpace($GameModsDir)) {
-  $GameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default (Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods')
-}
-if ([string]::IsNullOrWhiteSpace($StorageModsDir)) {
-  $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
-}
-$useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
+$sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
+if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
+. $sharedStageResultPath
+$runtimeConfig = Initialize-McccRuntimeConfig `
+  -StartDir $PSScriptRoot `
+  -BoundParameters $PSBoundParameters `
+  -GameModsDir $GameModsDir `
+  -StorageModsDir $StorageModsDir `
+  -LogPath $LogPath `
+  -LauncherExePath $LauncherExePath `
+  -AlwaysDefaultGameModsDir $true `
+  -DefaultStorageToGame $false `
+  -TreatEmptyAsUnboundKeys @("GameModsDir", "StorageModsDir", "LogPath", "LauncherExePath")
+$GameModsDir = $runtimeConfig.Paths.GameModsDir
+$StorageModsDir = $runtimeConfig.Paths.StorageModsDir
+$LogPath = $runtimeConfig.Paths.LogPath
+$LauncherExePath = $runtimeConfig.Paths.LauncherExePath
+$useStorage = $runtimeConfig.Paths.UseStorage
 
 function Add-FirstLookupValue {
   param(
@@ -648,7 +630,21 @@ $logSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $LogSinceTimestamp -Sin
 if ($null -eq $logSnapshot -or $logSnapshot.Lines.Count -eq 0) {
   Write-Host "Mixin analysis: no crash log available." -ForegroundColor Gray
   if ($EmitResultObject) {
-    Write-Output ([pscustomobject]@{ Type = "MixinAnalysisResult"; CulpritJarNames = @(); CulpritMoves = @(); Resolved = $false })
+    $stageResultParams = @{
+      Stage = "MixinAnalysis"
+      Type = "MixinAnalysisResult"
+      GameModsDir = $GameModsDir
+      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+      Minecraft = $mcVersionForLegacy
+      ExitCode = 0
+      CulpritJarNames = @()
+      CulpritMoves = @()
+      ExtraFields = @{
+        MixinConflicts = @()
+        Resolved       = $false
+      }
+    }
+    Write-Output (New-StageResult @stageResultParams)
   }
   exit 0
 }
@@ -658,7 +654,21 @@ $mixinTargetErrors = Get-MixinErrorsFromLog -Lines $logSnapshot.Lines
 if ($mixinApplyErrors.Count -eq 0 -and $mixinTargetErrors.Count -eq 0) {
   Write-Host "Mixin analysis: no supported Mixin errors found in crash log." -ForegroundColor Gray
   if ($EmitResultObject) {
-    Write-Output ([pscustomobject]@{ Type = "MixinAnalysisResult"; CulpritJarNames = @(); CulpritMoves = @(); Resolved = $false })
+    $stageResultParams = @{
+      Stage = "MixinAnalysis"
+      Type = "MixinAnalysisResult"
+      GameModsDir = $GameModsDir
+      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+      Minecraft = $mcVersionForLegacy
+      ExitCode = 0
+      CulpritJarNames = @()
+      CulpritMoves = @()
+      ExtraFields = @{
+        MixinConflicts = @()
+        Resolved       = $false
+      }
+    }
+    Write-Output (New-StageResult @stageResultParams)
   }
   exit 0
 }
@@ -754,7 +764,21 @@ if ($null -ne $fallbackLookup -and $null -ne $fallbackLookup.KnownModIds) {
 if ($modIdToJar.Count -eq 0 -and $fallbackMixinConfigToJar.Count -eq 0) {
   Write-Host "Mixin analysis: no mod/jar lookup data available. Skipping targeted checks." -ForegroundColor Yellow
   if ($EmitResultObject) {
-    Write-Output ([pscustomobject]@{ Type = "MixinAnalysisResult"; CulpritJarNames = @(); CulpritMoves = @(); Resolved = $false })
+    $stageResultParams = @{
+      Stage = "MixinAnalysis"
+      Type = "MixinAnalysisResult"
+      GameModsDir = $GameModsDir
+      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+      Minecraft = $mcVersionForLegacy
+      ExitCode = 0
+      CulpritJarNames = @()
+      CulpritMoves = @()
+      ExtraFields = @{
+        MixinConflicts = @()
+        Resolved       = $false
+      }
+    }
+    Write-Output (New-StageResult @stageResultParams)
   }
   exit 0
 }
@@ -765,17 +789,6 @@ if ($modIdToJar.Count -eq 0 -and $fallbackMixinConfigToJar.Count -eq 0) {
 
 $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $logSnapshot.Lines
 if ([string]::IsNullOrWhiteSpace($mcVersionForLegacy)) { $mcVersionForLegacy = "unknown" }
-
-$storageLegacyVersionDir = $null
-if ($useStorage) {
-  $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-  $storageLegacyVersionDir = Join-Path -Path $storageLegacyRoot -ChildPath $mcVersionForLegacy
-}
-$gameLegacyVersionDir = $null
-if ($KeepCulpritInGameLegacy) {
-  $gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-  $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot -ChildPath $mcVersionForLegacy
-}
 
 $culpritJarNames = New-Object System.Collections.Generic.List[string]
 $culpritMoves = New-Object System.Collections.Generic.List[pscustomobject]
@@ -941,31 +954,22 @@ foreach ($mxErr in $mixinErrors) {
       Write-Host ("    Confirmed: removing {0} fixes the Mixin crash." -f $candJar) -ForegroundColor Green
 
       # * Move to legacy.
-      $culpritStorageLegacy = $null
-      $culpritGameLegacy = $null
-
-      if ($useStorage -and $null -ne $storageLegacyVersionDir) {
-        if (-not (Test-Path -LiteralPath $storageLegacyVersionDir)) {
-          New-Item -ItemType Directory -Path $storageLegacyVersionDir -Force | Out-Null
-        }
-        $srcFile = if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp)) { $storageTemp } else { $tempDest }
-        $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $candJar
-        Copy-Item -LiteralPath $srcFile -Destination $destPath -Force
-        $culpritStorageLegacy = $destPath
-        Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
-        $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-        Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
-      }
-
-      if ($KeepCulpritInGameLegacy -and $null -ne $gameLegacyVersionDir) {
-        if (-not (Test-Path -LiteralPath $gameLegacyVersionDir)) {
-          New-Item -ItemType Directory -Path $gameLegacyVersionDir -Force | Out-Null
-        }
-        $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $candJar
-        Move-Item -LiteralPath $tempDest -Destination $destPath -Force
-        $culpritGameLegacy = $destPath
-        Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
-      }
+      $storageSourcePath = Get-FirstExistingPath -Candidates @($storageTemp, $tempDest)
+      $gameSourcePath = Get-FirstExistingPath -Candidates @($tempDest)
+      $moveResult = Move-CulpritToLegacyAndAppendLog `
+        -JarName $candJar `
+        -MinecraftVersion $mcVersionForLegacy `
+        -GameModsDir $GameModsDir `
+        -StorageModsDir $StorageModsDir `
+        -GameLegacyFolderName $GameLegacyFolderName `
+        -StorageLegacyFolderName $StorageLegacyFolderName `
+        -KeepCulpritInGameLegacy ([bool]$KeepCulpritInGameLegacy) `
+        -StorageSourcePath $storageSourcePath `
+        -GameSourcePath $gameSourcePath `
+        -StorageTransferMode "Copy" `
+        -GameTransferMode "Move"
+      $culpritStorageLegacy = $moveResult.StorageLegacyPath
+      $culpritGameLegacy = $moveResult.GameLegacyPath
 
       # * Clean up temp storage copy.
       if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp)) {
@@ -1036,17 +1040,24 @@ if ($mixinConflicts.Count -gt 0) {
   }
 }
 
+$exitCode = if ($resolved) { 0 } else { 1 }
+
 if ($EmitResultObject) {
-  Write-Output ([pscustomobject]@{
-      Type             = "MixinAnalysisResult"
-      CulpritJarNames  = @($culpritJarNames)
-      CulpritMoves     = @($culpritMoves.ToArray())
-      MixinConflicts   = @($mixinConflicts.ToArray())
-      Resolved         = $resolved
-      GameModsDir      = $GameModsDir
-      StorageModsDir   = if ($useStorage) { $StorageModsDir } else { "" }
-      Minecraft        = $mcVersionForLegacy
-    })
+  $stageResultParams = @{
+    Stage = "MixinAnalysis"
+    Type = "MixinAnalysisResult"
+    GameModsDir = $GameModsDir
+    StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+    Minecraft = $mcVersionForLegacy
+    ExitCode = $exitCode
+    CulpritJarNames = @($culpritJarNames)
+    CulpritMoves = @($culpritMoves.ToArray())
+    ExtraFields = @{
+      MixinConflicts = @($mixinConflicts.ToArray())
+      Resolved       = $resolved
+    }
+  }
+  Write-Output (New-StageResult @stageResultParams)
 }
 
-exit $(if ($resolved) { 0 } else { 1 })
+exit $exitCode

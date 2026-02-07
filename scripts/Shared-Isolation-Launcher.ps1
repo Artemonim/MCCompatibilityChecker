@@ -1,5 +1,94 @@
 # * Kills game processes (java/javaw/Minecraft) started after a given time.
 # * Filters using Test-ProcessLooksLikeMinecraftGame to avoid killing the launcher wrapper.
+function Get-ActiveModCount {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModsDir
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
+  if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
+  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+  if ($null -eq $mods) { return 0 }
+  return @($mods).Count
+}
+
+function Get-ScaledLaunchWaitTime {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ActiveModCount,
+    [Parameter(Mandatory = $true)]
+    [double]$PerModSeconds,
+    [Parameter(Mandatory = $true)]
+    [int]$BaseSeconds
+  )
+
+  $rawSeconds = $BaseSeconds + ($ActiveModCount * $PerModSeconds)
+  $scaledSeconds = [int][Math]::Ceiling($rawSeconds)
+  if ($scaledSeconds -lt $BaseSeconds) { $scaledSeconds = $BaseSeconds }
+  return $scaledSeconds
+}
+
+function Resolve-IsolationLauncherContext {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
+  )
+
+  if ($null -ne $Context) { return $Context }
+
+  $cacheEnabled = $false
+  $cacheEnabledVar = Get-Variable -Name "EnableSessionLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $cacheEnabledVar) {
+    $cacheEnabled = [bool]$cacheEnabledVar.Value
+  }
+
+  $cache = @{}
+  $cacheVar = Get-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $cacheVar -and $cacheVar.Value -is [hashtable]) {
+    $cache = [hashtable]$cacheVar.Value
+  }
+
+  return [pscustomobject]@{
+    Paths = [pscustomobject]@{
+      GameModsDir = $GameModsDir
+      LauncherExePath = $LauncherExePath
+    }
+    Launcher = [pscustomobject]@{
+      Arguments = $LauncherArguments
+      UseAutoLaunch = [bool]$UseAutoLaunch
+    }
+    Ui = [pscustomobject]@{
+      LauncherWindowTitlePattern = $LauncherWindowTitlePattern
+      PlayButtonNames = $PlayButtonNames
+      PlayClickOffsetX = $PlayClickOffsetX
+      PlayClickOffsetY = $PlayClickOffsetY
+      UseEnterFallback = [bool]$UseEnterFallback
+      EnableBroadUiSearch = [bool]$EnableBroadUiSearch
+      CrashWindowTitlePatterns = $CrashWindowTitlePatterns
+      FabricWindowTitlePatterns = $FabricWindowTitlePatterns
+      CrashCloseClickOffsetX = $CrashCloseClickOffsetX
+      CrashCloseClickOffsetY = $CrashCloseClickOffsetY
+    }
+    Timeouts = [pscustomobject]@{
+      LauncherWindowTimeoutSeconds = $LauncherWindowTimeoutSeconds
+      OutcomeTimeoutSeconds = $OutcomeTimeoutSeconds
+      PollIntervalSeconds = $PollIntervalSeconds
+      WaitForGameExitSeconds = $WaitForGameExitSeconds
+      GameExitPollSeconds = $GameExitPollSeconds
+      CrashCloseDelaySeconds = $CrashCloseDelaySeconds
+    }
+    Process = [pscustomobject]@{
+      GameProcessNames = $GameProcessNames
+    }
+    Cache = [pscustomobject]@{
+      EnableSessionLaunchConfigCache = $cacheEnabled
+      SessionSuccessfulLaunchConfigCache = $cache
+    }
+  }
+}
+
 function Stop-GameProcess {
   [CmdletBinding(SupportsShouldProcess = $true)]
   [OutputType([int])]
@@ -45,11 +134,15 @@ function Stop-ConfiguredGameProcess {
   [OutputType([int])]
   param(
     [Parameter(Mandatory = $true)]
-    [datetime]$StartedAfter
+    [datetime]$StartedAfter,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
   if (-not $PSCmdlet.ShouldProcess("Minecraft game processes", "Stop")) { return 0 }
-  return Stop-GameProcess -Names $GameProcessNames -StartedAfter $StartedAfter
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
+  return Stop-GameProcess -Names $ctx.Process.GameProcessNames -StartedAfter $StartedAfter
 }
 
 function Get-SessionLaunchConfigKey {
@@ -77,32 +170,49 @@ function Get-SessionLaunchConfigKey {
 }
 
 function Get-SessionSuccessfulLaunchConfigCache {
-  $cacheVar = Get-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
-  if ($null -ne $cacheVar -and $cacheVar.Value -is [hashtable]) {
-    return [hashtable]$cacheVar.Value
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
+  )
+
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
+  $cache = $null
+  if ($null -ne $ctx.Cache) {
+    $cache = $ctx.Cache.SessionSuccessfulLaunchConfigCache
+  }
+  if ($null -ne $cache -and $cache -is [hashtable]) {
+    return [hashtable]$cache
   }
 
   $cache = @{}
-  Set-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -Value $cache
+  if ($null -ne $ctx.Cache) {
+    $ctx.Cache.SessionSuccessfulLaunchConfigCache = $cache
+  } else {
+    Set-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -Value $cache
+  }
   return $cache
 }
 
 function Register-SessionLaunchConfigSuccess {
   param(
     [Parameter(Mandatory = $false)]
-    [string]$ConfigKey = ""
+    [string]$ConfigKey = "",
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
   if ([string]::IsNullOrWhiteSpace($ConfigKey)) { return }
 
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
   $cacheEnabled = $false
-  $cacheEnabledVar = Get-Variable -Name "EnableSessionLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
-  if ($null -ne $cacheEnabledVar) {
-    $cacheEnabled = [bool]$cacheEnabledVar.Value
+  if ($null -ne $ctx.Cache) {
+    $cacheEnabled = [bool]$ctx.Cache.EnableSessionLaunchConfigCache
   }
   if (-not $cacheEnabled) { return }
 
-  $cache = Get-SessionSuccessfulLaunchConfigCache
+  $cache = Get-SessionSuccessfulLaunchConfigCache -Context $ctx
   if (-not $cache.ContainsKey($ConfigKey)) {
     $cache[$ConfigKey] = (Get-Date).ToString("o")
   }
@@ -111,23 +221,24 @@ function Register-SessionLaunchConfigSuccess {
 function Invoke-ConfiguredLaunchAttempt {
   param(
     [Parameter(Mandatory = $false)]
-    [long[]]$IgnoreHandleIds = @()
+    [long[]]$IgnoreHandleIds = @(),
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
   $cacheEnabled = $false
-  $cacheEnabledVar = Get-Variable -Name "EnableSessionLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
-  if ($null -ne $cacheEnabledVar) {
-    $cacheEnabled = [bool]$cacheEnabledVar.Value
+  if ($null -ne $ctx.Cache) {
+    $cacheEnabled = [bool]$ctx.Cache.EnableSessionLaunchConfigCache
   }
 
   $configKey = ""
   if ($cacheEnabled) {
-    $modsDirVar = Get-Variable -Name "GameModsDir" -Scope Script -ErrorAction SilentlyContinue
-    $modsDir = if ($null -ne $modsDirVar) { [string]$modsDirVar.Value } else { "" }
-    $configKey = Get-SessionLaunchConfigKey -ModsDir $modsDir
+    $configKey = Get-SessionLaunchConfigKey -ModsDir ([string]$ctx.Paths.GameModsDir)
 
     if (-not [string]::IsNullOrWhiteSpace($configKey)) {
-      $cache = Get-SessionSuccessfulLaunchConfigCache
+      $cache = Get-SessionSuccessfulLaunchConfigCache -Context $ctx
       if ($cache.ContainsKey($configKey)) {
         Write-Host "Session launch cache: skipping already passed mod configuration (use -NoCache to force re-check)." -ForegroundColor Gray
         return [pscustomobject]@{
@@ -143,20 +254,20 @@ function Invoke-ConfiguredLaunchAttempt {
     }
   }
 
-  $outcome = Invoke-LaunchAttempt -LauncherTitlePattern $LauncherWindowTitlePattern `
-    -LauncherPath $LauncherExePath `
-    -LauncherArgs $LauncherArguments `
-    -AppendAutoLaunch ([bool]$UseAutoLaunch) `
-    -LauncherTimeoutSeconds $LauncherWindowTimeoutSeconds `
-    -ButtonNames $PlayButtonNames `
-    -ClickOffsetX $PlayClickOffsetX `
-    -ClickOffsetY $PlayClickOffsetY `
-    -EnableEnterFallback $UseEnterFallback `
-    -AllowBroadSearch ([bool]$EnableBroadUiSearch) `
-    -CrashPatterns $CrashWindowTitlePatterns `
-    -FabricPatterns $FabricWindowTitlePatterns `
-    -OutcomeTimeoutSeconds $OutcomeTimeoutSeconds `
-    -PollSeconds $PollIntervalSeconds `
+  $outcome = Invoke-LaunchAttempt -LauncherTitlePattern $ctx.Ui.LauncherWindowTitlePattern `
+    -LauncherPath $ctx.Paths.LauncherExePath `
+    -LauncherArgs $ctx.Launcher.Arguments `
+    -AppendAutoLaunch ([bool]$ctx.Launcher.UseAutoLaunch) `
+    -LauncherTimeoutSeconds $ctx.Timeouts.LauncherWindowTimeoutSeconds `
+    -ButtonNames $ctx.Ui.PlayButtonNames `
+    -ClickOffsetX $ctx.Ui.PlayClickOffsetX `
+    -ClickOffsetY $ctx.Ui.PlayClickOffsetY `
+    -EnableEnterFallback $ctx.Ui.UseEnterFallback `
+    -AllowBroadSearch ([bool]$ctx.Ui.EnableBroadUiSearch) `
+    -CrashPatterns $ctx.Ui.CrashWindowTitlePatterns `
+    -FabricPatterns $ctx.Ui.FabricWindowTitlePatterns `
+    -OutcomeTimeoutSeconds $ctx.Timeouts.OutcomeTimeoutSeconds `
+    -PollSeconds $ctx.Timeouts.PollIntervalSeconds `
     -IgnoreHandleIds $IgnoreHandleIds
 
   if (-not [string]::IsNullOrWhiteSpace($configKey)) {
@@ -171,10 +282,17 @@ function Invoke-ConfiguredLaunchAttempt {
 }
 
 function Wait-ConfiguredLauncherInteractive {
-  [void](Wait-ForLauncherWindowInteractive -TitlePattern $LauncherWindowTitlePattern `
-      -CrashPatterns $CrashWindowTitlePatterns `
-      -FabricPatterns $FabricWindowTitlePatterns `
-      -PollSeconds $PollIntervalSeconds)
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
+  )
+
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
+  [void](Wait-ForLauncherWindowInteractive -TitlePattern $ctx.Ui.LauncherWindowTitlePattern `
+      -CrashPatterns $ctx.Ui.CrashWindowTitlePatterns `
+      -FabricPatterns $ctx.Ui.FabricWindowTitlePatterns `
+      -PollSeconds $ctx.Timeouts.PollIntervalSeconds)
 }
 
 function Wait-ConfiguredGameExit {
@@ -182,15 +300,19 @@ function Wait-ConfiguredGameExit {
     [Parameter(Mandatory = $true)]
     [datetime]$StartedAfter,
     [Parameter(Mandatory = $false)]
-    [string]$WarningContext = "Next file move"
+    [string]$WarningContext = "Next file move",
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
-  $exited = Wait-ForGameProcessesToExit -Names $GameProcessNames `
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
+  $exited = Wait-ForGameProcessesToExit -Names $ctx.Process.GameProcessNames `
     -StartedAfter $StartedAfter `
-    -TimeoutSeconds $WaitForGameExitSeconds `
-    -PollSeconds $GameExitPollSeconds
+    -TimeoutSeconds $ctx.Timeouts.WaitForGameExitSeconds `
+    -PollSeconds $ctx.Timeouts.GameExitPollSeconds
   if (-not $exited) {
-    Write-Host ("Warning: game processes still running after {0}s. {1} may fail due to locks." -f $WaitForGameExitSeconds, $WarningContext) -ForegroundColor Yellow
+    Write-Host ("Warning: game processes still running after {0}s. {1} may fail due to locks." -f $ctx.Timeouts.WaitForGameExitSeconds, $WarningContext) -ForegroundColor Yellow
   }
   return $exited
 }
@@ -206,11 +328,15 @@ function Close-OutcomeWindowWithExtraDialog {
     [Parameter(Mandatory = $true)]
     [int]$OffsetY,
     [Parameter(Mandatory = $false)]
-    [bool]$CloseExtraFabricDialogs = $false
+    [bool]$CloseExtraFabricDialogs = $false,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
   if ($null -eq $Outcome.Window) { return 0 }
 
+  $ctx = Resolve-IsolationLauncherContext -Context $Context
   Write-Host ("Closing outcome window: {0} ({1})" -f $Outcome.Type, $Outcome.Window.Title) -ForegroundColor Gray
   $handleId = [long]$Outcome.Window.Handle.ToInt64()
   Close-OutcomeWindow -Outcome $Outcome `
@@ -221,7 +347,7 @@ function Close-OutcomeWindowWithExtraDialog {
   if ($CloseExtraFabricDialogs) {
     # * Some launchers show both a generic crash dialog and Fabric's incompatibility dialog.
     # * Close Fabric dialog too to keep automation continuous.
-    $extraFabricWindow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+    $extraFabricWindow = Select-WindowByTitlePattern -Patterns $ctx.Ui.FabricWindowTitlePatterns
     if ($null -ne $extraFabricWindow) {
       Write-Host ("Closing extra Fabric Loader dialog: {0}" -f $extraFabricWindow.Title) -ForegroundColor Gray
       Close-OutcomeWindow -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $extraFabricWindow }) `

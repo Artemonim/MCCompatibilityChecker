@@ -1,6 +1,139 @@
+function Resolve-IsolationStrategyContext {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
+  )
+
+  if ($null -ne $Context) { return $Context }
+
+  $launcherContext = Resolve-IsolationLauncherContext
+
+  $storageModsDir = ""
+  $storageModsVar = Get-Variable -Name "StorageModsDir" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $storageModsVar) { $storageModsDir = [string]$storageModsVar.Value }
+
+  $pinnedSetVar = Get-Variable -Name "pinnedJarNameSet" -Scope Script -ErrorAction SilentlyContinue
+  $pinnedSet = if ($null -ne $pinnedSetVar -and $pinnedSetVar.Value -is [hashtable]) { [hashtable]$pinnedSetVar.Value } else { @{} }
+
+  $movedItemsVar = Get-Variable -Name "movedItems" -Scope Script -ErrorAction SilentlyContinue
+  $movedItemsLocal = if ($null -ne $movedItemsVar -and $movedItemsVar.Value) { $movedItemsVar.Value } else { New-Object System.Collections.Generic.List[object] }
+
+  $movedSetVar = Get-Variable -Name "movedJarNameSet" -Scope Script -ErrorAction SilentlyContinue
+  $movedSetLocal = if ($null -ne $movedSetVar -and $movedSetVar.Value -is [hashtable]) { [hashtable]$movedSetVar.Value } else { @{} }
+
+  $phaseVar = Get-Variable -Name "phase" -Scope Script -ErrorAction SilentlyContinue
+  $lastOutcomeVar = Get-Variable -Name "lastOutcomeHandleId" -Scope Script -ErrorAction SilentlyContinue
+  $mcVersionVar = Get-Variable -Name "mcVersionForLegacy" -Scope Script -ErrorAction SilentlyContinue
+  $activeSignatureVar = Get-Variable -Name "activeBaselineSignature" -Scope Script -ErrorAction SilentlyContinue
+  $activeEvidenceVar = Get-Variable -Name "activeBaselineEvidenceKey" -Scope Script -ErrorAction SilentlyContinue
+  $lastPinnedVar = Get-Variable -Name "lastBaselinePinnedKey" -Scope Script -ErrorAction SilentlyContinue
+  $tierVar = Get-Variable -Name "currentDependencyTier" -Scope Script -ErrorAction SilentlyContinue
+  $blockedVar = Get-Variable -Name "blockedByDependency" -Scope Script -ErrorAction SilentlyContinue
+  $baselineVar = Get-Variable -Name "baselineSucceeded" -Scope Script -ErrorAction SilentlyContinue
+  $blockedMissingVar = Get-Variable -Name "blockedDependencyMissing" -Scope Script -ErrorAction SilentlyContinue
+  $blockedRequiringVar = Get-Variable -Name "blockedDependencyRequiring" -Scope Script -ErrorAction SilentlyContinue
+  $blockedContextVar = Get-Variable -Name "blockedDependencyContext" -Scope Script -ErrorAction SilentlyContinue
+
+  $useStorageLocal = $false
+  $useStorageVar = Get-Variable -Name "useStorage" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $useStorageVar) { $useStorageLocal = [bool]$useStorageVar.Value }
+
+  return [pscustomobject]@{
+    Paths = [pscustomobject]@{
+      GameModsDir = $launcherContext.Paths.GameModsDir
+      StorageModsDir = $storageModsDir
+      LauncherExePath = $launcherContext.Paths.LauncherExePath
+    }
+    Launcher = $launcherContext.Launcher
+    Ui = $launcherContext.Ui
+    Timeouts = $launcherContext.Timeouts
+    Process = $launcherContext.Process
+    Cache = $launcherContext.Cache
+    Log = [pscustomobject]@{
+      LogPath = $LogPath
+      LogMaxAgeMinutes = $LogMaxAgeMinutes
+      LogReadRetryCount = $LogReadRetryCount
+      LogReadRetryDelayMs = $LogReadRetryDelayMs
+      SkipGameLogs = [bool]$SkipGameLogs
+      LogSinceSkewSeconds = $LogSinceSkewSeconds
+    }
+    Strategy = [pscustomobject]@{
+      ErrorSignatureLineLimit = $ErrorSignatureLineLimit
+      IncludeWarnMixinsAsIncompatible = [bool]$IncludeWarnMixinsAsIncompatible
+      IgnoreModListForSignatureChange = [bool]$IgnoreModListForSignatureChange
+      LogPostRunDelaySeconds = $LogPostRunDelaySeconds
+      BinaryLinearThreshold = $BinaryLinearThreshold
+      DependencyAwareExponentialMaxTier = $DependencyAwareExponentialMaxTier
+      DependencyAwareTreatUnknownAsCore = [bool]$DependencyAwareTreatUnknownAsCore
+    }
+    Quarantine = [pscustomobject]@{
+      UseStorage = $useStorageLocal
+      MoveRetryCount = $MoveRetryCount
+      MoveRetryDelayMs = $MoveRetryDelayMs
+      GameQuarantineDir = $gameQuarantineDir
+      StorageQuarantineDir = $storageQuarantineDir
+      MovedItems = $movedItemsLocal
+      MovedJarNameSet = $movedSetLocal
+      ForceRestore = [bool]$ForceRestore
+    }
+    State = [pscustomobject]@{
+      Phase = if ($null -ne $phaseVar) { [string]$phaseVar.Value } else { "" }
+      LastOutcomeHandleId = if ($null -ne $lastOutcomeVar) { [long]$lastOutcomeVar.Value } else { 0 }
+      McVersionForLegacy = if ($null -ne $mcVersionVar) { [string]$mcVersionVar.Value } else { "unknown" }
+      ActiveBaselineSignature = if ($null -ne $activeSignatureVar) { [string]$activeSignatureVar.Value } else { "" }
+      ActiveBaselineEvidenceKey = if ($null -ne $activeEvidenceVar) { [string]$activeEvidenceVar.Value } else { "" }
+      LastBaselinePinnedKey = if ($null -ne $lastPinnedVar) { [string]$lastPinnedVar.Value } else { "" }
+      CurrentDependencyTier = if ($null -ne $tierVar) { [int]$tierVar.Value } else { 0 }
+      PinnedJarNameSet = $pinnedSet
+      BlockedByDependency = if ($null -ne $blockedVar) { [bool]$blockedVar.Value } else { $false }
+      BaselineSucceeded = if ($null -ne $baselineVar) { [bool]$baselineVar.Value } else { $false }
+      BlockedDependencyMissing = if ($null -ne $blockedMissingVar -and $blockedMissingVar.Value) { @($blockedMissingVar.Value) } else { @() }
+      BlockedDependencyRequiring = if ($null -ne $blockedRequiringVar -and $blockedRequiringVar.Value) { @($blockedRequiringVar.Value) } else { @() }
+      BlockedDependencyContext = if ($null -ne $blockedContextVar) { [string]$blockedContextVar.Value } else { "" }
+    }
+  }
+}
+
+function Set-IsolationStrategyPhase {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$Context,
+    [Parameter(Mandatory = $true)]
+    [string]$Phase
+  )
+
+  if ($null -eq $Context -or $null -eq $Context.State) { return }
+  $Context.State.Phase = $Phase
+  $phaseVar = Get-Variable -Name "phase" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $phaseVar) { $script:phase = $Phase }
+}
+
+function Set-IsolationStrategyCurrentDependencyTier {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$Context,
+    [Parameter(Mandatory = $true)]
+    [int]$Tier
+  )
+
+  if ($null -eq $Context -or $null -eq $Context.State) { return }
+  $Context.State.CurrentDependencyTier = $Tier
+  $tierVar = Get-Variable -Name "currentDependencyTier" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $tierVar) { $script:currentDependencyTier = $Tier }
+}
+
 function Get-PinnedJarNameKey {
-  if (-not $pinnedJarNameSet -or $pinnedJarNameSet.Count -eq 0) { return "" }
-  return (($pinnedJarNameSet.Keys | Sort-Object) -join "|")
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
+  )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $pinnedSet = $ctx.State.PinnedJarNameSet
+  if (-not $pinnedSet -or $pinnedSet.Count -eq 0) { return "" }
+  return (($pinnedSet.Keys | Sort-Object) -join "|")
 }
 
 # * Runs a single isolation probe and returns whether the test group matches the baseline issue.
@@ -15,26 +148,35 @@ function Invoke-IsolationProbe {
     [Parameter(Mandatory = $false)]
     [string]$PhasePrefix = "isolation_probe",
     [Parameter(Mandatory = $false)]
-    [string[]]$PinnedJarNames = @()
+    [string[]]$PinnedJarNames = @(),
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
-  Update-QuarantineState -DesiredJarNames $TestJarNames -PinnedJarNames $PinnedJarNames
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $state = $ctx.State
+  $ui = $ctx.Ui
+  $timeouts = $ctx.Timeouts
+  $strategy = $ctx.Strategy
+
+  Update-QuarantineState -DesiredJarNames $TestJarNames -PinnedJarNames $PinnedJarNames -Context $ctx
 
   if ([string]::IsNullOrWhiteSpace($PhasePrefix)) {
     $PhasePrefix = "isolation_probe"
   }
 
   $ignoreHandles = @()
-  if ($script:lastOutcomeHandleId -ne 0) {
-    $ignoreHandles = @($script:lastOutcomeHandleId)
+  if ($state.LastOutcomeHandleId -ne 0) {
+    $ignoreHandles = @($state.LastOutcomeHandleId)
   }
 
   $attemptStart = Get-Date
-  $script:phase = ("{0}_invoke_launch" -f $PhasePrefix)
-  $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles
+  Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_invoke_launch" -f $PhasePrefix)
+  $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles -Context $ctx
 
   if ($outcome.Type -ne "FabricDialog") {
-    $fabricWindowNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+    $fabricWindowNow = Select-WindowByTitlePattern -Patterns $ui.FabricWindowTitlePatterns
     if ($null -ne $fabricWindowNow) {
       Write-Host ("Detected Fabric dialog after outcome: {0}" -f $fabricWindowNow.Title) -ForegroundColor Yellow
       $outcome = [pscustomobject]@{
@@ -45,7 +187,7 @@ function Invoke-IsolationProbe {
   }
 
   if ($outcome.Type -ne "FabricDialog" -and $outcome.Type -ne "CrashDialog") {
-    $crashWindowNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+    $crashWindowNow = Select-WindowByTitlePattern -Patterns $ui.CrashWindowTitlePatterns
     if ($null -ne $crashWindowNow) {
       Write-Host ("Detected crash dialog after outcome: {0}" -f $crashWindowNow.Title) -ForegroundColor Yellow
       $outcome = [pscustomobject]@{
@@ -58,42 +200,43 @@ function Invoke-IsolationProbe {
   Write-Host ("Outcome: {0}" -f $outcome.Type) -ForegroundColor $(if ($outcome.Type -eq "Timeout") { "Green" } else { "Yellow" })
 
   if ($outcome.Type -ne "Timeout" -and $null -ne $outcome.Window) {
-    $script:phase = ("{0}_close_outcome_window" -f $PhasePrefix)
-    $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
-      -DelaySeconds $CrashCloseDelaySeconds `
-      -OffsetX $CrashCloseClickOffsetX `
-      -OffsetY $CrashCloseClickOffsetY `
-      -CloseExtraFabricDialogs $true
+    Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_close_outcome_window" -f $PhasePrefix)
+    $state.LastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
+      -DelaySeconds $timeouts.CrashCloseDelaySeconds `
+      -OffsetX $ui.CrashCloseClickOffsetX `
+      -OffsetY $ui.CrashCloseClickOffsetY `
+      -CloseExtraFabricDialogs $true `
+      -Context $ctx
   }
 
   if ($outcome.Type -eq "Timeout") {
     # * Game survived the probe window and is still running. Kill it so
     # * the next iteration can move JAR files and launch a fresh instance.
-    $script:phase = ("{0}_stop_game_after_timeout" -f $PhasePrefix)
-    [void](Stop-ConfiguredGameProcess -StartedAfter $attemptStart)
-    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+    Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_stop_game_after_timeout" -f $PhasePrefix)
+    [void](Stop-ConfiguredGameProcess -StartedAfter $attemptStart -Context $ctx)
+    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart -Context $ctx)
 
     $launchConfigKey = ""
     if ($outcome | Get-Member -Name "LaunchConfigKey" -MemberType NoteProperty, Property) {
       $launchConfigKey = [string]$outcome.LaunchConfigKey
     }
     if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
-      Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
+      Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey -Context $ctx
     }
   } else {
-    $script:phase = ("{0}_wait_game_exit" -f $PhasePrefix)
-    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+    Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_wait_game_exit" -f $PhasePrefix)
+    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart -Context $ctx)
   }
 
   if ($outcome.Type -eq "FabricDialog") {
-    Start-Sleep -Seconds $LogPostRunDelaySeconds
-    $script:phase = ("{0}_read_dependency_logs" -f $PhasePrefix)
-    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
+    Start-Sleep -Seconds $strategy.LogPostRunDelaySeconds
+    Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_read_dependency_logs" -f $PhasePrefix)
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart -Context $ctx
     $requiringModIds = @(Get-FabricRequiringModId -Lines $snapshot.Lines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
     $missingDepIds = @(Get-FabricMissingDependencyId -Lines $snapshot.Lines) |
       Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-    Wait-ConfiguredLauncherInteractive
+    Wait-ConfiguredLauncherInteractive -Context $ctx
     return [pscustomobject]@{
       Outcome = $outcome
       GroupMatches = $false
@@ -107,33 +250,33 @@ function Invoke-IsolationProbe {
   if ($outcome.Type -eq "Timeout") {
     $groupMatches = $true
   } else {
-    Start-Sleep -Seconds $LogPostRunDelaySeconds
-    $script:phase = ("{0}_read_logs" -f $PhasePrefix)
-    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
+    Start-Sleep -Seconds $strategy.LogPostRunDelaySeconds
+    Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_read_logs" -f $PhasePrefix)
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart -Context $ctx
 
-    if ($script:mcVersionForLegacy -eq "unknown") {
-      $script:mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
+    if ($state.McVersionForLegacy -eq "unknown") {
+      $state.McVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
     }
 
     $signature = Get-ErrorSignature -Lines $snapshot.Lines `
-      -MaxLines $ErrorSignatureLineLimit `
-      -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-    $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $ErrorSignatureLineLimit
+      -MaxLines $strategy.ErrorSignatureLineLimit `
+      -IncludeWarnMixins ([bool]$strategy.IncludeWarnMixinsAsIncompatible)
+    $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $strategy.ErrorSignatureLineLimit
 
     Write-Verbose ("Signature: {0}" -f $signature)
     $signatureChanged = Test-SignatureChanged -Baseline $BaselineSignature -Current $signature `
       -BaselineEvidenceKey $BaselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
-      -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)
+      -IgnoreModsWhenEvidencePresent ([bool]$strategy.IgnoreModListForSignatureChange)
     if ($signatureChanged) {
       Start-Sleep -Milliseconds 750
-      $confirmSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
+      $confirmSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart -Context $ctx
       $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
-        -MaxLines $ErrorSignatureLineLimit `
-        -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-      $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+        -MaxLines $strategy.ErrorSignatureLineLimit `
+        -IncludeWarnMixins ([bool]$strategy.IncludeWarnMixinsAsIncompatible)
+      $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $strategy.ErrorSignatureLineLimit
       if (-not (Test-SignatureChanged -Baseline $BaselineSignature -Current $confirmSignature `
           -BaselineEvidenceKey $BaselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
-          -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange))) {
+          -IgnoreModsWhenEvidencePresent ([bool]$strategy.IgnoreModListForSignatureChange))) {
         Write-Verbose "Signature change not confirmed; treating as unchanged."
         $signatureChanged = $false
       }
@@ -141,7 +284,7 @@ function Invoke-IsolationProbe {
     $groupMatches = $signatureChanged
   }
 
-  Wait-ConfiguredLauncherInteractive
+  Wait-ConfiguredLauncherInteractive -Context $ctx
 
   return [pscustomobject]@{
     Outcome = $outcome
@@ -165,8 +308,16 @@ function Invoke-FabricDependencyRecovery {
     [Parameter(Mandatory = $true)]
     [hashtable]$PinnedJarNameSet,
     [Parameter(Mandatory = $true)]
-    [hashtable]$ProtectedJarNameSet
+    [hashtable]$ProtectedJarNameSet,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $state = $ctx.State
+  $paths = $ctx.Paths
+  $quarantine = $ctx.Quarantine
 
   $changes = $false
   $pinnedAdded = New-Object System.Collections.Generic.List[string]
@@ -185,7 +336,7 @@ function Invoke-FabricDependencyRecovery {
       $key = $jarName.ToLowerInvariant()
       if ($ProtectedJarNameSet.ContainsKey($key)) { continue }
 
-      $removedItem = Get-MovedItemByJarName -JarName $jarName
+      $removedItem = Get-MovedItemByJarName -JarName $jarName -Context $ctx
       if ($null -eq $removedItem) { continue }
 
       $removedJarProvides = @()
@@ -206,15 +357,15 @@ function Invoke-FabricDependencyRecovery {
       Write-Host ("Fabric missing dependency '{0}' appears caused by removing '{1}'. Restoring dependency." -f ($missingArr -join ", "), $jarName) -ForegroundColor Cyan
 
       if ($null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
-        [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+        [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $paths.GameModsDir -IsDryRun $false -AllowOverwrite $true)
         $removedItem.GameQuarantine = $null
       }
-      if ($useStorage -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
-        [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+      if ($quarantine.UseStorage -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+        [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $paths.StorageModsDir -IsDryRun $false -AllowOverwrite $true)
         $removedItem.StorageQuarantine = $null
       }
-      if ($movedJarNameSet.ContainsKey($jarName)) {
-        $null = $movedJarNameSet.Remove($jarName)
+      if ($quarantine.MovedJarNameSet.ContainsKey($jarName)) {
+        $null = $quarantine.MovedJarNameSet.Remove($jarName)
       }
 
       $ProtectedJarNameSet[$key] = $jarName
@@ -225,9 +376,9 @@ function Invoke-FabricDependencyRecovery {
 
   if ($requiringArr.Count -gt 0) {
     Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($requiringArr -join ", ")) -ForegroundColor Cyan
-    $searchDirs = @($GameModsDir)
-    if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
-    if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+    $searchDirs = @($paths.GameModsDir)
+    if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
+    if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
     $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $requiringArr -AllowTokenFallback:$false
     $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency dialog"
     if ($culpritJars -and $culpritJars.Count -gt 0 -and $ProtectedJarNameSet.Count -gt 0) {
@@ -237,15 +388,15 @@ function Invoke-FabricDependencyRecovery {
     }
     if ($culpritJars -and $culpritJars.Count -gt 0) {
       foreach ($cj in $culpritJars) {
-        if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
+        if ($quarantine.MovedJarNameSet.ContainsKey($cj.Name)) { continue }
 
         Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
-        $script:phase = "quick_isolate_move"
-        $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+        Set-IsolationStrategyPhase -Context $ctx -Phase "quick_isolate_move"
+        $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $quarantine.GameQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
         if ($null -ne $qDest) {
-          [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null)
+          [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null -Context $ctx)
           $PinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
-          $script:pinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+          $state.PinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
           $pinnedAdded.Add($cj.Name)
           $changes = $true
         }
@@ -271,8 +422,14 @@ function Invoke-BinaryIsolation {
     [Parameter(Mandatory = $true)]
     [string]$BaselineEvidenceKey,
     [Parameter(Mandatory = $false)]
-    [string[]]$PinnedJarNames = @()
+    [string[]]$PinnedJarNames = @(),
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $strategy = $ctx.Strategy
 
   $pinnedJarNameSet = @{}
   foreach ($name in $PinnedJarNames) {
@@ -303,13 +460,14 @@ function Invoke-BinaryIsolation {
       -BaselineSignature $BaselineSignature `
       -BaselineEvidenceKey $BaselineEvidenceKey `
       -PhasePrefix "binary_verify_all" `
-      -PinnedJarNames $pinnedJarNames
+      -PinnedJarNames $pinnedJarNames `
+      -Context $ctx
     if ($verifyResult.Mode -eq "DependencyDialog") {
       Write-Host "Dependency dialog during verify-all probe. Proceeding to binary refinement." -ForegroundColor Yellow
     } elseif (-not [bool]$verifyResult.GroupMatches) {
       Write-Host "Removing all candidates did not change the crash. Culprit is not in this set." -ForegroundColor Yellow
       $pinnedJarNames = @($pinnedJarNameSet.Values)
-      Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+      Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
       return [pscustomobject]@{
         Mode = "ContinueLinear"
         Remaining = @()
@@ -319,7 +477,7 @@ function Invoke-BinaryIsolation {
   }
 
   $attemptIndex = 0
-  while ($remaining.Count -gt $BinaryLinearThreshold) {
+  while ($remaining.Count -gt $strategy.BinaryLinearThreshold) {
     if ($remaining.Count -le 1) { break }
 
     $attemptIndex++
@@ -337,17 +495,19 @@ function Invoke-BinaryIsolation {
       -BaselineSignature $BaselineSignature `
       -BaselineEvidenceKey $BaselineEvidenceKey `
       -PhasePrefix "binary_attempt" `
-      -PinnedJarNames $pinnedJarNames
+      -PinnedJarNames $pinnedJarNames `
+      -Context $ctx
 
     if ($probeResult.Mode -eq "DependencyDialog") {
       $recovery = Invoke-FabricDependencyRecovery -RequiringModIds $probeResult.RequiringModIds `
         -MissingDepIds $probeResult.MissingDepIds `
         -RemovedJarNames $testNames `
         -PinnedJarNameSet $pinnedJarNameSet `
-        -ProtectedJarNameSet $protectedJarNameSet
+        -ProtectedJarNameSet $protectedJarNameSet `
+        -Context $ctx
       if ($recovery.Changes) {
         $pinnedJarNames = @($pinnedJarNameSet.Values)
-        Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+        Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
         $remaining = @($remaining | Where-Object {
             $key = $_.Name.ToLowerInvariant()
             -not $pinnedJarNameSet.ContainsKey($key) -and -not $protectedJarNameSet.ContainsKey($key)
@@ -375,7 +535,7 @@ function Invoke-BinaryIsolation {
   }
 
   $pinnedJarNames = @($pinnedJarNameSet.Values)
-  Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+  Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
   return [pscustomobject]@{
     Mode = "ContinueLinear"
     Remaining = $remaining
@@ -392,8 +552,13 @@ function Invoke-ExponentialIsolation {
     [Parameter(Mandatory = $true)]
     [string]$BaselineEvidenceKey,
     [Parameter(Mandatory = $false)]
-    [string[]]$PinnedJarNames = @()
+    [string[]]$PinnedJarNames = @(),
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
 
   $pinnedJarNameSet = @{}
   foreach ($name in $PinnedJarNames) {
@@ -443,17 +608,19 @@ function Invoke-ExponentialIsolation {
       -BaselineSignature $BaselineSignature `
       -BaselineEvidenceKey $BaselineEvidenceKey `
       -PhasePrefix "exponential_attempt" `
-      -PinnedJarNames $pinnedJarNames
+      -PinnedJarNames $pinnedJarNames `
+      -Context $ctx
 
     if ($probeResult.Mode -eq "DependencyDialog") {
       $recovery = Invoke-FabricDependencyRecovery -RequiringModIds $probeResult.RequiringModIds `
         -MissingDepIds $probeResult.MissingDepIds `
         -RemovedJarNames $testNames `
         -PinnedJarNameSet $pinnedJarNameSet `
-        -ProtectedJarNameSet $protectedJarNameSet
+        -ProtectedJarNameSet $protectedJarNameSet `
+        -Context $ctx
       if ($recovery.Changes) {
         $pinnedJarNames = @($pinnedJarNameSet.Values)
-        Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+        Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
         $remaining = @($remaining | Where-Object {
             $key = $_.Name.ToLowerInvariant()
             -not $pinnedJarNameSet.ContainsKey($key) -and -not $protectedJarNameSet.ContainsKey($key)
@@ -498,7 +665,7 @@ function Invoke-ExponentialIsolation {
 
   if (-not $selectedChunk -or $selectedChunk.Count -eq 0) {
     $pinnedJarNames = @($pinnedJarNameSet.Values)
-    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
     return [pscustomobject]@{
       Mode = "ContinueLinear"
       Remaining = @()
@@ -516,7 +683,8 @@ function Invoke-ExponentialIsolation {
   $binaryResult = Invoke-BinaryIsolation -Mods $selectedChunk `
     -BaselineSignature $BaselineSignature `
     -BaselineEvidenceKey $BaselineEvidenceKey `
-    -PinnedJarNames $pinnedJarNames
+    -PinnedJarNames $pinnedJarNames `
+    -Context $ctx
   return [pscustomobject]@{
     Mode = $binaryResult.Mode
     Remaining = $binaryResult.Remaining
@@ -528,29 +696,39 @@ function Invoke-ExponentialIsolation {
 function Invoke-LinearBaselineRefresh {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$PhasePrefix
+    [string]$PhasePrefix,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $state = $ctx.State
+  $ui = $ctx.Ui
+  $timeouts = $ctx.Timeouts
+  $strategy = $ctx.Strategy
 
   Write-Host ("Refreshing baseline signature for {0}." -f $PhasePrefix) -ForegroundColor Gray
 
   $attemptStart = Get-Date
-  $script:phase = ("{0}_baseline_invoke_launch" -f $PhasePrefix)
-  $baselineOutcomeObj = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds @()
+  Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_baseline_invoke_launch" -f $PhasePrefix)
+  $baselineOutcomeObj = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds @() -Context $ctx
 
   $baselineOutcome = $baselineOutcomeObj.Type
   Write-Host ("{0} baseline outcome: {1}" -f $PhasePrefix, $baselineOutcome) -ForegroundColor $(if ($baselineOutcome -eq "Timeout") { "Green" } else { "Yellow" })
 
   if ($baselineOutcome -ne "Timeout") {
     if ($null -ne $baselineOutcomeObj.Window) {
-      $script:phase = ("{0}_baseline_close_outcome_window" -f $PhasePrefix)
-      $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $baselineOutcomeObj `
-        -DelaySeconds $CrashCloseDelaySeconds `
-        -OffsetX $CrashCloseClickOffsetX `
-        -OffsetY $CrashCloseClickOffsetY `
-        -CloseExtraFabricDialogs $false
+      Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_baseline_close_outcome_window" -f $PhasePrefix)
+      $state.LastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $baselineOutcomeObj `
+        -DelaySeconds $timeouts.CrashCloseDelaySeconds `
+        -OffsetX $ui.CrashCloseClickOffsetX `
+        -OffsetY $ui.CrashCloseClickOffsetY `
+        -CloseExtraFabricDialogs $false `
+        -Context $ctx
     }
-    $script:phase = ("{0}_baseline_wait_game_exit" -f $PhasePrefix)
-    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+    Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_baseline_wait_game_exit" -f $PhasePrefix)
+    [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart -Context $ctx)
   } else {
     # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
     # ! Stop early to prevent moving a random mod to Legacy.
@@ -559,39 +737,39 @@ function Invoke-LinearBaselineRefresh {
       $launchConfigKey = [string]$baselineOutcomeObj.LaunchConfigKey
     }
     if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
-      Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
+      Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey -Context $ctx
     }
     Write-Host ("Warning: baseline issue not reproduced in {0}. Stopping isolation to avoid false culprit selection." -f $PhasePrefix) -ForegroundColor Yellow
-    Wait-ConfiguredLauncherInteractive
+    Wait-ConfiguredLauncherInteractive -Context $ctx
     return [pscustomobject]@{
       Outcome = $baselineOutcome
       ShouldContinue = $false
     }
   }
 
-  Wait-ConfiguredLauncherInteractive
+  Wait-ConfiguredLauncherInteractive -Context $ctx
 
-  Start-Sleep -Seconds $LogPostRunDelaySeconds
-  $script:phase = ("{0}_baseline_read_logs" -f $PhasePrefix)
-  $baselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
-  if (Test-DependencyDialogBlock -Context ("{0} baseline" -f $PhasePrefix) -Lines $baselineSnapshot.Lines) {
+  Start-Sleep -Seconds $strategy.LogPostRunDelaySeconds
+  Set-IsolationStrategyPhase -Context $ctx -Phase ("{0}_baseline_read_logs" -f $PhasePrefix)
+  $baselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart -Context $ctx
+  if (Test-DependencyDialogBlock -Context ("{0} baseline" -f $PhasePrefix) -Lines $baselineSnapshot.Lines -StateContext $ctx) {
     return [pscustomobject]@{
       Outcome = $baselineOutcome
       ShouldContinue = $false
     }
   }
-  $script:activeBaselineSignature = Get-ErrorSignature -Lines $baselineSnapshot.Lines `
-    -MaxLines $ErrorSignatureLineLimit `
-    -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-  $script:activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
+  $state.ActiveBaselineSignature = Get-ErrorSignature -Lines $baselineSnapshot.Lines `
+    -MaxLines $strategy.ErrorSignatureLineLimit `
+    -IncludeWarnMixins ([bool]$strategy.IncludeWarnMixinsAsIncompatible)
+  $state.ActiveBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $strategy.ErrorSignatureLineLimit
 
-  if ([string]::IsNullOrWhiteSpace($script:activeBaselineSignature)) {
+  if ([string]::IsNullOrWhiteSpace($state.ActiveBaselineSignature)) {
     Write-Host ("{0} baseline signature is empty. Error change detection may be limited." -f $PhasePrefix) -ForegroundColor Yellow
   } else {
-    Write-Verbose ("{0} baseline signature: {1}" -f $PhasePrefix, $script:activeBaselineSignature)
+    Write-Verbose ("{0} baseline signature: {1}" -f $PhasePrefix, $state.ActiveBaselineSignature)
   }
 
-  $script:lastBaselinePinnedKey = Get-PinnedJarNameKey
+  $state.LastBaselinePinnedKey = Get-PinnedJarNameKey -Context $ctx
 
   return [pscustomobject]@{
     Outcome = $baselineOutcome
@@ -604,8 +782,19 @@ function Invoke-LinearIsolation {
   param(
     [Parameter(Mandatory = $true)]
     [AllowEmptyCollection()]
-    [object[]]$Mods
+    [object[]]$Mods,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $state = $ctx.State
+  $paths = $ctx.Paths
+  $quarantine = $ctx.Quarantine
+  $ui = $ctx.Ui
+  $timeouts = $ctx.Timeouts
+  $strategy = $ctx.Strategy
 
   if (-not $Mods -or $Mods.Count -eq 0) {
     return [pscustomobject]@{
@@ -623,7 +812,7 @@ function Invoke-LinearIsolation {
       Write-Verbose ("Skipping already removed or missing mod: {0}" -f $mod.Name)
       continue
     }
-    if ($movedJarNameSet.ContainsKey($mod.Name)) {
+    if ($quarantine.MovedJarNameSet.ContainsKey($mod.Name)) {
       Write-Verbose ("Skipping already quarantined mod: {0}" -f $mod.Name)
       continue
     }
@@ -631,8 +820,8 @@ function Invoke-LinearIsolation {
     $attemptIndex++
     Write-Host ("Isolation attempt {0}: removing {1}" -f $attemptIndex, $mod.Name) -ForegroundColor Cyan
 
-    $script:phase = "move_to_quarantine"
-    $gameDest = Move-ToQuarantine -SourcePath $mod.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    Set-IsolationStrategyPhase -Context $ctx -Phase "move_to_quarantine"
+    $gameDest = Move-ToQuarantine -SourcePath $mod.FullName -DestDir $quarantine.GameQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
     if ($null -eq $gameDest) {
       Write-Verbose ("Skipping not moved (already removed or missing): {0}" -f $mod.FullName)
       continue
@@ -640,43 +829,45 @@ function Invoke-LinearIsolation {
       Write-Verbose ("Moved: {0} -> {1}" -f $mod.Name, $gameDest)
     }
     $storageDest = $null
-    if ($useStorage) {
-      $storagePath = Join-Path -Path $StorageModsDir -ChildPath $mod.Name
+    if ($quarantine.UseStorage) {
+      $storagePath = Join-Path -Path $paths.StorageModsDir -ChildPath $mod.Name
       if (Test-Path -LiteralPath $storagePath) {
-        $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+        $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $quarantine.StorageQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
       }
     }
 
     [void](Add-MovedItemRecord -JarName $mod.Name `
         -GameSource $mod.FullName `
         -GameQuarantine $gameDest `
-        -StorageSource $(if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $mod.Name } else { $null }) `
-        -StorageQuarantine $storageDest)
+        -StorageSource $(if ($quarantine.UseStorage) { Join-Path -Path $paths.StorageModsDir -ChildPath $mod.Name } else { $null }) `
+        -StorageQuarantine $storageDest `
+        -Context $ctx)
 
     $ignoreHandles = @()
-    if ($script:lastOutcomeHandleId -ne 0) {
-      $ignoreHandles = @($script:lastOutcomeHandleId)
+    if ($state.LastOutcomeHandleId -ne 0) {
+      $ignoreHandles = @($state.LastOutcomeHandleId)
     }
 
     $attemptStart = Get-Date
-    $script:phase = "attempt_invoke_launch"
-    $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles
+    Set-IsolationStrategyPhase -Context $ctx -Phase "attempt_invoke_launch"
+    $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles -Context $ctx
 
     Write-Host ("Outcome: {0}" -f $outcome.Type) -ForegroundColor $(if ($outcome.Type -eq "Timeout") { "Green" } else { "Yellow" })
     if ($outcome.Type -ne "Timeout" -and $null -ne $outcome.Window) {
-      $script:phase = "attempt_close_outcome_window"
-      $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
-        -DelaySeconds $CrashCloseDelaySeconds `
-        -OffsetX $CrashCloseClickOffsetX `
-        -OffsetY $CrashCloseClickOffsetY `
-        -CloseExtraFabricDialogs $true
+      Set-IsolationStrategyPhase -Context $ctx -Phase "attempt_close_outcome_window"
+      $state.LastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
+        -DelaySeconds $timeouts.CrashCloseDelaySeconds `
+        -OffsetX $ui.CrashCloseClickOffsetX `
+        -OffsetY $ui.CrashCloseClickOffsetY `
+        -CloseExtraFabricDialogs $true `
+        -Context $ctx
     }
     if ($outcome.Type -ne "Timeout") {
-      $script:phase = "attempt_wait_game_exit"
-      [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart)
+      Set-IsolationStrategyPhase -Context $ctx -Phase "attempt_wait_game_exit"
+      [void](Wait-ConfiguredGameExit -StartedAfter $attemptStart -Context $ctx)
     }
 
-    Wait-ConfiguredLauncherInteractive
+    Wait-ConfiguredLauncherInteractive -Context $ctx
 
     if ($outcome.Type -eq "Timeout") {
       $launchConfigKey = ""
@@ -684,7 +875,7 @@ function Invoke-LinearIsolation {
         $launchConfigKey = [string]$outcome.LaunchConfigKey
       }
       if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
-        Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey
+        Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey -Context $ctx
       }
       return [pscustomobject]@{
         Found = $true
@@ -693,18 +884,18 @@ function Invoke-LinearIsolation {
       }
     }
 
-    Start-Sleep -Seconds $LogPostRunDelaySeconds
-    $script:phase = "attempt_read_logs"
-    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
+    Start-Sleep -Seconds $strategy.LogPostRunDelaySeconds
+    Set-IsolationStrategyPhase -Context $ctx -Phase "attempt_read_logs"
+    $snapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart -Context $ctx
 
-    if ($mcVersionForLegacy -eq "unknown") {
-      $script:mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
+    if ($state.McVersionForLegacy -eq "unknown") {
+      $state.McVersionForLegacy = Get-MinecraftVersionFromLog -Lines $snapshot.Lines
     }
 
     # * Fabric signals (from window or from logs). This makes behavior visible in console output.
     $fabricIdsFromLogs = Get-FabricRequiringModId -Lines $snapshot.Lines
     $fabricMissingIdsFromLogs = Get-FabricMissingDependencyId -Lines $snapshot.Lines
-    $fabricWindowNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+    $fabricWindowNow = Select-WindowByTitlePattern -Patterns $ui.FabricWindowTitlePatterns
     if (($null -ne $fabricWindowNow) -or ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) -or ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0)) {
       $reqText = if ($fabricIdsFromLogs -and $fabricIdsFromLogs.Count -gt 0) { $fabricIdsFromLogs -join ", " } else { "" }
       $missText = if ($fabricMissingIdsFromLogs -and $fabricMissingIdsFromLogs.Count -gt 0) { $fabricMissingIdsFromLogs -join ", " } else { "" }
@@ -725,8 +916,8 @@ function Invoke-LinearIsolation {
       $missingDepIdsArr = @($missingDepIds)
 
       $removedItem = $null
-      for ($i = $movedItems.Count - 1; $i -ge 0; $i--) {
-        if ($movedItems[$i].JarName -eq $mod.Name) { $removedItem = $movedItems[$i]; break }
+      for ($i = $quarantine.MovedItems.Count - 1; $i -ge 0; $i--) {
+        if ($quarantine.MovedItems[$i].JarName -eq $mod.Name) { $removedItem = $quarantine.MovedItems[$i]; break }
       }
       $removedJarProvides = @()
       if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
@@ -748,31 +939,31 @@ function Invoke-LinearIsolation {
         Write-Host ("Fabric missing dependency '{0}' appears caused by removing '{1}'. Restoring dependency and isolating requiring mod(s)." -f ($missingDepIdsArr -join ", "), $mod.Name) -ForegroundColor Cyan
 
         if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
-          [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+          [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $paths.GameModsDir -IsDryRun $false -AllowOverwrite $true)
           $removedItem.GameQuarantine = $null
         }
-        if ($useStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
-          [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+        if ($quarantine.UseStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+          [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $paths.StorageModsDir -IsDryRun $false -AllowOverwrite $true)
           $removedItem.StorageQuarantine = $null
         }
       }
 
       if ($newModIdsArr.Count -gt 0) {
         Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($newModIdsArr -join ", ")) -ForegroundColor Cyan
-        $searchDirs = @($GameModsDir)
-        if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
-        if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+        $searchDirs = @($paths.GameModsDir)
+        if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
+        if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
         $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
         $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "fabric dialog"
         if ($culpritJars -and $culpritJars.Count -gt 0) {
           foreach ($cj in $culpritJars) {
-            if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
+            if ($quarantine.MovedJarNameSet.ContainsKey($cj.Name)) { continue }
             Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
-            $script:phase = "quick_isolate_move"
-            $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            Set-IsolationStrategyPhase -Context $ctx -Phase "quick_isolate_move"
+            $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $quarantine.GameQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
             if ($null -ne $qDest) {
-              [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null)
-              $script:pinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+              [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null -Context $ctx)
+              $state.PinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
             }
           }
         } else {
@@ -790,24 +981,24 @@ function Invoke-LinearIsolation {
     }
 
     $signature = Get-ErrorSignature -Lines $snapshot.Lines `
-      -MaxLines $ErrorSignatureLineLimit `
-      -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-    $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $ErrorSignatureLineLimit
+      -MaxLines $strategy.ErrorSignatureLineLimit `
+      -IncludeWarnMixins ([bool]$strategy.IncludeWarnMixinsAsIncompatible)
+    $evidenceKey = Get-ErrorEvidenceKey -Lines $snapshot.Lines -MaxLines $strategy.ErrorSignatureLineLimit
 
     Write-Verbose ("Signature: {0}" -f $signature)
-    if (Test-SignatureChanged -Baseline $activeBaselineSignature -Current $signature `
-        -BaselineEvidenceKey $activeBaselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
-        -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange)) {
+    if (Test-SignatureChanged -Baseline $state.ActiveBaselineSignature -Current $signature `
+        -BaselineEvidenceKey $state.ActiveBaselineEvidenceKey -CurrentEvidenceKey $evidenceKey `
+        -IgnoreModsWhenEvidencePresent ([bool]$strategy.IgnoreModListForSignatureChange)) {
       # * Confirm signature change to avoid log-flush noise.
       Start-Sleep -Milliseconds 750
-      $confirmSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart
+      $confirmSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $attemptStart -Context $ctx
       $confirmSignature = Get-ErrorSignature -Lines $confirmSnapshot.Lines `
-        -MaxLines $ErrorSignatureLineLimit `
-        -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-      $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
-      if (-not (Test-SignatureChanged -Baseline $activeBaselineSignature -Current $confirmSignature `
-            -BaselineEvidenceKey $activeBaselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
-            -IgnoreModsWhenEvidencePresent ([bool]$IgnoreModListForSignatureChange))) {
+        -MaxLines $strategy.ErrorSignatureLineLimit `
+        -IncludeWarnMixins ([bool]$strategy.IncludeWarnMixinsAsIncompatible)
+      $confirmEvidenceKey = Get-ErrorEvidenceKey -Lines $confirmSnapshot.Lines -MaxLines $strategy.ErrorSignatureLineLimit
+      if (-not (Test-SignatureChanged -Baseline $state.ActiveBaselineSignature -Current $confirmSignature `
+            -BaselineEvidenceKey $state.ActiveBaselineEvidenceKey -CurrentEvidenceKey $confirmEvidenceKey `
+            -IgnoreModsWhenEvidencePresent ([bool]$strategy.IgnoreModListForSignatureChange))) {
         Write-Verbose "Transient signature change detected; continuing."
         continue
       }
@@ -822,8 +1013,8 @@ function Invoke-LinearIsolation {
       # * then the removed jar is NOT the culprit. Restore it and instead isolate the requiring mod(s).
       $removedJarProvides = @()
       $removedItem = $null
-      for ($i = $movedItems.Count - 1; $i -ge 0; $i--) {
-        if ($movedItems[$i].JarName -eq $mod.Name) { $removedItem = $movedItems[$i]; break }
+      for ($i = $quarantine.MovedItems.Count - 1; $i -ge 0; $i--) {
+        if ($quarantine.MovedItems[$i].JarName -eq $mod.Name) { $removedItem = $quarantine.MovedItems[$i]; break }
       }
       if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
         $removedJarProvides = Get-FabricModIdsFromJar -JarPath $removedItem.GameQuarantine
@@ -845,38 +1036,39 @@ function Invoke-LinearIsolation {
 
         # * Restore removed dependency jar back to active mods (and storage if applicable).
         if ($null -ne $removedItem -and $null -ne $removedItem.GameQuarantine -and (Test-Path -LiteralPath $removedItem.GameQuarantine)) {
-          [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
+          [void](Restore-FromQuarantine -SourcePath $removedItem.GameQuarantine -DestDir $paths.GameModsDir -IsDryRun $false -AllowOverwrite $true)
           $removedItem.GameQuarantine = $null
         }
-        if ($useStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
-          [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
+        if ($quarantine.UseStorage -and $null -ne $removedItem -and $null -ne $removedItem.StorageQuarantine -and (Test-Path -LiteralPath $removedItem.StorageQuarantine)) {
+          [void](Restore-FromQuarantine -SourcePath $removedItem.StorageQuarantine -DestDir $paths.StorageModsDir -IsDryRun $false -AllowOverwrite $true)
           $removedItem.StorageQuarantine = $null
         }
 
         # * Isolate the requiring mods instead.
-        $searchDirs = @($GameModsDir)
-        if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
-        if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+        $searchDirs = @($paths.GameModsDir)
+        if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
+        if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
         $requiringJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
         $requiringJars = Select-QuickIsolateJarsByTier -Jars $requiringJars -Context "dependency signature"
         if ($requiringJars -and $requiringJars.Count -gt 0) {
           $culpritJarNames = @()
           foreach ($rj in $requiringJars) {
             Write-Host ("Isolating requiring mod: {0}" -f $rj.Name) -ForegroundColor Cyan
-            $rDest = Move-ToQuarantine -SourcePath $rj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            $rDest = Move-ToQuarantine -SourcePath $rj.FullName -DestDir $quarantine.GameQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
             $rStorageDest = $null
-            if ($useStorage) {
-              $rStoragePath = Join-Path -Path $StorageModsDir -ChildPath $rj.Name
+            if ($quarantine.UseStorage) {
+              $rStoragePath = Join-Path -Path $paths.StorageModsDir -ChildPath $rj.Name
               if (Test-Path -LiteralPath $rStoragePath) {
-                $rStorageDest = Move-ToQuarantine -SourcePath $rStoragePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+                $rStorageDest = Move-ToQuarantine -SourcePath $rStoragePath -DestDir $quarantine.StorageQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
               }
             }
             [void](Add-MovedItemRecord -JarName $rj.Name `
                 -GameSource $rj.FullName `
                 -GameQuarantine $rDest `
-                -StorageSource $(if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $rj.Name } else { $null }) `
-                -StorageQuarantine $rStorageDest)
-            $script:pinnedJarNameSet[$rj.Name.ToLowerInvariant()] = $rj.Name
+                -StorageSource $(if ($quarantine.UseStorage) { Join-Path -Path $paths.StorageModsDir -ChildPath $rj.Name } else { $null }) `
+                -StorageQuarantine $rStorageDest `
+                -Context $ctx)
+            $state.PinnedJarNameSet[$rj.Name.ToLowerInvariant()] = $rj.Name
             $culpritJarNames += @($rj.Name)
           }
           return [pscustomobject]@{
@@ -895,22 +1087,22 @@ function Invoke-LinearIsolation {
       $movedExtra = $false
       if ($newModIds -and $newModIds.Count -gt 0) {
         Write-Host ("Fabric dependency error detected. Mods requiring missing deps: {0}" -f ($newModIds -join ", ")) -ForegroundColor Yellow
-        $searchDirs = @($GameModsDir)
-        if ($gameQuarantineDir) { $searchDirs += $gameQuarantineDir }
-        if ($storageQuarantineDir) { $searchDirs += $storageQuarantineDir }
+        $searchDirs = @($paths.GameModsDir)
+        if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
+        if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
         $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIds -AllowTokenFallback:$false
         $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency signature"
         if ($culpritJars -and $culpritJars.Count -gt 0) {
           foreach ($cj in $culpritJars) {
             # * Skip if already moved.
-            if ($movedJarNameSet.ContainsKey($cj.Name)) { continue }
+            if ($quarantine.MovedJarNameSet.ContainsKey($cj.Name)) { continue }
 
             Write-Host ("Quick-isolating: {0}" -f $cj.Name) -ForegroundColor Cyan
-            $script:phase = "quick_isolate_move"
-            $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+            Set-IsolationStrategyPhase -Context $ctx -Phase "quick_isolate_move"
+            $qDest = Move-ToQuarantine -SourcePath $cj.FullName -DestDir $quarantine.GameQuarantineDir -IsDryRun $false -Retries $quarantine.MoveRetryCount -DelayMs $quarantine.MoveRetryDelayMs
             if ($null -ne $qDest) {
-              [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null)
-              $script:pinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
+              [void](Add-MovedItemRecord -JarName $cj.Name -GameSource $cj.FullName -GameQuarantine $qDest -StorageSource $null -StorageQuarantine $null -Context $ctx)
+              $state.PinnedJarNameSet[$cj.Name.ToLowerInvariant()] = $cj.Name
               $movedExtra = $true
             }
           }
@@ -945,8 +1137,15 @@ function Invoke-HybridIsolation {
     [Parameter(Mandatory = $true)]
     [string]$BaselineSignature,
     [Parameter(Mandatory = $true)]
-    [string]$BaselineEvidenceKey
+    [string]$BaselineEvidenceKey,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
+
+  $ctx = Resolve-IsolationStrategyContext -Context $Context
+  $state = $ctx.State
+  $strategy = $ctx.Strategy
 
   $result = [pscustomobject]@{
     Found = $false
@@ -958,12 +1157,12 @@ function Invoke-HybridIsolation {
 
   $maxTier = 4
   for ($tier = 1; $tier -le $maxTier; $tier++) {
-    $script:currentDependencyTier = $tier
+    Set-IsolationStrategyCurrentDependencyTier -Context $ctx -Tier $tier
     $tierMods = @($Mods | Where-Object {
         if ($_.PSObject.Properties.Name -contains "DependentModTier") {
           $_.DependentModTier -eq $tier
         } else {
-          $fallbackTier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
+          $fallbackTier = if ([bool]$strategy.DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
           $fallbackTier -eq $tier
         }
       })
@@ -972,71 +1171,72 @@ function Invoke-HybridIsolation {
     Write-Host ("Уровень {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Gray
 
     $pinnedJarNames = @()
-    if ($pinnedJarNameSet.Count -gt 0) {
-      $pinnedJarNames = @($pinnedJarNameSet.Values)
+    if ($state.PinnedJarNameSet.Count -gt 0) {
+      $pinnedJarNames = @($state.PinnedJarNameSet.Values)
     }
 
-    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
 
-    if (-not $baselineSucceeded) {
-      $pinnedKey = Get-PinnedJarNameKey
-      if (-not [string]::Equals($pinnedKey, $script:lastBaselinePinnedKey, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $refresh = Invoke-LinearBaselineRefresh -PhasePrefix ("tier{0}_baseline" -f $tier)
+    if (-not $state.BaselineSucceeded) {
+      $pinnedKey = Get-PinnedJarNameKey -Context $ctx
+      if (-not [string]::Equals($pinnedKey, $state.LastBaselinePinnedKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $refresh = Invoke-LinearBaselineRefresh -PhasePrefix ("tier{0}_baseline" -f $tier) -Context $ctx
         if (-not $refresh.ShouldContinue) {
-          if ($script:blockedByDependency) {
+          if ($state.BlockedByDependency) {
             $result.StopReason = "dependency_dialog_tier_baseline"
           }
-          $script:currentDependencyTier = 0
+          Set-IsolationStrategyCurrentDependencyTier -Context $ctx -Tier 0
           return $result
         }
       }
     }
 
-    $tierCandidates = @($tierMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
+    $tierCandidates = @($tierMods | Where-Object { -not $state.PinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
     if (-not $tierCandidates -or $tierCandidates.Count -eq 0) { continue }
 
     $tierRemaining = $tierCandidates
-    if ($DependencyAwareExponentialMaxTier -gt 0 -and $tier -le $DependencyAwareExponentialMaxTier) {
+    if ($strategy.DependencyAwareExponentialMaxTier -gt 0 -and $tier -le $strategy.DependencyAwareExponentialMaxTier) {
       Write-Host ("Уровень {0}: exponential isolation enabled. Candidates: {1}" -f $tier, $tierCandidates.Count) -ForegroundColor Gray
-      $tierBaselineSignature = if ([string]::IsNullOrWhiteSpace($script:activeBaselineSignature)) { $BaselineSignature } else { $script:activeBaselineSignature }
-      $tierBaselineEvidenceKey = if ([string]::IsNullOrWhiteSpace($script:activeBaselineEvidenceKey)) { $BaselineEvidenceKey } else { $script:activeBaselineEvidenceKey }
+      $tierBaselineSignature = if ([string]::IsNullOrWhiteSpace($state.ActiveBaselineSignature)) { $BaselineSignature } else { $state.ActiveBaselineSignature }
+      $tierBaselineEvidenceKey = if ([string]::IsNullOrWhiteSpace($state.ActiveBaselineEvidenceKey)) { $BaselineEvidenceKey } else { $state.ActiveBaselineEvidenceKey }
       $exponentialResult = Invoke-ExponentialIsolation -Mods $tierCandidates `
         -BaselineSignature $tierBaselineSignature `
         -BaselineEvidenceKey $tierBaselineEvidenceKey `
-        -PinnedJarNames $pinnedJarNames
+        -PinnedJarNames $pinnedJarNames `
+        -Context $ctx
       $tierRemaining = @($exponentialResult.Remaining)
       Write-Host ("Уровень {0}: exponential isolation completed. Linear with {1} mod(s) ({2})." -f $tier, $tierRemaining.Count, $exponentialResult.Reason) -ForegroundColor Gray
     }
 
     if (-not $tierRemaining -or $tierRemaining.Count -eq 0) { continue }
 
-    if (-not $baselineSucceeded) {
-      $pinnedKey = Get-PinnedJarNameKey
-      if (-not [string]::Equals($pinnedKey, $script:lastBaselinePinnedKey, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $refresh = Invoke-LinearBaselineRefresh -PhasePrefix ("tier{0}_linear" -f $tier)
+    if (-not $state.BaselineSucceeded) {
+      $pinnedKey = Get-PinnedJarNameKey -Context $ctx
+      if (-not [string]::Equals($pinnedKey, $state.LastBaselinePinnedKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $refresh = Invoke-LinearBaselineRefresh -PhasePrefix ("tier{0}_linear" -f $tier) -Context $ctx
         if (-not $refresh.ShouldContinue) {
-          if ($script:blockedByDependency) {
+          if ($state.BlockedByDependency) {
             $result.StopReason = "dependency_dialog_tier_linear"
           }
-          $script:currentDependencyTier = 0
+          Set-IsolationStrategyCurrentDependencyTier -Context $ctx -Tier 0
           return $result
         }
       }
     }
 
-    $linearResult = Invoke-LinearIsolation -Mods $tierRemaining
+    $linearResult = Invoke-LinearIsolation -Mods $tierRemaining -Context $ctx
     if ($linearResult.Found) {
-      $script:currentDependencyTier = 0
+      Set-IsolationStrategyCurrentDependencyTier -Context $ctx -Tier 0
       return $linearResult
     }
 
     $pinnedJarNames = @()
-    if ($pinnedJarNameSet.Count -gt 0) {
-      $pinnedJarNames = @($pinnedJarNameSet.Values)
+    if ($state.PinnedJarNameSet.Count -gt 0) {
+      $pinnedJarNames = @($state.PinnedJarNameSet.Values)
     }
-    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames
+    Update-QuarantineState -DesiredJarNames @() -PinnedJarNames $pinnedJarNames -Context $ctx
   }
 
-  $script:currentDependencyTier = 0
+  Set-IsolationStrategyCurrentDependencyTier -Context $ctx -Tier 0
   return $result
 }

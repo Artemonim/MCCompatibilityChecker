@@ -18,6 +18,19 @@ function Test-AnyIdOverlap {
   return $false
 }
 
+function ConvertTo-VersionRangeString {
+  param(
+    [Parameter(Mandatory = $false)]
+    [object]$Value
+  )
+
+  if ($null -eq $Value) { return "" }
+  if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+    return ($Value -join ",")
+  }
+  return [string]$Value
+}
+
 function Test-JarNameMatchesAnyId {
   <#
   .SYNOPSIS
@@ -245,6 +258,17 @@ function Get-JarZipEntryText {
   }
 }
 
+function Get-ZipEntryText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.IO.Compression.ZipArchive]$Zip,
+    [Parameter(Mandatory = $true)]
+    [string]$EntryPath
+  )
+
+  return Get-JarZipEntryText -Zip $Zip -EntryPath $EntryPath
+}
+
 function Get-FabricDependencyRecordsFromModJson {
   param(
     [Parameter(Mandatory = $true)]
@@ -262,7 +286,11 @@ function Get-FabricDependencyRecordsFromModJson {
       foreach ($prop in $blockValue.PSObject.Properties) {
         $depId = [string]$prop.Name
         if (-not [string]::IsNullOrWhiteSpace($depId)) {
-          $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+          $deps.Add([pscustomobject]@{
+              DependencyId = $depId
+              VersionRange = ConvertTo-VersionRangeString -Value $prop.Value
+              Kind = $block
+            }) | Out-Null
         }
       }
       continue
@@ -273,15 +301,27 @@ function Get-FabricDependencyRecordsFromModJson {
         if ($item -is [string]) {
           $depId = [string]$item
           if (-not [string]::IsNullOrWhiteSpace($depId)) {
-            $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+            $deps.Add([pscustomobject]@{
+                DependencyId = $depId
+                VersionRange = ""
+                Kind = $block
+              }) | Out-Null
           }
         } elseif ($item -is [pscustomobject]) {
           $depId = ""
+          $versionRange = ""
           if ($item.PSObject.Properties.Name -contains "id") {
             $depId = [string]$item.id
           }
+          if ($item.PSObject.Properties.Name -contains "version") {
+            $versionRange = ConvertTo-VersionRangeString -Value $item.version
+          }
           if (-not [string]::IsNullOrWhiteSpace($depId)) {
-            $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+            $deps.Add([pscustomobject]@{
+                DependencyId = $depId
+                VersionRange = $versionRange
+                Kind = $block
+              }) | Out-Null
           }
         }
       }
@@ -308,11 +348,19 @@ function Get-QuiltDependencyRecordsFromLoader {
       foreach ($item in $blockValue) {
         if ($item -is [pscustomobject]) {
           $depId = ""
+          $versionRange = ""
           if ($item.PSObject.Properties.Name -contains "id") {
             $depId = [string]$item.id
           }
+          if ($item.PSObject.Properties.Name -contains "versions") {
+            $versionRange = ConvertTo-VersionRangeString -Value $item.versions
+          }
           if (-not [string]::IsNullOrWhiteSpace($depId)) {
-            $deps.Add([pscustomobject]@{ DependencyId = $depId; Kind = $block }) | Out-Null
+            $deps.Add([pscustomobject]@{
+                DependencyId = $depId
+                VersionRange = $versionRange
+                Kind = $block
+              }) | Out-Null
           }
         }
       }
@@ -349,6 +397,8 @@ function ConvertFrom-ForgeToml {
       }
       $currentMod = [ordered]@{
         ModId = ""
+        DisplayName = ""
+        Version = ""
       }
       $currentSection = "mods"
       continue
@@ -361,7 +411,10 @@ function ConvertFrom-ForgeToml {
       $currentDep = [ordered]@{
         OwnerModId = [string]$Matches[1]
         DependencyId = ""
+        VersionRange = ""
         Mandatory = $null
+        Side = ""
+        Ordering = ""
       }
       $currentSection = "dependencies"
       continue
@@ -376,6 +429,22 @@ function ConvertFrom-ForgeToml {
         $currentMod.ModId = [string]$Matches[1]
         continue
       }
+      if ($trim -match '^displayName\s*=\s*"(.*)"') {
+        $currentMod.DisplayName = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^displayName\s*=\s*'(.*)'") {
+        $currentMod.DisplayName = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match '^version\s*=\s*"(.*)"') {
+        $currentMod.Version = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^version\s*=\s*'(.*)'") {
+        $currentMod.Version = [string]$Matches[1]
+        continue
+      }
     }
 
     if ($currentSection -eq "dependencies" -and $currentDep) {
@@ -387,8 +456,32 @@ function ConvertFrom-ForgeToml {
         $currentDep.DependencyId = [string]$Matches[1]
         continue
       }
+      if ($trim -match '^versionRange\s*=\s*"(.*)"') {
+        $currentDep.VersionRange = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^versionRange\s*=\s*'(.*)'") {
+        $currentDep.VersionRange = [string]$Matches[1]
+        continue
+      }
       if ($trim -match '^mandatory\s*=\s*(true|false)') {
         $currentDep.Mandatory = [System.Convert]::ToBoolean($Matches[1])
+        continue
+      }
+      if ($trim -match '^side\s*=\s*"(.*)"') {
+        $currentDep.Side = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^side\s*=\s*'(.*)'") {
+        $currentDep.Side = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match '^ordering\s*=\s*"(.*)"') {
+        $currentDep.Ordering = [string]$Matches[1]
+        continue
+      }
+      if ($trim -match "^ordering\s*=\s*'(.*)'") {
+        $currentDep.Ordering = [string]$Matches[1]
         continue
       }
     }

@@ -67,10 +67,17 @@ function Restore-FromQuarantine {
 function Get-MovedItemByJarName {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$JarName
+    [string]$JarName,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
-  foreach ($item in $movedItems) {
+  $items = $movedItems
+  if ($null -ne $Context -and $null -ne $Context.Quarantine -and $Context.Quarantine.MovedItems) {
+    $items = $Context.Quarantine.MovedItems
+  }
+  foreach ($item in $items) {
     if ($null -eq $item) { continue }
     if ([string]$item.JarName -eq $JarName) { return $item }
   }
@@ -92,10 +99,20 @@ function Add-MovedItemRecord {
     [string]$StorageSource,
     [Parameter(Mandatory = $false)]
     [AllowNull()]
-    [string]$StorageQuarantine
+    [string]$StorageQuarantine,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
-  $item = Get-MovedItemByJarName -JarName $JarName
+  $items = $movedItems
+  $nameSet = $movedJarNameSet
+  if ($null -ne $Context -and $null -ne $Context.Quarantine) {
+    if ($Context.Quarantine.MovedItems) { $items = $Context.Quarantine.MovedItems }
+    if ($Context.Quarantine.MovedJarNameSet) { $nameSet = $Context.Quarantine.MovedJarNameSet }
+  }
+
+  $item = Get-MovedItemByJarName -JarName $JarName -Context $Context
   if ($null -eq $item) {
     $item = [pscustomobject]@{
         JarName = $JarName
@@ -104,7 +121,7 @@ function Add-MovedItemRecord {
         StorageSource = $null
         StorageQuarantine = $null
       }
-    $movedItems.Add($item)
+    $items.Add($item)
   }
 
   if ($PSBoundParameters.ContainsKey("GameSource")) { $item.GameSource = $GameSource }
@@ -112,7 +129,7 @@ function Add-MovedItemRecord {
   if ($PSBoundParameters.ContainsKey("StorageSource")) { $item.StorageSource = $StorageSource }
   if ($PSBoundParameters.ContainsKey("StorageQuarantine")) { $item.StorageQuarantine = $StorageQuarantine }
 
-  $movedJarNameSet[$JarName] = $true
+  $nameSet[$JarName] = $true
   return $item
 }
 
@@ -123,7 +140,10 @@ function Update-QuarantineState {
     [AllowEmptyCollection()]
     [string[]]$DesiredJarNames,
     [Parameter(Mandatory = $false)]
-    [string[]]$PinnedJarNames = @()
+    [string[]]$PinnedJarNames = @(),
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
   $desiredSet = @{}
@@ -136,7 +156,51 @@ function Update-QuarantineState {
     $desiredSet[$name.ToLowerInvariant()] = $name
   }
 
-  foreach ($item in $movedItems) {
+  $items = $movedItems
+  $jarNameSet = $movedJarNameSet
+  $gameModsDir = $GameModsDir
+  $storageModsDir = $StorageModsDir
+  $gameQuarantine = $gameQuarantineDir
+  $storageQuarantine = $storageQuarantineDir
+  $retryCount = $MoveRetryCount
+  $retryDelayMs = $MoveRetryDelayMs
+  $forceRestore = [bool]$ForceRestore
+  $useStorageLocal = [bool]$useStorage
+
+  if ($null -ne $Context) {
+    if ($null -ne $Context.Paths) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$Context.Paths.GameModsDir)) {
+        $gameModsDir = [string]$Context.Paths.GameModsDir
+      }
+      if ($Context.Paths.PSObject.Properties.Name -contains "StorageModsDir") {
+        $storageModsDir = [string]$Context.Paths.StorageModsDir
+      }
+    }
+    if ($null -ne $Context.Quarantine) {
+      if ($Context.Quarantine.MovedItems) { $items = $Context.Quarantine.MovedItems }
+      if ($Context.Quarantine.MovedJarNameSet) { $jarNameSet = $Context.Quarantine.MovedJarNameSet }
+      if ($Context.Quarantine.PSObject.Properties.Name -contains "GameQuarantineDir") {
+        $gameQuarantine = [string]$Context.Quarantine.GameQuarantineDir
+      }
+      if ($Context.Quarantine.PSObject.Properties.Name -contains "StorageQuarantineDir") {
+        $storageQuarantine = [string]$Context.Quarantine.StorageQuarantineDir
+      }
+      if ($Context.Quarantine.PSObject.Properties.Name -contains "MoveRetryCount") {
+        $retryCount = [int]$Context.Quarantine.MoveRetryCount
+      }
+      if ($Context.Quarantine.PSObject.Properties.Name -contains "MoveRetryDelayMs") {
+        $retryDelayMs = [int]$Context.Quarantine.MoveRetryDelayMs
+      }
+      if ($Context.Quarantine.PSObject.Properties.Name -contains "ForceRestore") {
+        $forceRestore = [bool]$Context.Quarantine.ForceRestore
+      }
+      if ($Context.Quarantine.PSObject.Properties.Name -contains "UseStorage") {
+        $useStorageLocal = [bool]$Context.Quarantine.UseStorage
+      }
+    }
+  }
+
+  foreach ($item in $items) {
     if ($null -eq $item) { continue }
     $jarName = [string]$item.JarName
     if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
@@ -145,25 +209,25 @@ function Update-QuarantineState {
 
     if (-not [string]::IsNullOrWhiteSpace($item.GameQuarantine) -and (Test-Path -LiteralPath $item.GameQuarantine)) {
       $restoreGame = Restore-FromQuarantine -SourcePath $item.GameQuarantine `
-        -DestDir $GameModsDir `
+        -DestDir $gameModsDir `
         -IsDryRun $false `
-        -AllowOverwrite ([bool]$ForceRestore)
+        -AllowOverwrite $forceRestore
       if ($restoreGame -and (-not (Test-Path -LiteralPath $item.GameQuarantine))) {
         $item.GameQuarantine = $null
       }
     }
-    if ($useStorage -and -not [string]::IsNullOrWhiteSpace($item.StorageQuarantine) -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
+    if ($useStorageLocal -and -not [string]::IsNullOrWhiteSpace($item.StorageQuarantine) -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
       $restoreStorage = Restore-FromQuarantine -SourcePath $item.StorageQuarantine `
-        -DestDir $StorageModsDir `
+        -DestDir $storageModsDir `
         -IsDryRun $false `
-        -AllowOverwrite ([bool]$ForceRestore)
+        -AllowOverwrite $forceRestore
       if ($restoreStorage -and (-not (Test-Path -LiteralPath $item.StorageQuarantine))) {
         $item.StorageQuarantine = $null
       }
     }
 
-    if ($movedJarNameSet.ContainsKey($jarName)) {
-      $null = $movedJarNameSet.Remove($jarName)
+    if ($jarNameSet.ContainsKey($jarName)) {
+      $null = $jarNameSet.Remove($jarName)
     }
   }
 
@@ -171,44 +235,44 @@ function Update-QuarantineState {
     $jarName = $desiredSet[$key]
     if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
 
-    $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
-    $storagePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $jarName } else { $null }
+    $gamePath = Join-Path -Path $gameModsDir -ChildPath $jarName
+    $storagePath = if ($useStorageLocal) { Join-Path -Path $storageModsDir -ChildPath $jarName } else { $null }
     $gameDest = $null
     $storageDest = $null
 
     if (Test-Path -LiteralPath $gamePath) {
-      $gameDest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+      $gameDest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantine -IsDryRun $false -Retries $retryCount -DelayMs $retryDelayMs
     }
-    if ($useStorage -and $storagePath -and (Test-Path -LiteralPath $storagePath)) {
-      $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
+    if ($useStorageLocal -and $storagePath -and (Test-Path -LiteralPath $storagePath)) {
+      $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantine -IsDryRun $false -Retries $retryCount -DelayMs $retryDelayMs
     }
 
     if ($null -ne $gameDest -or $null -ne $storageDest) {
-      $item = Get-MovedItemByJarName -JarName $jarName
+      $item = Get-MovedItemByJarName -JarName $jarName -Context $Context
       if ($null -eq $item) {
         $item = [pscustomobject]@{
             JarName = $jarName
             GameSource = $gamePath
             GameQuarantine = $gameDest
-            StorageSource = if ($useStorage) { $storagePath } else { $null }
+            StorageSource = if ($useStorageLocal) { $storagePath } else { $null }
             StorageQuarantine = $storageDest
           }
-        $movedItems.Add($item)
+        $items.Add($item)
       } else {
         if ($gameDest) {
           $item.GameSource = $gamePath
           $item.GameQuarantine = $gameDest
         }
         if ($storageDest) {
-          $item.StorageSource = if ($useStorage) { $storagePath } else { $null }
+          $item.StorageSource = if ($useStorageLocal) { $storagePath } else { $null }
           $item.StorageQuarantine = $storageDest
         }
       }
-      $movedJarNameSet[$jarName] = $true
+      $jarNameSet[$jarName] = $true
     } else {
-      $item = Get-MovedItemByJarName -JarName $jarName
-      if ($null -ne $item -and (-not $movedJarNameSet.ContainsKey($jarName))) {
-        $movedJarNameSet[$jarName] = $true
+      $item = Get-MovedItemByJarName -JarName $jarName -Context $Context
+      if ($null -ne $item -and (-not $jarNameSet.ContainsKey($jarName))) {
+        $jarNameSet[$jarName] = $true
       }
     }
   }

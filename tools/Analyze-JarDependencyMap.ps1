@@ -28,8 +28,8 @@ Number of dependencies to show in the console summary.
 .\tools\Analyze-JarDependencyMap.ps1 -ScanPath "D:\Mods" -WriteFiles:$false
 #>
 param(
-    [Parameter(Mandatory = $false, HelpMessage = "Root folder with Minecraft mod JAR files.")]
-    [string]$ScanPath = "D:\Установщики игр\MineCraft 1.21\Mods",
+    [Parameter(Mandatory = $false, HelpMessage = "Root folder with Minecraft mod JAR files (defaults to Paths.GameModsDir from config.ini).")]
+    [string]$ScanPath = "",
 
     [Parameter(Mandatory = $false, HelpMessage = "Disable recursive scan.")]
     [switch]$NoRecurse,
@@ -45,6 +45,31 @@ param(
 )
 
 Set-StrictMode -Version Latest
+
+$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "..\scripts\Shared-Config.ps1"
+if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
+    throw ("Shared config helpers not found: {0}" -f $sharedConfigPath)
+}
+. $sharedConfigPath
+
+$runtimeBound = @{}
+if (-not [string]::IsNullOrWhiteSpace($ScanPath)) {
+    $runtimeBound["GameModsDir"] = $true
+}
+$runtimeConfig = Initialize-McccRuntimeConfig `
+    -StartDir $PSScriptRoot `
+    -BoundParameters $runtimeBound `
+    -GameModsDir $ScanPath `
+    -AlwaysDefaultGameModsDir $true `
+    -DefaultStorageToGame $false `
+    -TreatEmptyAsUnboundKeys @("GameModsDir")
+$ScanPath = $runtimeConfig.Paths.GameModsDir
+
+$sharedJarDepPath = Join-Path -Path $PSScriptRoot -ChildPath "..\scripts\Shared-Isolation-JarDependencies.ps1"
+if (-not (Test-Path -LiteralPath $sharedJarDepPath)) {
+    throw ("Shared jar dependency helpers not found: {0}" -f $sharedJarDepPath)
+}
+. $sharedJarDepPath
 
 # * Validate input
 if (-not (Test-Path -LiteralPath $ScanPath)) {
@@ -66,49 +91,6 @@ if ($WriteFiles) {
 
 # * Enable ZIP reading
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-function Get-ZipEntryText {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.Compression.ZipArchive]$Zip,
-
-        [Parameter(Mandatory = $true)]
-        [string]$EntryPath
-    )
-
-    $entry = $Zip.Entries | Where-Object { $_.FullName -eq $EntryPath }
-    if (-not $entry) {
-        return $null
-    }
-
-    $stream = $null
-    $reader = $null
-    try {
-        $stream = $entry.Open()
-        $reader = [System.IO.StreamReader]::new($stream)
-        return $reader.ReadToEnd()
-    } finally {
-        if ($reader) { $reader.Dispose() }
-        if ($stream) { $stream.Dispose() }
-    }
-}
-
-function ConvertTo-VersionRangeString {
-    param(
-        [Parameter(Mandatory = $false)]
-        [object]$Value
-    )
-
-    if ($null -eq $Value) {
-        return ""
-    }
-
-    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
-        return ($Value -join ",")
-    }
-
-    return [string]$Value
-}
 
 function Get-ProvidedModIdList {
     param(
@@ -160,230 +142,6 @@ function Get-ProvidedModIdList {
     }
 
     return ,@($provided.ToArray() | Sort-Object -Unique)
-}
-
-function Get-FabricDependencies {
-    param(
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$ModJson
-    )
-
-    $deps = [System.Collections.Generic.List[object]]::new()
-    $depBlocks = @("depends", "suggests", "recommends", "breaks", "conflicts")
-
-    foreach ($block in $depBlocks) {
-        if ($ModJson.PSObject.Properties.Name -contains $block) {
-            $blockValue = $ModJson.$block
-            if ($null -eq $blockValue) {
-                continue
-            }
-
-            if ($blockValue -is [pscustomobject]) {
-                foreach ($prop in $blockValue.PSObject.Properties) {
-                    $deps.Add([PSCustomObject]@{
-                        DependencyId = [string]$prop.Name
-                        VersionRange = ConvertTo-VersionRangeString -Value $prop.Value
-                        Kind         = $block
-                    }) | Out-Null
-                }
-            } elseif ($blockValue -is [System.Collections.IEnumerable] -and -not ($blockValue -is [string])) {
-                foreach ($item in $blockValue) {
-                    if ($item -is [string]) {
-                        $deps.Add([PSCustomObject]@{
-                            DependencyId = [string]$item
-                            VersionRange = ""
-                            Kind         = $block
-                        }) | Out-Null
-                    } elseif ($item -is [pscustomobject]) {
-                        $depId = ""
-                        $versionRange = ""
-                        if ($item.PSObject.Properties.Name -contains "id") {
-                            $depId = [string]$item.id
-                        }
-                        if ($item.PSObject.Properties.Name -contains "version") {
-                            $versionRange = ConvertTo-VersionRangeString -Value $item.version
-                        }
-                        if (-not [string]::IsNullOrWhiteSpace($depId)) {
-                            $deps.Add([PSCustomObject]@{
-                                DependencyId = $depId
-                                VersionRange = $versionRange
-                                Kind         = $block
-                            }) | Out-Null
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return $deps
-}
-
-function Get-QuiltDependencies {
-    param(
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Loader
-    )
-
-    $deps = [System.Collections.Generic.List[object]]::new()
-    $depBlocks = @("depends", "suggests", "recommends", "breaks", "conflicts")
-
-    foreach ($block in $depBlocks) {
-        if ($Loader.PSObject.Properties.Name -contains $block) {
-            $blockValue = $Loader.$block
-            if ($blockValue -is [System.Collections.IEnumerable] -and -not ($blockValue -is [string])) {
-                foreach ($item in $blockValue) {
-                    if ($item -is [pscustomobject]) {
-                        $depId = ""
-                        $versionRange = ""
-                        if ($item.PSObject.Properties.Name -contains "id") {
-                            $depId = [string]$item.id
-                        }
-                        if ($item.PSObject.Properties.Name -contains "versions") {
-                            $versionRange = ConvertTo-VersionRangeString -Value $item.versions
-                        }
-                        if (-not [string]::IsNullOrWhiteSpace($depId)) {
-                            $deps.Add([PSCustomObject]@{
-                                DependencyId = $depId
-                                VersionRange = $versionRange
-                                Kind         = $block
-                            }) | Out-Null
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return $deps
-}
-
-function ConvertFrom-ForgeToml {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$TomlText
-    )
-
-    $mods = [System.Collections.Generic.List[object]]::new()
-    $dependencies = [System.Collections.Generic.List[object]]::new()
-    $currentSection = ""
-    $currentMod = $null
-    $currentDep = $null
-
-    $lines = $TomlText -split "(`r`n|`n|`r)"
-    foreach ($line in $lines) {
-        $trim = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trim)) {
-            continue
-        }
-
-        if ($trim -match '^\[\[mods\]\]') {
-            if ($currentMod) {
-                $mods.Add($currentMod) | Out-Null
-            }
-            $currentMod = [ordered]@{
-                ModId       = ""
-                DisplayName = ""
-                Version     = ""
-            }
-            $currentSection = "mods"
-            continue
-        }
-
-        if ($trim -match '^\[\[dependencies\.([^\]]+)\]\]') {
-            if ($currentDep) {
-                $dependencies.Add($currentDep) | Out-Null
-            }
-            $currentDep = [ordered]@{
-                OwnerModId  = [string]$Matches[1]
-                DependencyId = ""
-                VersionRange = ""
-                Mandatory   = $null
-                Side        = ""
-                Ordering    = ""
-            }
-            $currentSection = "dependencies"
-            continue
-        }
-
-        if ($currentSection -eq "mods" -and $currentMod) {
-            if ($trim -match '^modId\s*=\s*"(.*)"') {
-                $currentMod.ModId = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^modId\s*=\s*'(.*)'") {
-                $currentMod.ModId = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match '^displayName\s*=\s*"(.*)"') {
-                $currentMod.DisplayName = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^displayName\s*=\s*'(.*)'") {
-                $currentMod.DisplayName = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match '^version\s*=\s*"(.*)"') {
-                $currentMod.Version = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^version\s*=\s*'(.*)'") {
-                $currentMod.Version = [string]$Matches[1]
-                continue
-            }
-        }
-
-        if ($currentSection -eq "dependencies" -and $currentDep) {
-            if ($trim -match '^modId\s*=\s*"(.*)"') {
-                $currentDep.DependencyId = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^modId\s*=\s*'(.*)'") {
-                $currentDep.DependencyId = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match '^versionRange\s*=\s*"(.*)"') {
-                $currentDep.VersionRange = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^versionRange\s*=\s*'(.*)'") {
-                $currentDep.VersionRange = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match '^mandatory\s*=\s*(true|false)') {
-                $currentDep.Mandatory = [System.Convert]::ToBoolean($Matches[1])
-                continue
-            }
-            if ($trim -match '^side\s*=\s*"(.*)"') {
-                $currentDep.Side = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^side\s*=\s*'(.*)'") {
-                $currentDep.Side = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match '^ordering\s*=\s*"(.*)"') {
-                $currentDep.Ordering = [string]$Matches[1]
-                continue
-            }
-            if ($trim -match "^ordering\s*=\s*'(.*)'") {
-                $currentDep.Ordering = [string]$Matches[1]
-                continue
-            }
-        }
-    }
-
-    if ($currentMod) {
-        $mods.Add($currentMod) | Out-Null
-    }
-    if ($currentDep) {
-        $dependencies.Add($currentDep) | Out-Null
-    }
-
-    return [PSCustomObject]@{
-        Mods         = $mods
-        Dependencies = $dependencies
-    }
 }
 
 function New-DependencyEdge {
@@ -522,7 +280,7 @@ foreach ($jarFile in $jarFiles) {
                 ProvidedModIds = $providedList
             }) | Out-Null
 
-            $deps = Get-FabricDependencies -ModJson $modJson
+            $deps = Get-FabricDependencyRecordsFromModJson -ModJson $modJson
             foreach ($dep in $deps) {
                 $isRequired = $false
                 if ($dep.Kind -eq "depends") {
@@ -612,7 +370,7 @@ foreach ($jarFile in $jarFiles) {
                     ProvidedModIds = $providedList
                 }) | Out-Null
 
-                $deps = Get-QuiltDependencies -Loader $loader
+                $deps = Get-QuiltDependencyRecordsFromLoader -Loader $loader
                 foreach ($dep in $deps) {
                     $isRequired = $false
                     if ($dep.Kind -eq "depends") {

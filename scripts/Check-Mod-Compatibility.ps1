@@ -171,33 +171,17 @@ if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
 }
 . $sharedConfigPath
 
-$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
-if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
-  Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
-}
-$configIni = $projectConfig.Ini
-
-$defaultGameModsDir = Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods'
-if (-not $PSBoundParameters.ContainsKey("GameModsDir")) {
-  $cfgGameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default ""
-  if (-not [string]::IsNullOrWhiteSpace($cfgGameModsDir)) {
-    $GameModsDir = $cfgGameModsDir
-  }
-}
-if ([string]::IsNullOrWhiteSpace($GameModsDir)) {
-  $GameModsDir = $defaultGameModsDir
-}
-
-if (-not $PSBoundParameters.ContainsKey("StorageModsDir")) {
-  $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
-}
-if ([string]::IsNullOrWhiteSpace($StorageModsDir)) {
-  $StorageModsDir = $GameModsDir
-}
-
-if (-not $PSBoundParameters.ContainsKey("LogPath")) {
-  $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
-}
+$runtimeConfig = Initialize-McccRuntimeConfig `
+  -StartDir $PSScriptRoot `
+  -BoundParameters $PSBoundParameters `
+  -GameModsDir $GameModsDir `
+  -StorageModsDir $StorageModsDir `
+  -LogPath $LogPath `
+  -AlwaysDefaultGameModsDir $true `
+  -DefaultStorageToGame $true
+$GameModsDir = $runtimeConfig.Paths.GameModsDir
+$StorageModsDir = $runtimeConfig.Paths.StorageModsDir
+$LogPath = $runtimeConfig.Paths.LogPath
 
 # * Load shared log helpers.
 $sharedLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LogTools.ps1"
@@ -205,6 +189,20 @@ if (-not (Test-Path -LiteralPath $sharedLogPath)) {
   throw ("Shared log helpers not found: {0}" -f $sharedLogPath)
 }
 . $sharedLogPath
+
+# * Load shared isolation log helpers.
+$sharedIsolationLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-LogParsing.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationLogPath)) {
+  throw ("Shared isolation log helpers not found: {0}" -f $sharedIsolationLogPath)
+}
+. $sharedIsolationLogPath
+
+# * Load shared isolation legacy helpers (for persistent logging).
+$sharedIsolationLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationLegacyPath)) {
+  throw ("Shared isolation legacy helpers not found: {0}" -f $sharedIsolationLegacyPath)
+}
+. $sharedIsolationLegacyPath
 
 function Get-SeverityFromEvidence {
   param(
@@ -223,181 +221,6 @@ function Get-SeverityFromEvidence {
   }
   if ($hasWarn) { return "warn" }
   return "error"
-}
-
-function Write-LegacyLog {
-  param(
-    [Parameter(Mandatory = $true)]
-    [hashtable]$EvidenceByModId,
-    [Parameter(Mandatory = $true)]
-    [string]$LogPath
-  )
-
-  if ($EvidenceByModId.Count -eq 0) { return }
-  foreach ($modId in ($EvidenceByModId.Keys | Sort-Object)) {
-    $lines = @($EvidenceByModId[$modId])
-    $severity = Get-SeverityFromEvidence -EvidenceLines $lines
-    Add-Content -LiteralPath $LogPath -Value ("[{0}]: {1}" -f $severity, $modId)
-  }
-}
-
-function Get-MinecraftVersionFromLog {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Lines
-  )
-
-  foreach ($line in $Lines) {
-    $m = [regex]::Match($line, "Loading Minecraft\s+(?<ver>\S+)\s+with Fabric Loader", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) { return $m.Groups["ver"].Value }
-  }
-
-  foreach ($line in $Lines) {
-    $m = [regex]::Match($line, "^\s*-\s+minecraft\s+(?<ver>\S+)\s*$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) { return $m.Groups["ver"].Value }
-  }
-
-  return "unknown"
-}
-
-function Get-NonFabricJarNamesFromLog {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Lines
-  )
-
-  $inSection = $false
-  $names = New-Object System.Collections.Generic.List[string]
-
-  foreach ($line in $Lines) {
-    if ($line -match "Found\s+\d+\s+non-fabric\s+mods") {
-      $inSection = $true
-      continue
-    }
-    if ($inSection) {
-      if ($line -match "^\s*-\s+(?<jar>.+?\.jar)\s*$") {
-        $names.Add($Matches["jar"])
-        continue
-      }
-      # * Section ends on first non-bullet line.
-      if ($line -notmatch "^\s*-\s+") {
-        break
-      }
-    }
-  }
-  return $names
-}
-
-function Get-IncompatibleModEvidenceFromLog {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Lines,
-    [Parameter(Mandatory = $true)]
-    [bool]$IncludeWarnMixins
-  )
-
-  # * Map: modId -> list of evidence strings.
-  $evidence = @{}
-
-  $fromModSeverityRegex = if ($IncludeWarnMixins) { "(ERROR|WARN)" } else { "ERROR" }
-  $mixinApplySeverityRegex = "(ERROR|WARN)"
-  $fromModPattern = "^\[.*?\]\s+\[.*?\/" + $fromModSeverityRegex + "\]:\s+.*?\bfrom mod\s+(?<id>[a-z0-9_\-\.]+)\b"
-  $mixinApplyPattern = "^\[.*?\]\s+\[.*?\/" + $mixinApplySeverityRegex + "\]:\s+Mixin apply for mod\s+(?<id>[a-z0-9_\-\.]+)\s+failed\b"
-
-  # * Crash report lines can be unprefixed. Match only if the line indicates a failure.
-  $crashReportModPattern = "^(?!\[).*(failed|Critical injection|InjectionError|Mixin transformation).*\bfrom mod\s+(?<id>[a-z0-9_\-\.]+)\b"
-
-  # * Crash report lines often include "provided by '<modid>'" for entrypoint failures.
-  $crashProvidedByPattern = "^(?!\[).*\bprovided by\s+['""](?<id>[a-z0-9_\-\.]+)['""]"
-
-  # * Dependency patterns (seen in other Fabric logs; keep as best-effort).
-  $requiresPattern1 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\s+requires\b"
-  $requiresPattern2 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Could not find required mod:\s+(?<id>[a-z0-9_\-\.]+)\b"
-
-  # * Incompatible mod list patterns from Fabric loader.
-  $incompatibleDetailPattern = '(requires|required|incompatible|not compatible|depends|needs|was built for|requires version|requires minecraft|requires fabric|requires fabricloader|requires loader)'
-  $modNamedErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)\b(?<detail>.*)$'
-  $modNamedListPattern = '^\s*-\s+Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)\b(?<detail>.*)$'
-  $modBareErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\b(?<detail>.*)$'
-
-  foreach ($line in $Lines) {
-    $m = [regex]::Match($line, $mixinApplyPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $fromModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $requiresPattern1, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $requiresPattern2, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $modNamedErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $modBareErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $modNamedListPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $detail = $m.Groups["detail"].Value
-      if ($detail -match $incompatibleDetailPattern) {
-        $id = $m.Groups["id"].Value.ToLowerInvariant()
-        if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-        $evidence[$id].Add($line.Trim())
-        continue
-      }
-    }
-
-    $m = [regex]::Match($line, $crashReportModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-
-    $m = [regex]::Match($line, $crashProvidedByPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $id = $m.Groups["id"].Value.ToLowerInvariant()
-      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
-      $evidence[$id].Add($line.Trim())
-      continue
-    }
-  }
-
-  return $evidence
 }
 
 function Build-ModIdToJarMap {
@@ -639,12 +462,46 @@ foreach ($modId in $orderedModIds) {
       $storageJarPath = $storageIdToJars[$modId][0]
     }
 
-    $gameResult = Move-OrDelete -SourcePath $gameJarPath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun ([bool]$DryRun)
-    $storageResult = $null
-    if ($storageJarPath) {
-      $storageResult = Move-OrDelete -SourcePath $storageJarPath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun ([bool]$DryRun)
+    $gameResult = $null
+    if ($DryRun) {
+        $gameResult = Move-OrDelete -SourcePath $gameJarPath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun $true
     } else {
-      $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
+        $moveResult = Move-CulpritToLegacyAndAppendLog `
+            -JarName $gameFileName `
+            -MinecraftVersion $mcVersion `
+            -GameModsDir $GameModsDir `
+            -StorageModsDir $StorageModsDir `
+            -GameLegacyFolderName $GameLegacyFolderName `
+            -StorageLegacyFolderName $StorageLegacyFolderName `
+            -KeepCulpritInGameLegacy ([bool](-not $deleteFromGame)) `
+            -GameSourcePath $gameJarPath `
+            -StorageSourcePath $storageJarPath `
+            -RemoveGameIfNotKeeping $true `
+            -RequireStorageMoveForGameRemoval $false
+
+        if ($moveResult.GameMoved) {
+            $gameResult = if ($deleteFromGame) { "deleted: $gameJarPath" } else { "moved: $gameJarPath -> $gameLegacyVersionDir" }
+        }
+    }
+
+    $storageResult = $null
+    if ($DryRun) {
+        if ($storageJarPath) {
+            $storageResult = Move-OrDelete -SourcePath $storageJarPath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun $true
+        } else {
+            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
+        }
+    } else {
+        # * Storage result is already handled by Move-CulpritToLegacyAndAppendLog above.
+        if ($storageJarPath) {
+            if ($null -ne $moveResult -and $moveResult.StorageMoved) {
+                $storageResult = if ($deleteFromStorage) { "deleted: $storageJarPath" } else { "moved: $storageJarPath -> $storageLegacyVersionDir" }
+            } else {
+                $storageResult = "failed to move from storage"
+            }
+        } else {
+            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
+        }
     }
 
     $actions.Add([pscustomobject]@{
@@ -683,17 +540,52 @@ if ($TreatNonFabricAsIncompatible -and $nonFabricJarNames -and $nonFabricJarName
     $storagePath = Join-Path -Path $StorageModsDir -ChildPath $jarName
 
     $gameResult = $null
-    if (Test-Path -LiteralPath $gamePath) {
-      $gameResult = Move-OrDelete -SourcePath $gamePath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun ([bool]$DryRun)
-    } else {
-      $gameResult = ("not present in game mods: {0}" -f $jarName)
-    }
-
     $storageResult = $null
-    if (Test-Path -LiteralPath $storagePath) {
-      $storageResult = Move-OrDelete -SourcePath $storagePath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun ([bool]$DryRun)
+
+    if ($DryRun) {
+        if (Test-Path -LiteralPath $gamePath) {
+            $gameResult = Move-OrDelete -SourcePath $gamePath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun $true
+        } else {
+            $gameResult = ("not present in game mods: {0}" -f $jarName)
+        }
+        if (Test-Path -LiteralPath $storagePath) {
+            $storageResult = Move-OrDelete -SourcePath $storagePath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun $true
+        } else {
+            $storageResult = ("not present in storage root: {0}" -f $jarName)
+        }
     } else {
-      $storageResult = ("not present in storage root: {0}" -f $jarName)
+        $moveResult = Move-CulpritToLegacyAndAppendLog `
+            -JarName $jarName `
+            -MinecraftVersion $mcVersion `
+            -GameModsDir $GameModsDir `
+            -StorageModsDir $StorageModsDir `
+            -GameLegacyFolderName $GameLegacyFolderName `
+            -StorageLegacyFolderName $StorageLegacyFolderName `
+            -KeepCulpritInGameLegacy ([bool](-not $deleteFromGame)) `
+            -GameSourcePath $gamePath `
+            -StorageSourcePath $storagePath `
+            -RemoveGameIfNotKeeping $true `
+            -RequireStorageMoveForGameRemoval $false
+
+        if (Test-Path -LiteralPath $gamePath) {
+            if ($moveResult.GameMoved) {
+                $gameResult = if ($deleteFromGame) { "deleted: $gamePath" } else { "moved: $gamePath -> $gameLegacyVersionDir" }
+            } else {
+                $gameResult = "failed to move from game"
+            }
+        } else {
+            $gameResult = ("not present in game mods: {0}" -f $jarName)
+        }
+
+        if (Test-Path -LiteralPath $storagePath) {
+            if ($moveResult.StorageMoved) {
+                $storageResult = if ($deleteFromStorage) { "deleted: $storagePath" } else { "moved: $storagePath -> $storageLegacyVersionDir" }
+            } else {
+                $storageResult = "failed to move from storage"
+            }
+        } else {
+            $storageResult = ("not present in storage root: {0}" -f $jarName)
+        }
     }
 
     $actions.Add([pscustomobject]@{

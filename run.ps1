@@ -19,6 +19,7 @@ Commonly used parameters:
   -Verbose                Enable detailed logs (saved to MCCC.log and console).
   -UseLinearIsolation     Use linear search instead of binary for isolation.
   -OutcomeTimeoutSeconds  How long to wait for a crash after clicking Play.
+  -Profile <name>         Load advanced overrides from [Profile:<name>] in config.ini.
 
 .PARAMETER Help
 Show concise colored help for the most common parameters.
@@ -61,21 +62,24 @@ if ($Help) {
   Write-Host "Commonly Used Parameters:" -ForegroundColor White
   Write-Host "  -LauncherExePath <path> " -NoNewline -ForegroundColor Yellow
   Write-Host ": Path to Legacy Launcher executable." -ForegroundColor Gray
-  
+
   Write-Host "  -NoLegacy               " -NoNewline -ForegroundColor Yellow
   Write-Host ": Ignore legacy folders in storage." -ForegroundColor Gray
-  
+
   Write-Host "  -GameLegacy             " -NoNewline -ForegroundColor Yellow
   Write-Host ": Use game-side legacy folders for isolation." -ForegroundColor Gray
-  
+
   Write-Host "  -DryRun                 " -NoNewline -ForegroundColor Yellow
   Write-Host ": Simulate process without clicking or deleting." -ForegroundColor Gray
-  
+
   Write-Host "  -Verbose                " -NoNewline -ForegroundColor Yellow
   Write-Host ": Enable detailed logging to console and MCCC.log." -ForegroundColor Gray
 
   Write-Host "  -UseLinearIsolation     " -NoNewline -ForegroundColor Yellow
   Write-Host ": Use linear search for isolation (slower but simple)." -ForegroundColor Gray
+
+  Write-Host "  -Profile <name>         " -NoNewline -ForegroundColor Yellow
+  Write-Host ": Load advanced overrides from config.ini profile." -ForegroundColor Gray
 
   Write-Host "  -HelpFull               " -NoNewline -ForegroundColor Cyan
   Write-Host ": Show the complete (very long) technical help.`n" -ForegroundColor Gray

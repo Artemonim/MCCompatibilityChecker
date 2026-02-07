@@ -141,35 +141,6 @@ $ErrorActionPreference = "Stop"
 $launchWaitBaseSeconds = 20
 $launchWaitPerModSeconds = 0.1
 
-function Get-ActiveModCount {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$ModsDir
-  )
-
-  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
-  if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
-  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
-  if ($null -eq $mods) { return 0 }
-  return @($mods).Count
-}
-
-function Get-ScaledLaunchWaitTime {
-  param(
-    [Parameter(Mandatory = $true)]
-    [int]$ActiveModCount,
-    [Parameter(Mandatory = $true)]
-    [double]$PerModSeconds,
-    [Parameter(Mandatory = $true)]
-    [int]$BaseSeconds
-  )
-
-  $rawSeconds = $BaseSeconds + ($ActiveModCount * $PerModSeconds)
-  $scaledSeconds = [int][Math]::Ceiling($rawSeconds)
-  if ($scaledSeconds -lt $BaseSeconds) { $scaledSeconds = $BaseSeconds }
-  return $scaledSeconds
-}
-
 function Wait-RecoveryOutcomeDialog {
   param(
     [Parameter(Mandatory = $true)]
@@ -224,17 +195,28 @@ $sharedJarDepPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-J
 $sharedLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LogTools.ps1"
 if (-not (Test-Path -LiteralPath $sharedLogPath)) { throw ("Shared log helpers not found: {0}" -f $sharedLogPath) }
 . $sharedLogPath
+$sharedLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
+if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy helpers not found: {0}" -f $sharedLegacyPath) }
+. $sharedLegacyPath
 
-$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
-$configIni = $projectConfig.Ini
-
-if ([string]::IsNullOrWhiteSpace($GameModsDir)) {
-  $GameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default (Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods')
-}
-if ([string]::IsNullOrWhiteSpace($StorageModsDir)) {
-  $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
-}
-$useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
+$sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
+if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
+. $sharedStageResultPath
+$runtimeConfig = Initialize-McccRuntimeConfig `
+  -StartDir $PSScriptRoot `
+  -BoundParameters $PSBoundParameters `
+  -GameModsDir $GameModsDir `
+  -StorageModsDir $StorageModsDir `
+  -LogPath $LogPath `
+  -LauncherExePath $LauncherExePath `
+  -AlwaysDefaultGameModsDir $true `
+  -DefaultStorageToGame $false `
+  -TreatEmptyAsUnboundKeys @("GameModsDir", "StorageModsDir", "LogPath", "LauncherExePath")
+$GameModsDir = $runtimeConfig.Paths.GameModsDir
+$StorageModsDir = $runtimeConfig.Paths.StorageModsDir
+$LogPath = $runtimeConfig.Paths.LogPath
+$LauncherExePath = $runtimeConfig.Paths.LauncherExePath
+$useStorage = $runtimeConfig.Paths.UseStorage
 
 # ────────────────────────────────────────────────────────────────────────────
 # * Parse culprit data.
@@ -251,7 +233,22 @@ try {
 if ($culprits.Count -eq 0) {
   Write-Host "Recovery: no culprits provided." -ForegroundColor Gray
   if ($EmitResultObject) {
-    Write-Output ([pscustomobject]@{ Type = "RecoveryResult"; RestoredJarNames = @(); NewCulpritJarNames = @(); Attempted = $false })
+    $stageResultParams = @{
+      Stage = "Recovery"
+      Type = "RecoveryResult"
+      GameModsDir = $GameModsDir
+      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+      Minecraft = $Minecraft
+      ExitCode = 0
+      CulpritJarNames = @()
+      CulpritMoves = @()
+      ExtraFields = @{
+        RestoredJarNames   = @()
+        NewCulpritJarNames = @()
+        Attempted          = $false
+      }
+    }
+    Write-Output (New-StageResult @stageResultParams)
   }
   exit 0
 }
@@ -284,7 +281,22 @@ $qualifiedGroups = @($groups.Values | Where-Object { $_.Members.Count -ge $MinGr
 if ($qualifiedGroups.Count -eq 0) {
   Write-Host ("Recovery: no Mixin error groups with {0}+ culprits found. Nothing to recover." -f $MinGroupSize) -ForegroundColor Gray
   if ($EmitResultObject) {
-    Write-Output ([pscustomobject]@{ Type = "RecoveryResult"; RestoredJarNames = @(); NewCulpritJarNames = @(); Attempted = $false })
+    $stageResultParams = @{
+      Stage = "Recovery"
+      Type = "RecoveryResult"
+      GameModsDir = $GameModsDir
+      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+      Minecraft = $Minecraft
+      ExitCode = 0
+      CulpritJarNames = @()
+      CulpritMoves = @()
+      ExtraFields = @{
+        RestoredJarNames   = @()
+        NewCulpritJarNames = @()
+        Attempted          = $false
+      }
+    }
+    Write-Output (New-StageResult @stageResultParams)
   }
   exit 0
 }
@@ -317,17 +329,6 @@ if ($null -ne $dependencyMap) {
 # ────────────────────────────────────────────────────────────────────────────
 # * Process each qualified group.
 # ────────────────────────────────────────────────────────────────────────────
-
-$storageLegacyVersionDir = $null
-if ($useStorage) {
-  $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-  $storageLegacyVersionDir = Join-Path -Path $storageLegacyRoot -ChildPath $Minecraft
-}
-$gameLegacyVersionDir = $null
-if ($KeepCulpritInGameLegacy) {
-  $gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-  $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot -ChildPath $Minecraft
-}
 
 $allRestoredJarNames = New-Object System.Collections.Generic.List[string]
 $allNewCulpritJarNames = New-Object System.Collections.Generic.List[string]
@@ -540,25 +541,20 @@ foreach ($group in $qualifiedGroups) {
       Write-Host ("  Recovery SUCCESS: {0} is the root cause. {1} culprit(s) restored." -f $rootJar, $restoredPaths.Count) -ForegroundColor Green
 
       # * Move root-cause to legacy permanently.
-      if ($useStorage -and $null -ne $storageLegacyVersionDir) {
-        if (-not (Test-Path -LiteralPath $storageLegacyVersionDir)) {
-          New-Item -ItemType Directory -Path $storageLegacyVersionDir -Force | Out-Null
-        }
-        $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $rootJar
-        $srcFile = if ($null -ne $rootStorageTemp -and (Test-Path -LiteralPath $rootStorageTemp)) { $rootStorageTemp } else { $rootTemp }
-        Copy-Item -LiteralPath $srcFile -Destination $destPath -Force
-        Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
-        $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-        Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
-      }
-      if ($KeepCulpritInGameLegacy -and $null -ne $gameLegacyVersionDir) {
-        if (-not (Test-Path -LiteralPath $gameLegacyVersionDir)) {
-          New-Item -ItemType Directory -Path $gameLegacyVersionDir -Force | Out-Null
-        }
-        $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $rootJar
-        Copy-Item -LiteralPath $rootTemp -Destination $destPath -Force
-        Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
-      }
+      $storageSourcePath = Get-FirstExistingPath -Candidates @($rootStorageTemp, $rootTemp)
+      $gameSourcePath = Get-FirstExistingPath -Candidates @($rootTemp)
+      $null = Move-CulpritToLegacyAndAppendLog `
+        -JarName $rootJar `
+        -MinecraftVersion $Minecraft `
+        -GameModsDir $GameModsDir `
+        -StorageModsDir $StorageModsDir `
+        -GameLegacyFolderName $GameLegacyFolderName `
+        -StorageLegacyFolderName $StorageLegacyFolderName `
+        -KeepCulpritInGameLegacy ([bool]$KeepCulpritInGameLegacy) `
+        -StorageSourcePath $storageSourcePath `
+        -GameSourcePath $gameSourcePath `
+        -StorageTransferMode "Copy" `
+        -GameTransferMode "Copy"
 
       # * Remove original legacy copies of restored culprits.
       foreach ($mJar in $restoredPaths.Keys) {
@@ -623,13 +619,25 @@ if ($allRestoredJarNames.Count -gt 0) {
   Write-Host "Recovery: nothing to attempt." -ForegroundColor Gray
 }
 
+$exitCode = if ($allRestoredJarNames.Count -gt 0) { 0 } else { 1 }
+
 if ($EmitResultObject) {
-  Write-Output ([pscustomobject]@{
-      Type                = "RecoveryResult"
-      RestoredJarNames    = @($allRestoredJarNames)
-      NewCulpritJarNames  = @($allNewCulpritJarNames)
-      Attempted           = $attempted
-    })
+  $stageResultParams = @{
+    Stage = "Recovery"
+    Type = "RecoveryResult"
+    GameModsDir = $GameModsDir
+    StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+    Minecraft = $Minecraft
+    ExitCode = $exitCode
+    CulpritJarNames = @($allNewCulpritJarNames)
+    CulpritMoves = @()
+    ExtraFields = @{
+      RestoredJarNames   = @($allRestoredJarNames)
+      NewCulpritJarNames = @($allNewCulpritJarNames)
+      Attempted          = $attempted
+    }
+  }
+  Write-Output (New-StageResult @stageResultParams)
 }
 
-exit $(if ($allRestoredJarNames.Count -gt 0) { 0 } else { 1 })
+exit $exitCode

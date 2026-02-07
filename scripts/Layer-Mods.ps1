@@ -404,35 +404,6 @@ $launchWaitBaseSeconds = 20
 $launchWaitPerModSeconds = 0.1
 $launchWaitPerModSecondsLong = 0.3
 
-function Get-ActiveModCount {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$ModsDir
-  )
-
-  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
-  if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
-  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
-  if ($null -eq $mods) { return 0 }
-  return @($mods).Count
-}
-
-function Get-ScaledLaunchWaitTime {
-  param(
-    [Parameter(Mandatory = $true)]
-    [int]$ActiveModCount,
-    [Parameter(Mandatory = $true)]
-    [double]$PerModSeconds,
-    [Parameter(Mandatory = $true)]
-    [int]$BaseSeconds
-  )
-
-  $rawSeconds = $BaseSeconds + ($ActiveModCount * $PerModSeconds)
-  $scaledSeconds = [int][Math]::Ceiling($rawSeconds)
-  if ($scaledSeconds -lt $BaseSeconds) { $scaledSeconds = $BaseSeconds }
-  return $scaledSeconds
-}
-
 if ($Help) {
   Get-Help -Full -Name $PSCommandPath
   return
@@ -482,27 +453,48 @@ $sharedIsolationHashCachePath = Join-Path -Path $PSScriptRoot -ChildPath "Shared
 if (-not (Test-Path -LiteralPath $sharedIsolationHashCachePath)) { throw ("Shared hash cache helpers not found: {0}" -f $sharedIsolationHashCachePath) }
 . $sharedIsolationHashCachePath
 
+$sharedLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
+if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy helpers not found: {0}" -f $sharedLegacyPath) }
+. $sharedLegacyPath
+
+$sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
+if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
+. $sharedStageResultPath
+
+$sharedIsolationDecisionsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Decisions.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationDecisionsPath)) { throw ("Shared isolation decision helpers not found: {0}" -f $sharedIsolationDecisionsPath) }
+. $sharedIsolationDecisionsPath
+
+$layerBaselinePath = Join-Path -Path $PSScriptRoot -ChildPath "Layer-Mods.Baseline.ps1"
+if (-not (Test-Path -LiteralPath $layerBaselinePath)) { throw ("Layering baseline script not found: {0}" -f $layerBaselinePath) }
+
+$layerExecutionPath = Join-Path -Path $PSScriptRoot -ChildPath "Layer-Mods.Execution.ps1"
+if (-not (Test-Path -LiteralPath $layerExecutionPath)) { throw ("Layering execution script not found: {0}" -f $layerExecutionPath) }
+
+$layerBatchTriagePath = Join-Path -Path $PSScriptRoot -ChildPath "Layer-Mods.BatchTriage.ps1"
+if (-not (Test-Path -LiteralPath $layerBatchTriagePath)) { throw ("Layering batch triage script not found: {0}" -f $layerBatchTriagePath) }
+
+$layerFinalizePath = Join-Path -Path $PSScriptRoot -ChildPath "Layer-Mods.Finalize.ps1"
+if (-not (Test-Path -LiteralPath $layerFinalizePath)) { throw ("Layering finalize script not found: {0}" -f $layerFinalizePath) }
+
 # ────────────────────────────────────────────────────────────────────────────
 # * Config.
 # ────────────────────────────────────────────────────────────────────────────
 
-$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
-$configIni = $projectConfig.Ini
-
-$defaultGameModsDir = Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods'
-if (-not $PSBoundParameters.ContainsKey("GameModsDir")) {
-  $cfgGameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default ""
-  $GameModsDir = $(if (-not [string]::IsNullOrWhiteSpace($cfgGameModsDir)) { $cfgGameModsDir } else { $defaultGameModsDir })
-}
-if (-not $PSBoundParameters.ContainsKey("StorageModsDir")) {
-  $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
-}
-if (-not $PSBoundParameters.ContainsKey("LogPath")) {
-  $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
-}
-if (-not $PSBoundParameters.ContainsKey("LauncherExePath")) {
-  $LauncherExePath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LauncherExePath" -Default ""
-}
+$runtimeConfig = Initialize-McccRuntimeConfig `
+  -StartDir $PSScriptRoot `
+  -BoundParameters $PSBoundParameters `
+  -GameModsDir $GameModsDir `
+  -StorageModsDir $StorageModsDir `
+  -LogPath $LogPath `
+  -LauncherExePath $LauncherExePath `
+  -AlwaysDefaultGameModsDir $false `
+  -DefaultStorageToGame $false
+$GameModsDir = $runtimeConfig.Paths.GameModsDir
+$StorageModsDir = $runtimeConfig.Paths.StorageModsDir
+$LogPath = $runtimeConfig.Paths.LogPath
+$LauncherExePath = $runtimeConfig.Paths.LauncherExePath
+$useStorage = $runtimeConfig.Paths.UseStorage
 
 if ($BinaryLinearThreshold -lt 1) { $BinaryLinearThreshold = 1 }
 $useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds")
@@ -1350,491 +1342,8 @@ function Restore-MissingDependency {
 # ────────────────────────────────────────────────────────────────────────────
 
 try {
-  # ── Phase 1: quarantine all non-tier-4 mods. ──
-  $phase = "initial_quarantine"
-  Write-Host "Quarantining all non-core mods..." -ForegroundColor Cyan
-  foreach ($mod in $nonCoreMods) {
-    $gameDest = Move-ToQuarantine -SourcePath $mod.FullName -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
-    $storageDest = $null
-    if ($useStorage) {
-      $storagePath = Join-Path -Path $StorageModsDir -ChildPath $mod.Name
-      if (Test-Path -LiteralPath $storagePath) {
-        $storageDest = Move-ToQuarantine -SourcePath $storagePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
-      }
-    }
-    [void](Add-MovedItemRecord -JarName $mod.Name `
-        -GameSource $mod.FullName `
-        -GameQuarantine $gameDest `
-        -StorageSource $(if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $mod.Name } else { $null }) `
-        -StorageQuarantine $storageDest)
-  }
-  Write-Host ("Quarantined {0} non-core mod(s)." -f $nonCoreMods.Count) -ForegroundColor Gray
-
-  # ── Phase 2: baseline launch with tier-4 only. ──
-  $phase = "baseline_tier4"
-  $baselineLabel = "Baseline: launching with core libraries only (tier 4)."
-  if ($script:mcccCacheEnabled -and $script:mcccKnownGoodJarNameSet.Count -gt 0) {
-    $baselineLabel = "Baseline: launching with core libraries (tier 4) plus hash-cached mods."
-  }
-  Write-Host $baselineLabel -ForegroundColor Cyan
-  $baselineResult = Invoke-LayeringLaunchAndCheck -PhasePrefix "baseline_tier4"
-
-  if ($baselineResult.Type -eq "Crash") {
-    Write-Host "Core-библиотеки (уровень 4) сами по себе вызывают краш. Наслоение невозможно." -ForegroundColor Red
-    Write-Host "Требуется ручная диагностика: проверьте моды уровня 4 или используйте стандартную изоляцию." -ForegroundColor Yellow
-    $exitCode = 2
-    # ! Fall through to finally for restore.
-  } elseif ($baselineResult.Type -eq "FabricDialog") {
-    $restoredCount = Restore-MissingDependency -MissingDepIds $baselineResult.MissingDepIds
-    if ($restoredCount -gt 0) {
-      Write-Host ("Восстановлено {0} отсутствующих зависимостей для уровня 4. Повторный запуск..." -f $restoredCount) -ForegroundColor Cyan
-      $baselineResult = Invoke-LayeringLaunchAndCheck -PhasePrefix "baseline_tier4_retry"
-      if ($baselineResult.Type -ne "Success") {
-        Write-Host ("Повторный запуск уровня 4 провалился: {0}. Невозможно продолжить." -f $baselineResult.Type) -ForegroundColor Red
-        $exitCode = 2
-      }
-    } else {
-      Write-Host "Базовая проверка уровня 4 показала диалог Fabric, но восстанавливаемых зависимостей не найдено." -ForegroundColor Red
-      $exitCode = 2
-    }
-  }
-
-  if ($baselineResult.Type -eq "Success" -and $baselineResult.PSObject.Properties.Name -contains "LogSnapshot") {
-    $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $baselineResult.LogSnapshot.Lines
-  }
-
-  if ($baselineResult.Type -eq "Success") {
-    $tier4Names = @($tier4Mods | ForEach-Object { $_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-    Update-McccHashCachePassedJar -JarNames $tier4Names -Minecraft $mcVersionForLegacy
-  }
-
-  # ── Phase 3: layering loop (tier-3, tier-2, tier-1). ──
-  if ($exitCode -eq 0) {
-    $layerTiers = @(
-      @{ Tier = 3; Mods = $tier3Mods },
-      @{ Tier = 2; Mods = $tier2Mods },
-      @{ Tier = 1; Mods = $tier1Mods }
-    )
-
-    for ($tierIdx = 0; $tierIdx -lt $layerTiers.Count; $tierIdx++) {
-      $tierInfo = $layerTiers[$tierIdx]
-      $tier = $tierInfo.Tier
-      $tierMods = @($tierInfo.Mods)
-      if (-not $tierMods -or $tierMods.Count -eq 0) { continue }
-
-      # * Skip mods already moved to legacy (found as culprits in previous tiers).
-      $tierMods = @($tierMods | Where-Object { -not $culpritJarNames.Contains($_.Name) })
-      # * Skip mods already restored (e.g. as dependencies).
-      $tierMods = @($tierMods | Where-Object { $movedJarNameSet.ContainsKey($_.Name) })
-      if (-not $tierMods -or $tierMods.Count -eq 0) { continue }
-
-      Write-Host ("Наслоение, уровень {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Cyan
-
-      $remaining = [System.Collections.Generic.List[object]]::new(@($tierMods))
-      $batchSize = 1
-      $maxFabricRetries = 5
-      $consecutiveFabricFails = 0
-      $maxConsecutiveFabricFails = 3
-
-      while ($remaining.Count -gt 0) {
-        if ($abortLayering) { break }
-
-        $actualBatchSize = [Math]::Min($batchSize, $remaining.Count)
-        $batch = @($remaining.GetRange(0, $actualBatchSize))
-        $batchNames = @($batch | ForEach-Object { $_.Name })
-
-        $batchDisplay = if ($VerbosePreference -ne "SilentlyContinue") { $batchNames -join ", " } else { (($batchNames | Select-Object -First 3) -join ", ") + $(if ($batchNames.Count -gt 3) { "..." } else { "" }) }
-        Write-Host ("  Adding batch of {0} mod(s): {1}" -f $batch.Count, $batchDisplay) -ForegroundColor Cyan
-
-        # * Restore batch from quarantine.
-        $phase = ("tier{0}_restore_batch" -f $tier)
-        foreach ($batchMod in $batch) {
-          $item = Get-MovedItemByJarName -JarName $batchMod.Name
-          if ($null -ne $item -and $null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-            [void](Restore-FromQuarantine -SourcePath $item.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
-            $item.GameQuarantine = $null
-          }
-          if ($useStorage -and $null -ne $item -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
-            [void](Restore-FromQuarantine -SourcePath $item.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
-            $item.StorageQuarantine = $null
-          }
-          if ($movedJarNameSet.ContainsKey($batchMod.Name)) {
-            $null = $movedJarNameSet.Remove($batchMod.Name)
-          }
-        }
-
-        # * Determine if this is the final batch (last batch of last tier with mods).
-        $isLastBatchInTier = ($remaining.Count -le $actualBatchSize)
-        $hasMoreTierMods = $false
-        for ($futureIdx = $tierIdx + 1; $futureIdx -lt $layerTiers.Count; $futureIdx++) {
-          $futureMods = @($layerTiers[$futureIdx].Mods)
-          $futureMods = @($futureMods | Where-Object { -not $culpritJarNames.Contains($_.Name) })
-          $futureMods = @($futureMods | Where-Object { $movedJarNameSet.ContainsKey($_.Name) })
-          if ($futureMods.Count -gt 0) { $hasMoreTierMods = $true; break }
-        }
-        $isFinalBatch = $isLastBatchInTier -and (-not $hasMoreTierMods)
-
-        # * Launch and check.
-        $phase = ("tier{0}_layer_launch" -f $tier)
-        $layerResult = Invoke-LayeringLaunchAndCheck -PhasePrefix ("tier{0}_batch" -f $tier) -LeaveGameRunning:$isFinalBatch
-
-        # * User closed the game manually. No crash dialog = game was running fine.
-        if ($layerResult.Type -eq "UserExit") {
-          Write-Host "  User closed the game. Treating batch as clean." -ForegroundColor Yellow
-          Update-McccHashCachePassedJar -JarNames $batchNames -Minecraft $mcVersionForLegacy
-          $null = $remaining.RemoveRange(0, $actualBatchSize)
-          $batchSize = $batchSize * 2
-          Write-Host ("  Remaining: {0}" -f $remaining.Count) -ForegroundColor Green
-          continue
-        }
-
-        if ($layerResult.Type -eq "Success") {
-          # * Batch is clean. Advance.
-          $null = $remaining.RemoveRange(0, $actualBatchSize)
-          $batchSize = $batchSize * 2
-          $consecutiveFabricFails = 0
-          Write-Host ("  Batch clean. Remaining: {0}" -f $remaining.Count) -ForegroundColor Green
-          Update-McccHashCachePassedJar -JarNames $batchNames -Minecraft $mcVersionForLegacy
-          continue
-        }
-
-        if ($layerResult.Type -eq "FabricDialog") {
-          # * Missing dependencies — restore them and retry same batch.
-          $fabricRetry = 0
-          while ($layerResult.Type -eq "FabricDialog" -and $fabricRetry -lt $maxFabricRetries) {
-            $fabricRetry++
-            $restoredCount = Restore-MissingDependency -MissingDepIds $layerResult.MissingDepIds
-            if ($restoredCount -eq 0) {
-              Write-Host "  Fabric dialog but no restorable dependencies. Treating as crash." -ForegroundColor Yellow
-              break
-            }
-            Write-Host ("  Restored {0} dep(s). Retrying batch..." -f $restoredCount) -ForegroundColor Cyan
-            $layerResult = Invoke-LayeringLaunchAndCheck -PhasePrefix ("tier{0}_fabric_retry" -f $tier) -LeaveGameRunning:$isFinalBatch
-          }
-
-          if ($layerResult.Type -eq "Success") {
-            $null = $remaining.RemoveRange(0, $actualBatchSize)
-            $batchSize = $batchSize * 2
-            $consecutiveFabricFails = 0
-            Write-Host ("  Batch clean after dep restore. Remaining: {0}" -f $remaining.Count) -ForegroundColor Green
-            Update-McccHashCachePassedJar -JarNames $batchNames -Minecraft $mcVersionForLegacy
-            continue
-          }
-          if ($layerResult.Type -eq "FabricDialog") {
-            # * Re-quarantine the problematic batch mods so they don't contaminate
-            # * subsequent batches and tiers.
-            Write-Host ("  Persistent Fabric dialog. Re-quarantining batch of {0} mod(s)." -f $batch.Count) -ForegroundColor Yellow
-            foreach ($batchMod in $batch) {
-              $gamePath = Join-Path -Path $GameModsDir -ChildPath $batchMod.Name
-              if (Test-Path -LiteralPath $gamePath) {
-                $dest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
-                if ($null -ne $dest) {
-                  $existingItem = Get-MovedItemByJarName -JarName $batchMod.Name
-                  if ($null -ne $existingItem) {
-                    $existingItem.GameQuarantine = $dest
-                  } else {
-                    [void](Add-MovedItemRecord -JarName $batchMod.Name -GameSource $gamePath -GameQuarantine $dest -StorageSource $null -StorageQuarantine $null)
-                  }
-                  if (-not $movedJarNameSet.ContainsKey($batchMod.Name)) {
-                    $movedJarNameSet[$batchMod.Name] = $true
-                  }
-                }
-              }
-            }
-            $null = $remaining.RemoveRange(0, $actualBatchSize)
-            $batchSize = 1
-            $hadUnresolvableFabric = $true
-            $consecutiveFabricFails++
-            if ($consecutiveFabricFails -ge $maxConsecutiveFabricFails) {
-              Write-Host ("  {0} consecutive Fabric failures. Stopping уровень {1}." -f $consecutiveFabricFails, $tier) -ForegroundColor Yellow
-              break
-            }
-            continue
-          }
-          # * User closed the game during Fabric retry. No crash = batch is clean.
-          if ($layerResult.Type -eq "UserExit") {
-            Write-Host "  User closed the game during Fabric retry. Treating batch as clean." -ForegroundColor Yellow
-            Update-McccHashCachePassedJar -JarNames $batchNames -Minecraft $mcVersionForLegacy
-            $null = $remaining.RemoveRange(0, $actualBatchSize)
-            $batchSize = $batchSize * 2
-            Write-Host ("  Remaining: {0}" -f $remaining.Count) -ForegroundColor Green
-            continue
-          }
-          # * Fall through to crash handling.
-        }
-
-        # * Crash handling: try basic algorithm, then binary isolation.
-        if ($layerResult.Type -eq "Crash") {
-          $phase = ("tier{0}_crash_identify" -f $tier)
-
-          if ($mcVersionForLegacy -eq "unknown" -and $null -ne $layerResult.LogSnapshot) {
-            $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $layerResult.LogSnapshot.Lines
-          }
-
-          # * Step A: basic algorithm — read log, identify culprit.
-          $logCulprits = @()
-          if ($null -ne $layerResult.LogSnapshot) {
-            $logCulprits = @(Find-CulpritFromLog -LogLines $layerResult.LogSnapshot.Lines -BatchMods $batch)
-          }
-
-          if ($logCulprits -and $logCulprits.Count -gt 0) {
-            foreach ($cj in $logCulprits) {
-              Write-Host ("  Log-identified culprit: {0}" -f $cj.Name) -ForegroundColor Green
-              $logEvKey = if ($null -ne $layerResult.LogSnapshot) { Get-ErrorEvidenceKey -Lines $layerResult.LogSnapshot.Lines -MaxLines $ErrorSignatureLineLimit } else { "" }
-              Move-CulpritToLegacy -JarName $cj.Name -EvidenceKey $logEvKey
-            }
-            # * Remove culprits from remaining, don't advance batchSize.
-            $culpritNameSet = @{}
-            foreach ($cj in $logCulprits) { $culpritNameSet[$cj.Name.ToLowerInvariant()] = $true }
-            $newRemaining = [System.Collections.Generic.List[object]]::new()
-            foreach ($m in $remaining) {
-              if (-not $culpritNameSet.ContainsKey($m.Name.ToLowerInvariant())) {
-                $newRemaining.Add($m)
-              }
-            }
-            $remaining = $newRemaining
-            # * Reset batch size after a culprit is found to re-probe carefully.
-            $batchSize = 1
-            continue
-          }
-
-          # * Tier-1 optimization: for deep crash diagnosis, keep only the current
-          # * problematic batch active and park the rest of active tier-1 mods.
-          $tier1NarrowingParkedJarNames = @()
-          if ($tier -eq 1) {
-            $tier1NarrowingParkedJarNames = @(Invoke-Tier1BatchNarrowing -BatchJarNames $batchNames)
-          }
-
-          # * Step B: binary isolation within the batch.
-          if ($batch.Count -le 1) {
-            # * Single mod batches can yield false positives when the crash persists for other reasons.
-            # * Confirm by re-probing WITHOUT this mod before blaming it.
-            $singleJarName = [string]$batch[0].Name
-            Write-Host ("  Single mod batch crashed: {0}. Re-probing without it..." -f $singleJarName) -ForegroundColor Yellow
-
-            $singleGamePath = Join-Path -Path $GameModsDir -ChildPath $singleJarName
-            $singleStoragePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $singleJarName } else { $null }
-            $singleGameDest = $null
-            $singleStorageDest = $null
-            if (Test-Path -LiteralPath $singleGamePath) {
-              $singleGameDest = Move-ToQuarantine -SourcePath $singleGamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
-            }
-            if ($useStorage -and $singleStoragePath -and (Test-Path -LiteralPath $singleStoragePath) -and $storageQuarantineDir) {
-              $singleStorageDest = Move-ToQuarantine -SourcePath $singleStoragePath -DestDir $storageQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
-            }
-            if ($null -ne $singleGameDest -or $null -ne $singleStorageDest) {
-              [void](Add-MovedItemRecord -JarName $singleJarName `
-                  -GameSource $singleGamePath `
-                  -GameQuarantine $singleGameDest `
-                  -StorageSource $singleStoragePath `
-                  -StorageQuarantine $singleStorageDest)
-            }
-
-            $phase = ("tier{0}_single_confirm" -f $tier)
-            $confirmResult = Invoke-LayeringLaunchAndCheck -PhasePrefix ("tier{0}_single_confirm" -f $tier)
-            if ($confirmResult.Type -eq "Success" -or $confirmResult.Type -eq "UserExit") {
-              Write-Host ("  Confirmed culprit: {0}" -f $singleJarName) -ForegroundColor Green
-              $singleEvKey = if ($null -ne $layerResult.LogSnapshot) { Get-ErrorEvidenceKey -Lines $layerResult.LogSnapshot.Lines -MaxLines $ErrorSignatureLineLimit } else { "" }
-              Move-CulpritToLegacy -JarName $singleJarName -EvidenceKey $singleEvKey
-              $null = $remaining.RemoveAt(0)
-              $batchSize = 1
-              if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
-                $tier1ProbeOk = Complete-Tier1BatchNarrowing `
-                  -ParkedJarNames $tier1NarrowingParkedJarNames `
-                  -RunConsistencyProbe $true `
-                  -ProbePhasePrefix ("tier{0}_single_probe_restored" -f $tier)
-                if (-not $tier1ProbeOk) {
-                  $abortLayering = $true
-                  $exitCode = 4
-                  break
-                }
-              }
-              continue
-            }
-
-            Write-Host ("  Re-probe still fails without {0}. Not blaming it; aborting layering." -f $singleJarName) -ForegroundColor Yellow
-
-            # * Restore the mod back before abort to avoid partial state.
-            $item = Get-MovedItemByJarName -JarName $singleJarName
-            if ($null -ne $item -and $null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-              [void](Restore-FromQuarantine -SourcePath $item.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite $true)
-              $item.GameQuarantine = $null
-            }
-            if ($useStorage -and $null -ne $item -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
-              [void](Restore-FromQuarantine -SourcePath $item.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite $true)
-              $item.StorageQuarantine = $null
-            }
-            if ($movedJarNameSet.ContainsKey($singleJarName)) {
-              $null = $movedJarNameSet.Remove($singleJarName)
-            }
-
-            if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
-              [void](Complete-Tier1BatchNarrowing `
-                  -ParkedJarNames $tier1NarrowingParkedJarNames `
-                  -RunConsistencyProbe $false)
-            }
-
-            $abortLayering = $true
-            $exitCode = 4
-            break
-          }
-
-          Write-Host ("  Basic algorithm could not identify culprit. Running binary isolation on {0} mod(s)." -f $batch.Count) -ForegroundColor Cyan
-
-          # * Capture crash signature as baseline for binary isolation.
-          $crashSignature = ""
-          $crashEvidenceKey = ""
-          if ($null -ne $layerResult.LogSnapshot) {
-            $crashSignature = Get-ErrorSignature -Lines $layerResult.LogSnapshot.Lines `
-              -MaxLines $ErrorSignatureLineLimit `
-              -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-            $crashEvidenceKey = Get-ErrorEvidenceKey -Lines $layerResult.LogSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
-          }
-
-          # * Multi-culprit binary isolation loop.
-          # * A single batch may contain several independently crashing mods.
-          # * Binary search identifies one candidate at a time; after quarantining
-          # * it, the search restarts on the reduced set until the crash is resolved.
-          $batchForBinary = @($batch)
-          $multiCulpritIteration = 0
-          $multiCulpritMax = 32
-          $binaryResolved = $false
-
-          while ($batchForBinary.Count -gt 0 -and $multiCulpritIteration -lt $multiCulpritMax) {
-            $multiCulpritIteration++
-
-            # * PinnedJarNames = everything currently quarantined that is NOT in the binary batch.
-            $binaryPinned = @($movedJarNameSet.Keys | Where-Object {
-                $jarName = $_
-                $inBatch = $false
-                foreach ($bm in $batchForBinary) { if ($bm.Name -eq $jarName) { $inBatch = $true; break } }
-                -not $inBatch
-              })
-
-            $phase = ("tier{0}_binary_isolation_{1}" -f $tier, $multiCulpritIteration)
-            $binaryResult = Invoke-BinaryIsolation -Mods $batchForBinary `
-              -BaselineSignature $crashSignature `
-              -BaselineEvidenceKey $crashEvidenceKey `
-              -PinnedJarNames $binaryPinned
-
-            if ($binaryResult.Reason -eq "all_removed_no_change") {
-              if ($multiCulpritIteration -eq 1) {
-                # * First attempt: crash persists without ANY batch mods.
-                Write-Host "  Crash persists without batch mods. Aborting layering." -ForegroundColor Yellow
-                $abortLayering = $true
-                $exitCode = 4
-              } else {
-                # * Subsequent attempt: remaining batch mods are clean.
-                Write-Host ("  Remaining {0} batch mod(s) verified clean after removing {1} culprit(s)." -f $batchForBinary.Count, ($multiCulpritIteration - 1)) -ForegroundColor Green
-                $binaryResolved = $true
-              }
-              break
-            }
-
-            $binaryRemaining = @($binaryResult.Remaining)
-            if (-not $binaryRemaining -or $binaryRemaining.Count -eq 0) {
-              Write-Host "  Binary isolation returned empty set. Skipping batch." -ForegroundColor Yellow
-              break
-            }
-
-            foreach ($brMod in $binaryRemaining) {
-              # * Quarantine this single mod and re-test.
-              $gamePath = Join-Path -Path $GameModsDir -ChildPath $brMod.Name
-              if (Test-Path -LiteralPath $gamePath) {
-                $dest = Move-ToQuarantine -SourcePath $gamePath -DestDir $gameQuarantineDir -IsDryRun $false -Retries $MoveRetryCount -DelayMs $MoveRetryDelayMs
-                if ($null -ne $dest) {
-                  [void](Add-MovedItemRecord -JarName $brMod.Name -GameSource $gamePath -GameQuarantine $dest -StorageSource $null -StorageQuarantine $null)
-                }
-              }
-
-              $phase = ("tier{0}_binary_linear_check_{1}" -f $tier, $multiCulpritIteration)
-              $linearResult = Invoke-LayeringLaunchAndCheck -PhasePrefix ("tier{0}_binary_linear_{1}" -f $tier, $multiCulpritIteration)
-
-              if ($linearResult.Type -eq "Success" -or $linearResult.Type -eq "UserExit") {
-                # * Removing this mod fixed it — it's the (last) culprit.
-                Write-Host ("  Binary isolation culprit: {0}" -f $brMod.Name) -ForegroundColor Green
-                Move-CulpritToLegacy -JarName $brMod.Name -EvidenceKey $crashEvidenceKey
-                $binaryResolved = $true
-                break
-              } else {
-                # * Still crashes — this mod is one of multiple culprits.
-                # * Keep it quarantined and search for more.
-                Write-Host ("  Multi-culprit: {0} (crash persists; searching for more)" -f $brMod.Name) -ForegroundColor Yellow
-                Move-CulpritToLegacy -JarName $brMod.Name -EvidenceKey $crashEvidenceKey
-                # * Track this mod as quarantined so it stays pinned in the next iteration.
-                $movedJarNameSet[$brMod.Name] = $true
-                $batchForBinary = @($batchForBinary | Where-Object { $_.Name -ne $brMod.Name })
-
-                # * Update baseline crash signature for the next iteration.
-                # * The remaining crash may have a different root cause now.
-                if ($null -ne $linearResult.LogSnapshot) {
-                  $crashSignature = Get-ErrorSignature -Lines $linearResult.LogSnapshot.Lines `
-                    -MaxLines $ErrorSignatureLineLimit `
-                    -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-                  $crashEvidenceKey = Get-ErrorEvidenceKey -Lines $linearResult.LogSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
-                }
-                break
-              }
-            }
-
-            if ($binaryResolved) { break }
-          }
-
-          if ($abortLayering) {
-            if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
-              [void](Complete-Tier1BatchNarrowing `
-                  -ParkedJarNames $tier1NarrowingParkedJarNames `
-                  -RunConsistencyProbe $false)
-            }
-            break
-          }
-
-          # * Post-resolution: update remaining list and hash cache.
-          if ($binaryResolved -or $batchForBinary.Count -eq 0) {
-            # * Batch fully processed: culprit(s) quarantined, rest verified clean.
-            $cleanBatchNames = @($batch | ForEach-Object { $_.Name } | Where-Object {
-                -not $culpritJarNames.Contains($_)
-              })
-            if ($cleanBatchNames.Count -gt 0) {
-              Update-McccHashCachePassedJar -JarNames $cleanBatchNames -Minecraft $mcVersionForLegacy
-            }
-            $null = $remaining.RemoveRange(0, $actualBatchSize)
-          } else {
-            # * Could not fully resolve the batch. Remove found culprits from remaining.
-            $culpritNameSet = @{}
-            foreach ($cn in $culpritJarNames) { $culpritNameSet[$cn.ToLowerInvariant()] = $true }
-            $newRemaining = [System.Collections.Generic.List[object]]::new()
-            foreach ($m in $remaining) {
-              if (-not $culpritNameSet.ContainsKey($m.Name.ToLowerInvariant())) {
-                $newRemaining.Add($m)
-              }
-            }
-            $remaining = $newRemaining
-          }
-          $batchSize = 1
-          if ($tier -eq 1 -and $tier1NarrowingParkedJarNames.Count -gt 0) {
-            $needTier1Probe = ($binaryResolved -or $batchForBinary.Count -eq 0)
-            $tier1ProbeOk = Complete-Tier1BatchNarrowing `
-              -ParkedJarNames $tier1NarrowingParkedJarNames `
-              -RunConsistencyProbe $needTier1Probe `
-              -ProbePhasePrefix ("tier{0}_binary_probe_restored" -f $tier)
-            if (-not $tier1ProbeOk) {
-              $abortLayering = $true
-              $exitCode = 4
-              break
-            }
-          }
-          continue
-        }
-
-        # * Unexpected outcome — stop уровень.
-        Write-Host ("  Unexpected outcome: {0}. Stopping уровень." -f $layerResult.Type) -ForegroundColor Yellow
-        break
-      }
-
-      if ($abortLayering) { break }
-    }
-  }
+  . $layerBaselinePath
+  . $layerExecutionPath
 
 } catch [System.OperationCanceledException] {
   $hadError = $true
@@ -1869,125 +1378,7 @@ try {
   Write-Host ("Phase: {0}" -f $phase) -ForegroundColor Gray
   $exitCode = 1
 } finally {
-  if ($wasCtrlC) {
-    Write-Host "" -ForegroundColor Yellow
-    Write-Host "Layering interrupted by user (Ctrl+C). Restoring mods..." -ForegroundColor Yellow
-    Write-Host ("Phase at interruption: {0}" -f $phase) -ForegroundColor Gray
-  }
-  if (-not $DryRun) {
-    # * Ensure the game is closed before restore/exit.
-    [void](Stop-ConfiguredGameProcess -StartedAfter $layeringStartTime)
-    [void](Wait-ConfiguredGameExit -StartedAfter $layeringStartTime -WarningContext "Layering cleanup")
-  }
-  # * Restore all quarantined mods (except culprits).
-  if ($movedItems.Count -gt 0) {
-    if ($hadError -and $KeepMovedModsOnFailure) {
-      Write-Host "Keeping moved mods due to failure." -ForegroundColor Yellow
-    } else {
-      $excludeSet = @{}
-      if (-not $hadError) {
-        foreach ($name in $culpritJarNames) {
-          if (-not [string]::IsNullOrWhiteSpace($name)) { $excludeSet[$name] = $true }
-        }
-      }
-      $restoreCount = 0
-      foreach ($item in $movedItems) {
-        if ($excludeSet.Count -gt 0 -and $excludeSet.ContainsKey($item.JarName)) { continue }
-        if (-not [string]::IsNullOrWhiteSpace($item.GameQuarantine) -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-          $restoreGame = Restore-FromQuarantine -SourcePath $item.GameQuarantine -DestDir $GameModsDir -IsDryRun $false -AllowOverwrite ([bool]$ForceRestore)
-          if ($restoreGame) { $restoreCount++ }
-        }
-        if ($useStorage -and -not [string]::IsNullOrWhiteSpace($item.StorageQuarantine) -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
-          [void](Restore-FromQuarantine -SourcePath $item.StorageQuarantine -DestDir $StorageModsDir -IsDryRun $false -AllowOverwrite ([bool]$ForceRestore))
-        }
-      }
-      if ($restoreCount -gt 0) {
-        Write-Host ("Restored {0} mod(s) from quarantine." -f $restoreCount) -ForegroundColor Green
-      }
-    }
-  }
-
-  # * Move culprits to permanent legacy.
-  if (-not $hadError -and $culpritJarNames.Count -gt 0) {
-    $storageLegacyVersionDir = $null
-    if ($useStorage) {
-      $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-      $storageLegacyVersionDir = Join-Path -Path $storageLegacyRoot -ChildPath $mcVersionForLegacy
-      New-DirectoryIfMissing -DirPath $storageLegacyVersionDir
-    }
-
-    $keepGameLegacyEffective = [bool]$KeepCulpritInGameLegacy
-    if (-not $useStorage -and (-not $keepGameLegacyEffective)) {
-      Write-Host "Warning: storage is disabled; keeping culprit in game legacy." -ForegroundColor Yellow
-      $keepGameLegacyEffective = $true
-    }
-
-    $gameLegacyVersionDir = $null
-    if ($keepGameLegacyEffective) {
-      $gameLegacyRoot2 = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-      $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot2 -ChildPath $mcVersionForLegacy
-      New-DirectoryIfMissing -DirPath $gameLegacyVersionDir
-    }
-
-    foreach ($culpritName in $culpritJarNames) {
-      if ([string]::IsNullOrWhiteSpace($culpritName)) { continue }
-
-      $culpritStorageLegacyPath = $null
-      $culpritGameLegacyPath = $null
-
-      # * Move quarantined copy to storage legacy.
-      if ($useStorage) {
-        foreach ($item in $movedItems) {
-          if ($item.JarName -ne $culpritName) { continue }
-          if ($null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
-            $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
-            Move-Item -LiteralPath $item.StorageQuarantine -Destination $destPath -Force -ErrorAction Stop
-            Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
-            # * Append to persistent legacy.log.
-            $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-            Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
-            $culpritStorageLegacyPath = $destPath
-            break
-          }
-        }
-      }
-
-      # * Move quarantined copy to game legacy (or remove game copy).
-      if ($keepGameLegacyEffective) {
-        foreach ($item in $movedItems) {
-          if ($item.JarName -ne $culpritName) { continue }
-          if ($null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-            $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $culpritName
-            Move-Item -LiteralPath $item.GameQuarantine -Destination $destPath -Force -ErrorAction Stop
-            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
-            $culpritGameLegacyPath = $destPath
-            break
-          }
-        }
-      } else {
-        foreach ($item in $movedItems) {
-          if ($item.JarName -ne $culpritName) { continue }
-          if ($null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-            Remove-Item -LiteralPath $item.GameQuarantine -Force -ErrorAction Stop
-            break
-          }
-        }
-      }
-
-      $evKey = if ($culpritEvidenceKeys.ContainsKey($culpritName)) { $culpritEvidenceKeys[$culpritName] } else { "" }
-      $culpritMoves.Add([pscustomobject]@{
-          JarName = $culpritName
-          GameModsDir = $GameModsDir
-          StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
-          StorageLegacyPath = $culpritStorageLegacyPath
-          GameLegacyPath = $culpritGameLegacyPath
-          Minecraft = $mcVersionForLegacy
-          KeepCulpritInGameLegacy = [bool]$keepGameLegacyEffective
-          CrashEvidenceKey = $evKey
-          Stage = "layering"
-        })
-    }
-  }
+  . $layerFinalizePath
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2011,19 +1402,21 @@ if ($culpritJarNames.Count -gt 0) {
 }
 
 if ($EmitResultObject) {
-  Write-Output ([pscustomobject]@{
-      Type = "LayeringResult"
-      RunId = $runId
-      GameModsDir = $GameModsDir
-      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
-      Minecraft = $mcVersionForLegacy
-      HashCacheEnabled = [bool]$script:mcccCacheEnabled
-      HashCachePath = $script:mcccCachePath
-      HashCacheSkippedJarNames = @($script:mcccKnownGoodJarNameSet.Keys | Sort-Object)
-      CulpritJarNames = @($culpritJarNames | Sort-Object -Unique)
-      CulpritMoves = @($culpritMoves.ToArray())
-      ExitCode = $exitCode
-    })
+  $stageResultParams = @{
+    Stage = "Layering"
+    Type = "LayeringResult"
+    RunId = $runId
+    GameModsDir = $GameModsDir
+    StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+    Minecraft = $mcVersionForLegacy
+    ExitCode = $exitCode
+    CulpritJarNames = @($culpritJarNames | Sort-Object -Unique)
+    CulpritMoves = @($culpritMoves.ToArray())
+    HashCacheEnabled = [bool]$script:mcccCacheEnabled
+    HashCachePath = $script:mcccCachePath
+    HashCacheSkippedJarNames = @($script:mcccKnownGoodJarNameSet.Keys | Sort-Object)
+  }
+  Write-Output (New-StageResult @stageResultParams)
 }
 
 exit $exitCode

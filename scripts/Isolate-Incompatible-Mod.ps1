@@ -564,26 +564,52 @@ if (-not (Test-Path -LiteralPath $sharedIsolationHashCachePath)) {
 }
 . $sharedIsolationHashCachePath
 
-$projectConfig = Import-ProjectConfig -StartDir $PSScriptRoot
-if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
-  Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
+$sharedLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
+if (-not (Test-Path -LiteralPath $sharedLegacyPath)) {
+  throw ("Shared legacy helpers not found: {0}" -f $sharedLegacyPath)
 }
-$configIni = $projectConfig.Ini
+. $sharedLegacyPath
 
-$defaultGameModsDir = Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods'
-if (-not $PSBoundParameters.ContainsKey("GameModsDir")) {
-  $cfgGameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default ""
-  $GameModsDir = $(if (-not [string]::IsNullOrWhiteSpace($cfgGameModsDir)) { $cfgGameModsDir } else { $defaultGameModsDir })
+$sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
+if (-not (Test-Path -LiteralPath $sharedStageResultPath)) {
+  throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath)
 }
-if (-not $PSBoundParameters.ContainsKey("StorageModsDir")) {
-  $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
+. $sharedStageResultPath
+
+$sharedIsolationDecisionsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Decisions.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationDecisionsPath)) {
+  throw ("Shared isolation decision helpers not found: {0}" -f $sharedIsolationDecisionsPath)
 }
-if (-not $PSBoundParameters.ContainsKey("LogPath")) {
-  $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
+. $sharedIsolationDecisionsPath
+
+$isolateBaselinePath = Join-Path -Path $PSScriptRoot -ChildPath "Isolate-Incompatible-Mod.Baseline.ps1"
+if (-not (Test-Path -LiteralPath $isolateBaselinePath)) {
+  throw ("Isolation baseline script not found: {0}" -f $isolateBaselinePath)
 }
-if (-not $PSBoundParameters.ContainsKey("LauncherExePath")) {
-  $LauncherExePath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LauncherExePath" -Default ""
+
+$isolateStrategyPath = Join-Path -Path $PSScriptRoot -ChildPath "Isolate-Incompatible-Mod.Strategy.ps1"
+if (-not (Test-Path -LiteralPath $isolateStrategyPath)) {
+  throw ("Isolation strategy script not found: {0}" -f $isolateStrategyPath)
 }
+
+$isolateCulpritFinalizePath = Join-Path -Path $PSScriptRoot -ChildPath "Isolate-Incompatible-Mod.CulpritFinalize.ps1"
+if (-not (Test-Path -LiteralPath $isolateCulpritFinalizePath)) {
+  throw ("Isolation culprit finalize script not found: {0}" -f $isolateCulpritFinalizePath)
+}
+
+$runtimeConfig = Initialize-McccRuntimeConfig `
+  -StartDir $PSScriptRoot `
+  -BoundParameters $PSBoundParameters `
+  -GameModsDir $GameModsDir `
+  -StorageModsDir $StorageModsDir `
+  -LogPath $LogPath `
+  -LauncherExePath $LauncherExePath `
+  -AlwaysDefaultGameModsDir $false `
+  -DefaultStorageToGame $false
+$GameModsDir = $runtimeConfig.Paths.GameModsDir
+$StorageModsDir = $runtimeConfig.Paths.StorageModsDir
+$LogPath = $runtimeConfig.Paths.LogPath
+$LauncherExePath = $runtimeConfig.Paths.LauncherExePath
 
 $effectiveIsolationStrategy = if ($UseLinearIsolation) { "Linear" } else { "Exponential" }
 if (-not $UseLinearIsolation -and $UseDependencyAwareOrdering) {
@@ -887,209 +913,8 @@ $isolationStartTime = Get-Date
 
 
 try {
-  if (-not $SkipBaselineRun) {
-    Write-Host "Baseline attempt starting." -ForegroundColor Cyan
-    $baselineAttemptStart = Get-Date
-    $phase = "baseline_invoke_launch"
-    $baselineOutcomeObj = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds @()
-
-    $baselineOutcome = $baselineOutcomeObj.Type
-    Write-Host ("Baseline outcome: {0}" -f $baselineOutcome) -ForegroundColor $(if ($baselineOutcome -eq "Timeout") { "Green" } else { "Yellow" })
-    if ($baselineOutcome -ne "Timeout") {
-      if ($null -ne $baselineOutcomeObj.Window) {
-        $phase = "baseline_close_outcome_window"
-        $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $baselineOutcomeObj `
-          -DelaySeconds $CrashCloseDelaySeconds `
-          -OffsetX $CrashCloseClickOffsetX `
-          -OffsetY $CrashCloseClickOffsetY `
-          -CloseExtraFabricDialogs $false
-      }
-      $phase = "baseline_wait_game_exit"
-      [void](Wait-ConfiguredGameExit -StartedAfter $baselineAttemptStart -WarningContext "File moves")
-    } else {
-      $baselineSucceeded = $true
-    }
-  }
-
-  if (-not $baselineSucceeded) {
-    Start-Sleep -Seconds $LogPostRunDelaySeconds
-    $phase = "baseline_read_logs"
-    $baselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $baselineAttemptStart
-
-    if (Test-DependencyDialogBlock -Context "baseline" -Lines $baselineSnapshot.Lines) {
-      $stopReason = "dependency_dialog_baseline"
-      $skipIsolation = $true
-    }
-
-    $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $baselineSnapshot.Lines
-
-    $baselineSignature = Get-ErrorSignature -Lines $baselineSnapshot.Lines `
-      -MaxLines $ErrorSignatureLineLimit `
-      -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-    $baselineEvidenceKey = Get-ErrorEvidenceKey -Lines $baselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
-    $activeBaselineSignature = $baselineSignature
-    $script:activeBaselineEvidenceKey = $baselineEvidenceKey
-
-    if ([string]::IsNullOrWhiteSpace($baselineSignature)) {
-      Write-Host "Baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
-    } else {
-      Write-Verbose ("Baseline signature: {0}" -f $baselineSignature)
-    }
-
-    $pinnedJarNameSet = @{}
-
-    if (-not $skipIsolation -and $PreIsolateJarNames -and $PreIsolateJarNames.Count -gt 0) {
-      $canFastForward = $true
-      if (-not [string]::IsNullOrWhiteSpace($PreIsolateBaselineEvidenceKey) -and -not [string]::IsNullOrWhiteSpace($baselineEvidenceKey)) {
-        if (-not [string]::Equals($PreIsolateBaselineEvidenceKey, $baselineEvidenceKey, [System.StringComparison]::OrdinalIgnoreCase)) {
-          Write-Host "Fast-forward disabled: baseline evidence changed." -ForegroundColor Gray
-          Write-Verbose ("Previous baseline evidence: {0}" -f $PreIsolateBaselineEvidenceKey)
-          Write-Verbose ("Current baseline evidence: {0}" -f $baselineEvidenceKey)
-          $canFastForward = $false
-        }
-      }
-      if (-not $canFastForward) {
-        $PreIsolateJarNames = @()
-      }
-
-      $preIsolateSet = @{}
-      foreach ($name in $PreIsolateJarNames) {
-        if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        $key = $name.ToLowerInvariant()
-        if (-not $preIsolateSet.ContainsKey($key)) {
-          $preIsolateSet[$key] = $name
-        }
-      }
-      $preList = @($preIsolateSet.Values)
-      if ($preList.Count -gt 0) {
-        $existingJarNames = New-Object System.Collections.Generic.List[string]
-        foreach ($jarName in $preList) {
-          if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
-          if ($movedJarNameSet.ContainsKey($jarName)) { continue }
-
-          $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
-          if (-not (Test-Path -LiteralPath $gamePath)) {
-            Write-Verbose ("Fast-forward skip missing mod: {0}" -f $jarName)
-            continue
-          }
-          $existingJarNames.Add($jarName)
-        }
-
-        if ($existingJarNames.Count -gt 0) {
-          Write-Host ("Fast-forward: quarantining {0} mod(s) from previous isolation run..." -f $existingJarNames.Count) -ForegroundColor Cyan
-          $phase = "fast_forward_move_to_quarantine"
-          Update-QuarantineState -DesiredJarNames @() -PinnedJarNames @($existingJarNames.ToArray())
-
-          foreach ($jarName in $existingJarNames) {
-            if (-not $movedJarNameSet.ContainsKey($jarName)) { continue }
-            $pinnedJarNameSet[$jarName.ToLowerInvariant()] = $jarName
-            $item = Get-MovedItemByJarName -JarName $jarName
-            if ($null -ne $item -and -not [string]::IsNullOrWhiteSpace([string]$item.GameQuarantine)) {
-              Write-Verbose ("Fast-forward moved: {0} -> {1}" -f $jarName, $item.GameQuarantine)
-            } else {
-              Write-Verbose ("Fast-forward moved: {0}" -f $jarName)
-            }
-          }
-        }
-      }
-    }
-
-    $pinnedJarNames = @()
-    if ($pinnedJarNameSet.Count -gt 0) {
-      $pinnedJarNames = @($pinnedJarNameSet.Values)
-    }
-
-    if (-not $skipIsolation) {
-    if ($effectiveIsolationStrategy -eq "Hybrid") {
-      $hybridResult = Invoke-HybridIsolation -Mods $candidateMods `
-        -BaselineSignature $baselineSignature `
-        -BaselineEvidenceKey $baselineEvidenceKey
-      if ($hybridResult.Found) {
-        $culpritJarNames = @($hybridResult.CulpritJarNames)
-        $stopReason = $hybridResult.StopReason
-      }
-    } else {
-
-    $didExponential = $false
-    if ($effectiveIsolationStrategy -eq "Exponential") {
-      $exponentialCandidates = @($candidateMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
-      if ($exponentialCandidates.Count -gt 0) {
-        Write-Host ("Exponential isolation enabled. Candidates: {0}" -f $exponentialCandidates.Count) -ForegroundColor Gray
-      } else {
-        Write-Host "Exponential isolation enabled, but no candidates remain after pinned exclusions." -ForegroundColor Yellow
-      }
-      if ($exponentialCandidates.Count -gt 0) {
-        $exponentialResult = Invoke-ExponentialIsolation -Mods $exponentialCandidates `
-          -BaselineSignature $baselineSignature `
-          -BaselineEvidenceKey $baselineEvidenceKey `
-          -PinnedJarNames $pinnedJarNames
-        $didExponential = $true
-        $candidateMods = @($exponentialResult.Remaining)
-        Write-Host ("Exponential isolation completed. Switching to linear with {0} mod(s) ({1})." -f $candidateMods.Count, $exponentialResult.Reason) -ForegroundColor Gray
-      }
-    }
-
-    if ($didExponential -and (-not $baselineSucceeded) -and $candidateMods -and $candidateMods.Count -gt 0) {
-      # * Exponential/binary probing can quick-isolate additional mods (dependencies/requirers),
-      # * which can change the observed error signature. Refresh baseline before the linear phase
-      # * to avoid falsely blaming a stable mod as "error_changed" relative to the original baseline.
-      Write-Host "Refreshing baseline signature for linear phase." -ForegroundColor Gray
-
-      $linearBaselineAttemptStart = Get-Date
-      $phase = "linear_phase_baseline_invoke_launch"
-      $linearBaselineOutcomeObj = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds @()
-
-      $linearBaselineOutcome = $linearBaselineOutcomeObj.Type
-      Write-Host ("Linear phase baseline outcome: {0}" -f $linearBaselineOutcome) -ForegroundColor $(if ($linearBaselineOutcome -eq "Timeout") { "Green" } else { "Yellow" })
-
-      if ($linearBaselineOutcome -ne "Timeout") {
-        if ($null -ne $linearBaselineOutcomeObj.Window) {
-          $phase = "linear_phase_baseline_close_outcome_window"
-          $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $linearBaselineOutcomeObj `
-            -DelaySeconds $CrashCloseDelaySeconds `
-            -OffsetX $CrashCloseClickOffsetX `
-            -OffsetY $CrashCloseClickOffsetY `
-            -CloseExtraFabricDialogs $false
-        }
-        $phase = "linear_phase_baseline_wait_game_exit"
-        [void](Wait-ConfiguredGameExit -StartedAfter $linearBaselineAttemptStart)
-      } else {
-        # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
-        # ! Stop early to prevent moving a random mod to Legacy.
-        Write-Host "Warning: baseline issue not reproduced in linear phase. Stopping isolation to avoid false culprit selection." -ForegroundColor Yellow
-        $candidateMods = @()
-      }
-
-      Wait-ConfiguredLauncherInteractive
-
-      if ($candidateMods -and $candidateMods.Count -gt 0 -and $linearBaselineOutcome -ne "Timeout") {
-        Start-Sleep -Seconds $LogPostRunDelaySeconds
-        $phase = "linear_phase_baseline_read_logs"
-        $linearBaselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $linearBaselineAttemptStart
-        if (Test-DependencyDialogBlock -Context "linear phase baseline" -Lines $linearBaselineSnapshot.Lines) {
-          $stopReason = "dependency_dialog_linear_baseline"
-          $candidateMods = @()
-        }
-        $activeBaselineSignature = Get-ErrorSignature -Lines $linearBaselineSnapshot.Lines `
-          -MaxLines $ErrorSignatureLineLimit `
-          -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-        $script:activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $linearBaselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
-        if ([string]::IsNullOrWhiteSpace($activeBaselineSignature)) {
-          Write-Host "Linear phase baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
-        } else {
-          Write-Verbose ("Linear phase baseline signature: {0}" -f $activeBaselineSignature)
-        }
-      }
-    }
-
-    $linearResult = Invoke-LinearIsolation -Mods $candidateMods
-    if ($linearResult.Found) {
-      $culpritJarNames = @($linearResult.CulpritJarNames)
-      $stopReason = $linearResult.StopReason
-    }
-  }
-  }
-  }
+  . $isolateBaselinePath
+  . $isolateStrategyPath
 } catch [System.OperationCanceledException] {
   $hadError = $true
   $cancelMessage = [string]$_.Exception.Message
@@ -1176,141 +1001,7 @@ try {
     }
   }
 
-  if (-not $DryRun -and (-not $hadError) -and $culpritJarNames -and $culpritJarNames.Count -gt 0) {
-    # * Prefer moving culprits into Storage legacy (source of truth).
-    # * Keep a game-legacy copy only when explicitly requested (or when storage is unavailable).
-    $storageLegacyVersionDir = $null
-    if ($useStorage) {
-      $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-      $storageLegacyVersionDir = Join-Path -Path $storageLegacyRoot -ChildPath $mcVersionForLegacy
-      New-DirectoryIfMissing -DirPath $storageLegacyVersionDir
-    }
-
-    $keepGameLegacyEffective = [bool]$KeepCulpritInGameLegacy
-    if (-not $useStorage -and (-not $keepGameLegacyEffective)) {
-      Write-Host "Warning: storage is disabled/unavailable; keeping culprit in game legacy to avoid data loss." -ForegroundColor Yellow
-      $keepGameLegacyEffective = $true
-    }
-
-    $gameLegacyVersionDir = $null
-    if ($keepGameLegacyEffective) {
-      $gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-      $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot -ChildPath $mcVersionForLegacy
-      New-DirectoryIfMissing -DirPath $gameLegacyVersionDir
-    }
-
-    foreach ($culpritName in $culpritJarNames) {
-      if ([string]::IsNullOrWhiteSpace($culpritName)) { continue }
-
-      $movedStorageLegacy = $false
-      $storageOk = $false
-      $culpritStorageLegacyPath = $null
-      $culpritGameLegacyPath = $null
-
-      # * Move to storage legacy first when available (prefer the quarantined storage copy).
-      foreach ($item in $movedItems) {
-        if ($item.JarName -ne $culpritName) { continue }
-
-        if ($useStorage -and (-not $movedStorageLegacy) -and $null -ne $item.StorageQuarantine -and (Test-Path -LiteralPath $item.StorageQuarantine)) {
-          $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
-          Move-Item -LiteralPath $item.StorageQuarantine -Destination $destPath -Force -ErrorAction Stop
-          Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
-          # * Append to persistent legacy.log.
-          $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-          Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
-          $culpritStorageLegacyPath = $destPath
-          $movedStorageLegacy = $true
-        }
-      }
-
-      if ($useStorage -and (-not $movedStorageLegacy)) {
-        $storagePath = Join-Path -Path $StorageModsDir -ChildPath $culpritName
-        if (Test-Path -LiteralPath $storagePath) {
-          $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $culpritName
-          Move-Item -LiteralPath $storagePath -Destination $destPath -Force -ErrorAction Stop
-          Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
-          # * Append to persistent legacy.log.
-          $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-          Add-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath "legacy.log") -Value $legacyLogEntry -ErrorAction SilentlyContinue
-          $culpritStorageLegacyPath = $destPath
-          $movedStorageLegacy = $true
-        } else {
-          Write-Host ("Warning: culprit jar not found in storage for legacy move: {0}" -f $culpritName) -ForegroundColor Yellow
-        }
-      }
-
-      $storageOk = (-not $useStorage) -or $movedStorageLegacy
-
-      # * Handle game side.
-      if ($keepGameLegacyEffective) {
-        $movedGameLegacy = $false
-        foreach ($item in $movedItems) {
-          if ($item.JarName -ne $culpritName) { continue }
-          if (-not $movedGameLegacy -and $null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-            $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $culpritName
-            Move-Item -LiteralPath $item.GameQuarantine -Destination $destPath -Force -ErrorAction Stop
-            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
-            $culpritGameLegacyPath = $destPath
-            $movedGameLegacy = $true
-          }
-        }
-        if (-not $movedGameLegacy) {
-          $gamePath = Join-Path -Path $GameModsDir -ChildPath $culpritName
-          if (Test-Path -LiteralPath $gamePath) {
-            $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $culpritName
-            Move-Item -LiteralPath $gamePath -Destination $destPath -Force -ErrorAction Stop
-            Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
-            $culpritGameLegacyPath = $destPath
-            $movedGameLegacy = $true
-          }
-        }
-        if (-not $movedGameLegacy -and (-not $storageOk)) {
-          Write-Host ("Warning: culprit jar was not moved to any legacy location: {0}" -f $culpritName) -ForegroundColor Yellow
-        }
-      } else {
-        # * Do not keep game legacy copy unless requested. Remove only after storage copy is secured.
-        if (-not $storageOk) {
-          Write-Host ("Warning: storage legacy move did not happen; keeping culprit in quarantine: {0}" -f $culpritName) -ForegroundColor Yellow
-          continue
-        }
-
-        $removedGameSide = $false
-        foreach ($item in $movedItems) {
-          if ($item.JarName -ne $culpritName) { continue }
-          if ($null -ne $item.GameQuarantine -and (Test-Path -LiteralPath $item.GameQuarantine)) {
-            Remove-Item -LiteralPath $item.GameQuarantine -Force -ErrorAction Stop
-            Write-Verbose ("Removed culprit from game quarantine: {0}" -f $culpritName)
-            $removedGameSide = $true
-            break
-          }
-        }
-        if (-not $removedGameSide) {
-          $gamePath = Join-Path -Path $GameModsDir -ChildPath $culpritName
-          if (Test-Path -LiteralPath $gamePath) {
-            Remove-Item -LiteralPath $gamePath -Force -ErrorAction Stop
-            Write-Verbose ("Removed culprit from game mods: {0}" -f $culpritName)
-            $removedGameSide = $true
-          }
-        }
-        if (-not $removedGameSide) {
-          Write-Verbose ("Culprit not present on game side (already removed): {0}" -f $culpritName)
-        }
-      }
-
-      $evKey = if ($script:activeBaselineEvidenceKey) { $script:activeBaselineEvidenceKey } else { "" }
-      $culpritMoves.Add([pscustomobject]@{
-          JarName = $culpritName
-          GameModsDir = $GameModsDir
-          StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
-          StorageLegacyPath = $culpritStorageLegacyPath
-          GameLegacyPath = $culpritGameLegacyPath
-          Minecraft = $mcVersionForLegacy
-          KeepCulpritInGameLegacy = [bool]$keepGameLegacyEffective
-          CrashEvidenceKey = $evKey
-          Stage = "isolation"
-        })
-    }
-  }
+  . $isolateCulpritFinalizePath
 }
 
 if ($script:blockedByDependency) {
@@ -1359,25 +1050,29 @@ if ($EmitResultObject) {
     $fastForward.Add($name)
   }
 
-  Write-Output ([pscustomobject]@{
-      Type = "IsolationResult"
-      RunId = $runId
-      GameModsDir = $GameModsDir
-      StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
-      Minecraft = $mcVersionForLegacy
-      HashCacheEnabled = [bool]$script:mcccCacheEnabled
-      HashCachePath = $script:mcccCachePath
-      HashCacheSkippedJarNames = @($script:mcccKnownGoodJarNameSet.Keys | Sort-Object)
-      BaselineOutcome = $baselineOutcome
-      BaselineSignature = $baselineSignature
-      BaselineEvidenceKey = $baselineEvidenceKey
-      StopReason = $stopReason
-      CulpritJarNames = @($culpritJarNames | Sort-Object -Unique)
-      CulpritMoves = @($culpritMoves.ToArray())
+  $stageResultParams = @{
+    Stage = "Isolation"
+    Type = "IsolationResult"
+    RunId = $runId
+    GameModsDir = $GameModsDir
+    StorageModsDir = if ($useStorage) { $StorageModsDir } else { "" }
+    Minecraft = $mcVersionForLegacy
+    ExitCode = $exitCode
+    CulpritJarNames = @($culpritJarNames | Sort-Object -Unique)
+    CulpritMoves = @($culpritMoves.ToArray())
+    HashCacheEnabled = [bool]$script:mcccCacheEnabled
+    HashCachePath = $script:mcccCachePath
+    HashCacheSkippedJarNames = @($script:mcccKnownGoodJarNameSet.Keys | Sort-Object)
+    BaselineOutcome = $baselineOutcome
+    BaselineSignature = $baselineSignature
+    BaselineEvidenceKey = $baselineEvidenceKey
+    StopReason = $stopReason
+    ExtraFields = @{
       FastForwardJarNames = @($fastForward.ToArray())
-      PreIsolateJarNames = @($PreIsolateJarNames)
-      ExitCode = $exitCode
-    })
+      PreIsolateJarNames  = @($PreIsolateJarNames)
+    }
+  }
+  Write-Output (New-StageResult @stageResultParams)
 }
 
 exit $exitCode

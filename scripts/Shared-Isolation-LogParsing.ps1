@@ -6,15 +6,50 @@ function Get-ConfiguredLogSnapshot {
     [Parameter(Mandatory = $false)]
     [datetime]$SinceTimestamp = [datetime]::MinValue,
     [Parameter(Mandatory = $false)]
-    [int]$SinceTimestampSkewSeconds = 120
+    [int]$SinceTimestampSkewSeconds = 120,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$Context = $null
   )
 
+  $gameModsDir = $GameModsDir
+  $skipGameLogs = [bool]$SkipGameLogs
+  $logMaxAgeMinutes = $LogMaxAgeMinutes
+  $logReadRetryCount = $LogReadRetryCount
+  $logReadRetryDelayMs = $LogReadRetryDelayMs
+
+  if ($null -ne $Context) {
+    if (-not $PSBoundParameters.ContainsKey("PrimaryLogPath") -and $null -ne $Context.Paths) {
+      $PrimaryLogPath = [string]$Context.Paths.LogPath
+    }
+    if ($null -ne $Context.Paths -and -not [string]::IsNullOrWhiteSpace([string]$Context.Paths.GameModsDir)) {
+      $gameModsDir = [string]$Context.Paths.GameModsDir
+    }
+    if ($null -ne $Context.Log) {
+      if ($Context.Log.PSObject.Properties.Name -contains "SkipGameLogs") {
+        $skipGameLogs = [bool]$Context.Log.SkipGameLogs
+      }
+      if ($Context.Log.PSObject.Properties.Name -contains "LogMaxAgeMinutes") {
+        $logMaxAgeMinutes = [int]$Context.Log.LogMaxAgeMinutes
+      }
+      if ($Context.Log.PSObject.Properties.Name -contains "LogReadRetryCount") {
+        $logReadRetryCount = [int]$Context.Log.LogReadRetryCount
+      }
+      if ($Context.Log.PSObject.Properties.Name -contains "LogReadRetryDelayMs") {
+        $logReadRetryDelayMs = [int]$Context.Log.LogReadRetryDelayMs
+      }
+      if (-not $PSBoundParameters.ContainsKey("SinceTimestampSkewSeconds") -and $Context.Log.PSObject.Properties.Name -contains "LogSinceSkewSeconds") {
+        $SinceTimestampSkewSeconds = [int]$Context.Log.LogSinceSkewSeconds
+      }
+    }
+  }
+
   return Get-LogSnapshot -PrimaryLogPath $PrimaryLogPath `
-    -GameModsDir $GameModsDir `
-    -SkipGameLogs ([bool]$SkipGameLogs) `
-    -LogMaxAgeMinutes $LogMaxAgeMinutes `
-    -LogReadRetryCount $LogReadRetryCount `
-    -LogReadRetryDelayMs $LogReadRetryDelayMs `
+    -GameModsDir $gameModsDir `
+    -SkipGameLogs $skipGameLogs `
+    -LogMaxAgeMinutes $logMaxAgeMinutes `
+    -LogReadRetryCount $logReadRetryCount `
+    -LogReadRetryDelayMs $logReadRetryDelayMs `
     -SinceTimestamp $SinceTimestamp `
     -SinceTimestampSkewSeconds $SinceTimestampSkewSeconds
 }
@@ -88,15 +123,12 @@ function Get-LogSnapshot {
   }
 }
 
-function Get-IncompatibleModIdsFromLog {
+function Get-IncompatibleModPatternSet {
   param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Lines,
     [Parameter(Mandatory = $true)]
     [bool]$IncludeWarnMixins
   )
 
-  $ids = @{}
   $fromModSeverityRegex = if ($IncludeWarnMixins) { "(ERROR|WARN)" } else { "ERROR" }
   $mixinApplySeverityRegex = "(ERROR|WARN)"
   $fromModPattern = "^\[.*?\]\s+\[.*?\/" + $fromModSeverityRegex + "\]:\s+.*?\bfrom mod\s+(?<id>[a-z0-9_\-\.]+)\b"
@@ -110,59 +142,84 @@ function Get-IncompatibleModIdsFromLog {
   $modNamedListPattern = '^\s*-\s+Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)\b(?<detail>.*)$'
   $modBareErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\b(?<detail>.*)$'
 
+  return [pscustomobject]@{
+    FromModPattern = $fromModPattern
+    MixinApplyPattern = $mixinApplyPattern
+    CrashReportModPattern = $crashReportModPattern
+    CrashProvidedByPattern = $crashProvidedByPattern
+    RequiresPattern1 = $requiresPattern1
+    RequiresPattern2 = $requiresPattern2
+    IncompatibleDetailPattern = $incompatibleDetailPattern
+    ModNamedErrorPattern = $modNamedErrorPattern
+    ModNamedListPattern = $modNamedListPattern
+    ModBareErrorPattern = $modBareErrorPattern
+  }
+}
+
+function Get-IncompatibleModIdsFromLog {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines,
+    [Parameter(Mandatory = $true)]
+    [bool]$IncludeWarnMixins
+  )
+
+  $ids = @{}
+  $patterns = Get-IncompatibleModPatternSet -IncludeWarnMixins $IncludeWarnMixins
+
   foreach ($line in $Lines) {
-    $m = [regex]::Match($line, $mixinApplyPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.MixinApplyPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $fromModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.FromModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $requiresPattern1, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.RequiresPattern1, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $requiresPattern2, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.RequiresPattern2, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $modNamedErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.ModNamedErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $modBareErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.ModBareErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $modNamedListPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.ModNamedListPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $detail = $m.Groups["detail"].Value
-      if ($detail -match $incompatibleDetailPattern) {
+      if ($detail -match $patterns.IncompatibleDetailPattern) {
         $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
         continue
       }
     }
 
-    $m = [regex]::Match($line, $crashReportModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.CrashReportModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
     }
 
-    $m = [regex]::Match($line, $crashProvidedByPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $m = [regex]::Match($line, $patterns.CrashProvidedByPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
       continue
@@ -172,6 +229,126 @@ function Get-IncompatibleModIdsFromLog {
   if ($ids.Count -eq 0) { return @() }
   # ! Use unary comma to prevent single-element unwrapping (avoids missing .Count on callers).
   return ,@($ids.Keys | Sort-Object)
+}
+
+function Get-IncompatibleModEvidenceFromLog {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines,
+    [Parameter(Mandatory = $true)]
+    [bool]$IncludeWarnMixins
+  )
+
+  # * Map: modId -> list of evidence strings.
+  $evidence = @{}
+  $patterns = Get-IncompatibleModPatternSet -IncludeWarnMixins $IncludeWarnMixins
+
+  foreach ($line in $Lines) {
+    $m = [regex]::Match($line, $patterns.MixinApplyPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.FromModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.RequiresPattern1, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.RequiresPattern2, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.ModNamedErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.ModBareErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.ModNamedListPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $detail = $m.Groups["detail"].Value
+      if ($detail -match $patterns.IncompatibleDetailPattern) {
+        $id = $m.Groups["id"].Value.ToLowerInvariant()
+        if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+        $evidence[$id].Add($line.Trim())
+        continue
+      }
+    }
+
+    $m = [regex]::Match($line, $patterns.CrashReportModPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+
+    $m = [regex]::Match($line, $patterns.CrashProvidedByPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($m.Success) {
+      $id = $m.Groups["id"].Value.ToLowerInvariant()
+      if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+      $evidence[$id].Add($line.Trim())
+      continue
+    }
+  }
+
+  return $evidence
+}
+
+function Get-NonFabricJarNamesFromLog {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines
+  )
+
+  $inSection = $false
+  $names = New-Object System.Collections.Generic.List[string]
+
+  foreach ($line in $Lines) {
+    if ($line -match "Found\s+\d+\s+non-fabric\s+mods") {
+      $inSection = $true
+      continue
+    }
+    if ($inSection) {
+      if ($line -match "^\s*-\s+(?<jar>.+?\.jar)\s*$") {
+        $names.Add($Matches["jar"])
+        continue
+      }
+      # * Section ends on first non-bullet line.
+      if ($line -notmatch "^\s*-\s+") {
+        break
+      }
+    }
+  }
+  return $names
 }
 
 function Get-FabricRequiringModId {
@@ -418,7 +595,10 @@ function Test-DependencyDialogBlock {
     [Parameter(Mandatory = $true)]
     [string]$Context,
     [Parameter(Mandatory = $true)]
-    [string[]]$Lines
+    [string[]]$Lines,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [pscustomobject]$StateContext = $null
   )
 
   if (-not [bool]$RespectDependencyDialogsInBaseline) { return $false }
@@ -434,6 +614,12 @@ function Test-DependencyDialogBlock {
   $script:blockedDependencyMissing = @($info.MissingDepIds)
   $script:blockedDependencyRequiring = @($info.RequiringModIds)
   $script:blockedDependencyContext = $Context
+  if ($null -ne $StateContext -and $null -ne $StateContext.State) {
+    $StateContext.State.BlockedByDependency = $true
+    $StateContext.State.BlockedDependencyMissing = @($info.MissingDepIds)
+    $StateContext.State.BlockedDependencyRequiring = @($info.RequiringModIds)
+    $StateContext.State.BlockedDependencyContext = $Context
+  }
   return $true
 }
 

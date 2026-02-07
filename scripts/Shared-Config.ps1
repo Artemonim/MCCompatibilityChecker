@@ -158,3 +158,143 @@ function Get-IniBool {
     default { return [bool]$Default }
   }
 }
+
+function Get-ProfileOverrides {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Ini,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$BoundParameters,
+    [Parameter(Mandatory = $false)]
+    [string]$ProfileName = "",
+    [Parameter(Mandatory = $true)]
+    [hashtable]$KeyTypeMap
+  )
+
+  $overrides = @{}
+  if ([string]::IsNullOrWhiteSpace($ProfileName)) { return $overrides }
+
+  $section = ("Profile:{0}" -f $ProfileName)
+  if (-not $Ini.ContainsKey($section)) { return $overrides }
+
+  foreach ($key in $KeyTypeMap.Keys) {
+    if ($BoundParameters.ContainsKey($key)) { continue }
+    $raw = Get-IniValue -Ini $Ini -Section $section -Key $key -Default $null
+    if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+    $type = [string]$KeyTypeMap[$key]
+    switch -Regex ($type) {
+      "^bool$" { $overrides[$key] = Get-IniBool -Ini $Ini -Section $section -Key $key -Default $false }
+      "^int$" { $overrides[$key] = [int]$raw }
+      "^string\[\]$" {
+        $split = @($raw -split "," | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $overrides[$key] = $split
+      }
+      default { $overrides[$key] = $raw }
+    }
+  }
+
+  return $overrides
+}
+
+function Initialize-McccRuntimeConfig {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$StartDir,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [hashtable]$BoundParameters = $null,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$GameModsDir = "",
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$StorageModsDir = "",
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$LogPath = "",
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$LauncherExePath = "",
+    [Parameter(Mandatory = $false)]
+    [bool]$DefaultStorageToGame = $false,
+    [Parameter(Mandatory = $false)]
+    [bool]$AlwaysDefaultGameModsDir = $false,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$TreatEmptyAsUnboundKeys = @()
+  )
+
+  if ($null -eq $BoundParameters) {
+    $BoundParameters = @{}
+  }
+
+  $emptyKeySet = @{}
+  foreach ($key in $TreatEmptyAsUnboundKeys) {
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    $emptyKeySet[$key] = $true
+  }
+
+  $projectConfig = Import-ProjectConfig -StartDir $StartDir
+  if ($projectConfig.LoadedPaths -and $projectConfig.LoadedPaths.Count -gt 0) {
+    Write-Verbose ("Config loaded: {0}" -f ($projectConfig.LoadedPaths -join ", "))
+  }
+  $configIni = $projectConfig.Ini
+
+  $defaultGameModsDir = Join-Path -Path ([Environment]::GetFolderPath('ApplicationData')) -ChildPath '.tlauncher\legacy\Minecraft\game\mods'
+  $gameModsBound = $BoundParameters.ContainsKey("GameModsDir")
+  if ($gameModsBound -and $emptyKeySet.ContainsKey("GameModsDir") -and [string]::IsNullOrWhiteSpace($GameModsDir)) {
+    $gameModsBound = $false
+  }
+  if (-not $gameModsBound) {
+    $cfgGameModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "GameModsDir" -Default ""
+    if (-not [string]::IsNullOrWhiteSpace($cfgGameModsDir)) {
+      $GameModsDir = $cfgGameModsDir
+    }
+  }
+  if (($AlwaysDefaultGameModsDir -or (-not $gameModsBound)) -and [string]::IsNullOrWhiteSpace($GameModsDir)) {
+    $GameModsDir = $defaultGameModsDir
+  }
+
+  $storageBound = $BoundParameters.ContainsKey("StorageModsDir")
+  if ($storageBound -and $emptyKeySet.ContainsKey("StorageModsDir") -and [string]::IsNullOrWhiteSpace($StorageModsDir)) {
+    $storageBound = $false
+  }
+  if (-not $storageBound) {
+    $StorageModsDir = Get-IniValue -Ini $configIni -Section "Paths" -Key "StorageModsDir" -Default ""
+  }
+  if ($DefaultStorageToGame -and [string]::IsNullOrWhiteSpace($StorageModsDir)) {
+    $StorageModsDir = $GameModsDir
+  }
+
+  $logBound = $BoundParameters.ContainsKey("LogPath")
+  if ($logBound -and $emptyKeySet.ContainsKey("LogPath") -and [string]::IsNullOrWhiteSpace($LogPath)) {
+    $logBound = $false
+  }
+  if (-not $logBound) {
+    $LogPath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LogPath" -Default ""
+  }
+
+  $launcherBound = $BoundParameters.ContainsKey("LauncherExePath")
+  if ($launcherBound -and $emptyKeySet.ContainsKey("LauncherExePath") -and [string]::IsNullOrWhiteSpace($LauncherExePath)) {
+    $launcherBound = $false
+  }
+  if (-not $launcherBound) {
+    $LauncherExePath = Get-IniValue -Ini $configIni -Section "Paths" -Key "LauncherExePath" -Default ""
+  }
+
+  $useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
+
+  return [pscustomobject]@{
+    ProjectConfig = $projectConfig
+    Ini = $configIni
+    Paths = [pscustomobject]@{
+      GameModsDir = $GameModsDir
+      StorageModsDir = $StorageModsDir
+      LogPath = $LogPath
+      LauncherExePath = $LauncherExePath
+      UseStorage = $useStorage
+      DefaultGameModsDir = $defaultGameModsDir
+    }
+  }
+}
