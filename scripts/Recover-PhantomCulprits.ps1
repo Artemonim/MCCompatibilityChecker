@@ -298,6 +298,7 @@ if ($KeepCulpritInGameLegacy) {
 $allRestoredJarNames = New-Object System.Collections.Generic.List[string]
 $allNewCulpritJarNames = New-Object System.Collections.Generic.List[string]
 $attempted = $false
+$script:lastOutcomeHandleId = 0
 
 foreach ($group in $qualifiedGroups) {
   $sourceModId = $group.SourceModId
@@ -399,8 +400,52 @@ foreach ($group in $qualifiedGroups) {
         if ($useDynamicSuccessConfirm) { $effectiveConfirmSeconds = $scaledLaunchSeconds }
       }
 
+      $ignoreHandles = @()
+      if ($script:lastOutcomeHandleId -ne 0) {
+        $ignoreHandles = @($script:lastOutcomeHandleId)
+      }
+
       $launchStart = Get-Date
-      $outcome = Invoke-ConfiguredLaunchAttempt
+      $outcome = Invoke-ConfiguredLaunchAttempt -IgnoreHandleIds $ignoreHandles
+
+      # * Race guard: Fabric dialog can appear right after the launcher outcome.
+      if ($outcome.Type -ne "FabricDialog") {
+        $fabricNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+        if ($null -ne $fabricNow) {
+          Write-Host ("  Detected Fabric dialog after outcome: {0}" -f $fabricNow.Title) -ForegroundColor Yellow
+          $outcome = [pscustomobject]@{
+            Type = "FabricDialog"
+            Window = $fabricNow
+          }
+        }
+      }
+
+      # * Race guard: crash dialog may appear shortly after ProcessExit/Timeout.
+      if ($outcome.Type -ne "FabricDialog" -and $outcome.Type -ne "CrashDialog") {
+        $crashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+        if ($null -ne $crashNow) {
+          Write-Host ("  Detected crash dialog after outcome: {0}" -f $crashNow.Title) -ForegroundColor Yellow
+          $outcome = [pscustomobject]@{
+            Type = "CrashDialog"
+            Window = $crashNow
+          }
+        }
+      }
+
+      if ($outcome.Type -eq "ProcessExit") {
+        [void](Wait-ConfiguredGameExit -StartedAfter $launchStart -WarningContext "Recovery process exit")
+        # * Give launcher/crash UI time to present after java exit.
+        Start-Sleep -Seconds 2
+        $crashAfterExit = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+        if ($null -ne $crashAfterExit) {
+          Write-Host ("  Detected crash dialog after ProcessExit: {0}" -f $crashAfterExit.Title) -ForegroundColor Yellow
+          $outcome = [pscustomobject]@{
+            Type = "CrashDialog"
+            Window = $crashAfterExit
+          }
+        }
+      }
+
       Write-Host ("  Outcome: {0}" -f $outcome.Type) -ForegroundColor Gray
 
       if ($outcome.Type -eq "Timeout") {
@@ -414,16 +459,24 @@ foreach ($group in $qualifiedGroups) {
         [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
       }
 
-      if ($outcome.Type -eq "CrashDialog" -and $null -ne $outcome.Window) {
-        Invoke-WindowClose -Handle $outcome.Window.Handle
-      }
-      if ($outcome.Type -eq "FabricDialog" -and $null -ne $outcome.Window) {
-        Invoke-WindowClose -Handle $outcome.Window.Handle
+      if (($outcome.Type -eq "CrashDialog" -or $outcome.Type -eq "FabricDialog") -and $null -ne $outcome.Window) {
+        $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
+          -DelaySeconds $CrashCloseDelaySeconds `
+          -OffsetX $CrashCloseClickOffsetX `
+          -OffsetY $CrashCloseClickOffsetY `
+          -CloseExtraFabricDialogs $true
       }
 
       Start-Sleep -Seconds 2
       $postCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-      if ($null -ne $postCrash) { Invoke-WindowClose -Handle $postCrash.Handle }
+      if ($null -ne $postCrash) {
+        $script:lastOutcomeHandleId = Close-OutcomeWindowWithExtraDialog `
+          -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $postCrash }) `
+          -DelaySeconds $CrashCloseDelaySeconds `
+          -OffsetX $CrashCloseClickOffsetX `
+          -OffsetY $CrashCloseClickOffsetY `
+          -CloseExtraFabricDialogs $true
+      }
     } catch {
       # ! Error during launch/verification — revert all changes and re-throw.
       Write-Host ("  Error during recovery verification: {0}. Rolling back." -f $_.Exception.Message) -ForegroundColor Red
