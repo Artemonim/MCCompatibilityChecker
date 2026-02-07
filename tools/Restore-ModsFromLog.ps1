@@ -1,6 +1,30 @@
 # * Restore-ModsFromLog.ps1
 # * Restores mods moved to legacy storage based on legacy.log entries.
 
+[CmdletBinding()]
+param(
+    # * Optional: restore only entries at or after this timestamp.
+    [Parameter(Mandatory = $false)]
+    [datetime]$SinceTimestamp = [datetime]::MinValue,
+
+    # * Optional: avoid terminating the caller; sets $LASTEXITCODE instead.
+    [Parameter(Mandatory = $false)]
+    [switch]$NoExit
+)
+
+function Complete-Restore {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode,
+        [Parameter(Mandatory = $false)]
+        [switch]$NoExit
+    )
+
+    $global:LASTEXITCODE = $ExitCode
+    if ($NoExit) { return }
+    exit $ExitCode
+}
+
 # * Load shared config
 $sharedConfigPath = Join-Path $PSScriptRoot "..\scripts\Shared-Config.ps1"
 if (Test-Path $sharedConfigPath) {
@@ -8,7 +32,8 @@ if (Test-Path $sharedConfigPath) {
 }
 else {
     Write-Error ("Shared config not found at: {0}" -f $sharedConfigPath)
-    exit 1
+    Complete-Restore -ExitCode 1 -NoExit:$NoExit
+    return
 }
 
 $config = Import-ProjectConfig -StartDir $PSScriptRoot
@@ -21,15 +46,53 @@ $target2 = Get-IniValue -Ini $ini -Section "Paths" -Key "GameModsDir" -Default "
 
 if (-not (Test-Path $logPath)) {
     Write-Error ("Log file not found at: {0}" -f $logPath)
-    exit 1
+    Complete-Restore -ExitCode 1 -NoExit:$NoExit
+    return
 }
 
-$logContent = Get-Content $logPath
-$culpritLines = $logContent | Where-Object { $_ -like "*Moved culprit to storage legacy: *" }
+$logContent = Get-Content -LiteralPath $logPath
+$timestampPattern = '^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s*$'
+$currentTimestamp = [datetime]::MinValue
+$culpritLines = New-Object System.Collections.Generic.List[string]
+$effectiveSinceTimestamp = $SinceTimestamp
+
+if ($SinceTimestamp -ne [datetime]::MinValue) {
+    $effectiveSinceTimestamp = [datetime]::ParseExact($SinceTimestamp.ToString("yyyy-MM-dd HH:mm:ss"), "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+if ($effectiveSinceTimestamp -ne [datetime]::MinValue) {
+    Write-Host ("Filtering legacy log entries after: {0}" -f $effectiveSinceTimestamp.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
+}
+
+foreach ($line in $logContent) {
+    if ($line -match $timestampPattern) {
+        try {
+            $currentTimestamp = [datetime]::ParseExact($line.Trim(), "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        catch {
+            $currentTimestamp = [datetime]::MinValue
+        }
+        continue
+    }
+
+    if ($line -like "*Moved culprit to storage legacy: *") {
+        if ($effectiveSinceTimestamp -ne [datetime]::MinValue) {
+            if ($currentTimestamp -eq [datetime]::MinValue) { continue }
+            if ($currentTimestamp -lt $effectiveSinceTimestamp) { continue }
+        }
+        $culpritLines.Add($line)
+    }
+}
 
 if ($culpritLines.Count -eq 0) {
-    Write-Host "No culprits found to restore in the log."
-    exit 0
+    if ($effectiveSinceTimestamp -ne [datetime]::MinValue) {
+        Write-Host ("No culprits found to restore in the log after {0}." -f $effectiveSinceTimestamp.ToString("yyyy-MM-dd HH:mm:ss"))
+    }
+    else {
+        Write-Host "No culprits found to restore in the log."
+    }
+    Complete-Restore -ExitCode 0 -NoExit:$NoExit
+    return
 }
 
 Write-Host ("Found {0} culprit(s) to restore." -f $culpritLines.Count)
@@ -39,9 +102,9 @@ foreach ($line in $culpritLines) {
     # * Line format: "Moved culprit to storage legacy: D:\...\file.jar"
     $parts = $line -split "Moved culprit to storage legacy: "
     if ($parts.Count -lt 2) { continue }
-    
+
     $sourcePath = $parts[1].Trim()
-    
+
     if (-not (Test-Path $sourcePath)) {
         Write-Warning ("Source file not found: {0}" -f $sourcePath)
         continue
@@ -74,3 +137,5 @@ foreach ($line in $culpritLines) {
 }
 
 Write-Host "Restore process completed."
+Complete-Restore -ExitCode 0 -NoExit:$NoExit
+return

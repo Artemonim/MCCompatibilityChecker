@@ -454,6 +454,62 @@ function Get-MixinErrorsFromLog {
   return ,$results
 }
 
+function Get-MixinApplyErrorsFromLog {
+  <#
+  .SYNOPSIS
+  Parses critical "Mixin apply for mod ... failed" errors from crash log lines.
+  Returns structured objects with source mod ID, target class, and mixin config.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines
+  )
+
+  $results = New-Object System.Collections.Generic.List[pscustomobject]
+  $patternWithTarget = 'Mixin apply for mod\s+(?<sourceModId>[a-z0-9_\-\.]+)\s+failed\s+(?<mixinRef>\S+)\s+from mod\s+(?<fromModId>[a-z0-9_\-\.]+)\s+->\s+(?<targetClass>\S+):'
+  $patternFallback = 'Mixin apply for mod\s+(?<sourceModId>[a-z0-9_\-\.]+)\s+failed\s+(?<mixinRef>\S+)'
+  $seen = @{}
+
+  foreach ($line in $Lines) {
+    $m = [regex]::Match($line, $patternWithTarget, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $m.Success) {
+      $m = [regex]::Match($line, $patternFallback, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    if (-not $m.Success) { continue }
+
+    $sourceModId = $m.Groups["sourceModId"].Value.ToLowerInvariant()
+    $mixinRef = [string]$m.Groups["mixinRef"].Value
+    $targetClass = ""
+    if ($m.Groups["targetClass"].Success) {
+      $targetClass = [string]$m.Groups["targetClass"].Value
+    }
+
+    $mixinJson = $mixinRef
+    $mixinClass = ""
+    $splitIndex = $mixinRef.IndexOf(":")
+    if ($splitIndex -ge 0) {
+      $mixinJson = $mixinRef.Substring(0, $splitIndex)
+      if ($splitIndex + 1 -lt $mixinRef.Length) {
+        $mixinClass = $mixinRef.Substring($splitIndex + 1)
+      }
+    }
+
+    $key = "{0}|{1}|{2}" -f $sourceModId, $targetClass, $mixinRef.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+
+    $results.Add([pscustomobject]@{
+        SourceModId = $sourceModId
+        TargetClass = $targetClass
+        MixinJson   = $mixinJson
+        MixinClass  = $mixinClass
+        ErrorLine   = $m.Value
+      })
+  }
+
+  return ,$results
+}
+
 function Resolve-ModIdFromClassName {
   <#
   .SYNOPSIS

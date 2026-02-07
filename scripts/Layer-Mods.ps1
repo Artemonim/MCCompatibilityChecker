@@ -237,10 +237,11 @@ param(
 
   # * Seconds to wait after Timeout outcome to confirm the launch is stable.
   [Parameter(Mandatory = $false)]
-  [int]$SuccessConfirmSeconds = 30,
+  [int]$SuccessConfirmSeconds = 20,
 
-  # * Enables extended stability confirmation (90s instead of default 30s).
+  # * Enables extended stability confirmation scaling (+0.3s per active mod).
   [Parameter(Mandatory = $false)]
+  [Alias("ThoroughStabilityCheck")]
   [switch]$LongLaunchTimeout,
 
   [Parameter(Mandatory = $false)]
@@ -314,7 +315,7 @@ param(
   [int]$LauncherWindowTimeoutSeconds = 60,
 
   [Parameter(Mandatory = $false)]
-  [int]$OutcomeTimeoutSeconds = 90,
+  [int]$OutcomeTimeoutSeconds = 20,
 
   [Parameter(Mandatory = $false)]
   [int]$PollIntervalSeconds = 2,
@@ -391,6 +392,40 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# * Launch wait scaling config.
+$launchWaitBaseSeconds = 20
+$launchWaitPerModSeconds = 0.1
+$launchWaitPerModSecondsLong = 0.3
+
+function Get-ActiveModCount {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModsDir
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
+  if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
+  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+  if ($null -eq $mods) { return 0 }
+  return @($mods).Count
+}
+
+function Get-ScaledLaunchWaitTime {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ActiveModCount,
+    [Parameter(Mandatory = $true)]
+    [double]$PerModSeconds,
+    [Parameter(Mandatory = $true)]
+    [int]$BaseSeconds
+  )
+
+  $rawSeconds = $BaseSeconds + ($ActiveModCount * $PerModSeconds)
+  $scaledSeconds = [int][Math]::Ceiling($rawSeconds)
+  if ($scaledSeconds -lt $BaseSeconds) { $scaledSeconds = $BaseSeconds }
+  return $scaledSeconds
+}
+
 if ($Help) {
   Get-Help -Full -Name $PSCommandPath
   return
@@ -463,15 +498,13 @@ if (-not $PSBoundParameters.ContainsKey("LauncherExePath")) {
 }
 
 if ($BinaryLinearThreshold -lt 1) { $BinaryLinearThreshold = 1 }
+$useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds")
+$useDynamicOutcomeTimeout = -not $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
 if ($SuccessConfirmSeconds -lt 10) { $SuccessConfirmSeconds = 10 }
-if ($LongLaunchTimeout -and (-not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds"))) {
-  $SuccessConfirmSeconds = 90
-}
-
 # * In layering mode, OutcomeTimeoutSeconds serves as the sole stability check window.
 # * Wait-ForOutcome already polls for crash/Fabric dialogs and process exits.
 # * Override to SuccessConfirmSeconds to avoid double-waiting.
-if (-not $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")) {
+if ($useDynamicOutcomeTimeout -and (-not $useDynamicSuccessConfirm)) {
   $OutcomeTimeoutSeconds = $SuccessConfirmSeconds
 }
 
@@ -863,6 +896,15 @@ function Invoke-LayeringLaunchAndCheck {
   $ignoreHandles = @()
   if ($script:lastOutcomeHandleId -ne 0) {
     $ignoreHandles = @($script:lastOutcomeHandleId)
+  }
+
+  if ($useDynamicOutcomeTimeout -or $useDynamicSuccessConfirm) {
+    $activeModCount = Get-ActiveModCount -ModsDir $GameModsDir
+    $perModSeconds = if ($LongLaunchTimeout) { $launchWaitPerModSecondsLong } else { $launchWaitPerModSeconds }
+    $scaledLaunchSeconds = Get-ScaledLaunchWaitTime -ActiveModCount $activeModCount `
+      -PerModSeconds $perModSeconds `
+      -BaseSeconds $launchWaitBaseSeconds
+    if ($useDynamicOutcomeTimeout) { $OutcomeTimeoutSeconds = $scaledLaunchSeconds }
   }
 
   $attemptStart = Get-Date
@@ -1598,6 +1640,16 @@ try {
     }
   }
 
+} catch [System.OperationCanceledException] {
+  $hadError = $true
+  $cancelMessage = [string]$_.Exception.Message
+  if ($cancelMessage -match "^MCCompatUserCancelKeepChanges:") {
+    $KeepMovedModsOnFailure = $true
+    Write-Host "Launch canceled by user. Keeping current layering state." -ForegroundColor Yellow
+  } else {
+    Write-Host "Launch canceled by user. Rolling back layering changes." -ForegroundColor Yellow
+  }
+  $exitCode = 130
 } catch [System.Management.Automation.PipelineStoppedException] {
   # * User pressed Ctrl+C. Restore all mods; skip error dump.
   # * Write-Host during PipelineStoppedException may not appear in the transcript.
@@ -1625,6 +1677,11 @@ try {
     Write-Host "" -ForegroundColor Yellow
     Write-Host "Layering interrupted by user (Ctrl+C). Restoring mods..." -ForegroundColor Yellow
     Write-Host ("Phase at interruption: {0}" -f $phase) -ForegroundColor Gray
+  }
+  if (-not $DryRun) {
+    # * Ensure the game is closed before restore/exit.
+    [void](Stop-ConfiguredGameProcess -StartedAfter $layeringStartTime)
+    [void](Wait-ConfiguredGameExit -StartedAfter $layeringStartTime -WarningContext "Layering cleanup")
   }
   # * Restore all quarantined mods (except culprits).
   if ($movedItems.Count -gt 0) {

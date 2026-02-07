@@ -550,6 +550,41 @@ function Wait-ForLauncherWindowInteractive {
   }
 }
 
+function Request-LauncherRecoveryDecision {
+  param(
+    [Parameter(Mandatory = $false)]
+    [int]$PlayAttempts = 0
+  )
+
+  $attemptLabel = if ($PlayAttempts -gt 0) {
+    ("Попыток запуска: {0}." -f $PlayAttempts)
+  } else {
+    "Попытка запуска не обнаружена."
+  }
+
+  $prompt = @(
+    "Невозможно запустить или обнаружить лаунчер. Попробуйте перезапустить лаунчер."
+    $attemptLabel
+    ""
+    "Да — продолжить попытки."
+    "Нет — отменить."
+    "Отмена — отменить с откатом изменений."
+  ) -join [Environment]::NewLine
+
+  $result = [System.Windows.Forms.MessageBox]::Show(
+    $prompt,
+    "Требуется действие пользователя",
+    [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+    [System.Windows.Forms.MessageBoxIcon]::Warning
+  )
+
+  switch ($result) {
+    ([System.Windows.Forms.DialogResult]::Yes) { return "continue" }
+    ([System.Windows.Forms.DialogResult]::No) { return "cancel_keep" }
+    default { return "cancel_rollback" }
+  }
+}
+
 function Invoke-LaunchAttempt {
   param(
     [Parameter(Mandatory = $true)]
@@ -602,11 +637,32 @@ function Invoke-LaunchAttempt {
       -OffsetY -1
   }
 
-  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherTitlePattern `
-    -ExePath $LauncherPath `
-    -ExeArguments $LauncherArgs `
-    -AppendAutoLaunch $AppendAutoLaunch `
-    -TimeoutSeconds $LauncherTimeoutSeconds
+  $launcherWindow = $null
+  try {
+    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherTitlePattern `
+      -ExePath $LauncherPath `
+      -ExeArguments $LauncherArgs `
+      -AppendAutoLaunch $AppendAutoLaunch `
+      -TimeoutSeconds $LauncherTimeoutSeconds
+  } catch {
+    $message = [string]$_.Exception.Message
+    if ($message -match "Launcher window not found") {
+      $launcherWindow = Wait-ForLauncherWindowInteractive -TitlePattern $LauncherTitlePattern `
+        -CrashPatterns $CrashPatterns `
+        -FabricPatterns $FabricPatterns `
+        -PollSeconds $PollSeconds
+    } else {
+      throw
+    }
+  }
+
+  if ($null -eq $launcherWindow) {
+    $launcherWindow = Wait-ForLauncherWindowInteractive -TitlePattern $LauncherTitlePattern `
+      -CrashPatterns $CrashPatterns `
+      -FabricPatterns $FabricPatterns `
+      -PollSeconds $PollSeconds
+  }
+
   if ($null -eq $launcherWindow) {
     throw "Launcher window not found."
   }
@@ -619,36 +675,57 @@ function Invoke-LaunchAttempt {
     $LaunchStartTimeoutSeconds = $OutcomeTimeoutSeconds
   }
 
-  for ($playAttempt = 1; $playAttempt -le $maxPlayAttempts; $playAttempt++) {
-    if ($playAttempt -gt 1) {
-      Write-Host ("Warning: no game launch detected. Retrying Play click ({0}/{1})..." -f $playAttempt, $maxPlayAttempts) -ForegroundColor Yellow
+  while ($true) {
+    for ($playAttempt = 1; $playAttempt -le $maxPlayAttempts; $playAttempt++) {
+      if ($playAttempt -gt 1) {
+        Write-Host ("Warning: no game launch detected. Retrying Play click ({0}/{1})..." -f $playAttempt, $maxPlayAttempts) -ForegroundColor Yellow
+      }
+
+      $launchStart = Get-Date
+      Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
+        -ButtonNames $ButtonNames `
+        -ClickOffsetX $ClickOffsetX `
+        -ClickOffsetY $ClickOffsetY `
+        -EnableEnterFallback $EnableEnterFallback `
+        -AllowBroadSearch $AllowBroadSearch `
+        -PreClickDelayMs $PlayClickDelayMs
+
+      $outcome = Wait-ForOutcome -CrashPatterns $CrashPatterns `
+        -FabricPatterns $FabricPatterns `
+        -TimeoutSeconds $OutcomeTimeoutSeconds `
+        -PollSeconds $PollSeconds `
+        -LaunchStart $launchStart `
+        -GameProcessNames $GameProcessNames `
+        -LauncherHandleId $launcherHandleId `
+        -LaunchStartTimeoutSeconds $LaunchStartTimeoutSeconds `
+        -RequireGameStartForTimeout ([bool]$RequireGameStartForTimeout) `
+        -IgnoreHandleIds $IgnoreHandleIds
+
+      if ($outcome.Type -ne "NoLaunch") {
+        return $outcome
+      }
     }
 
-    $launchStart = Get-Date
-    Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
-      -ButtonNames $ButtonNames `
-      -ClickOffsetX $ClickOffsetX `
-      -ClickOffsetY $ClickOffsetY `
-      -EnableEnterFallback $EnableEnterFallback `
-      -AllowBroadSearch $AllowBroadSearch `
-      -PreClickDelayMs $PlayClickDelayMs
-
-    $outcome = Wait-ForOutcome -CrashPatterns $CrashPatterns `
-      -FabricPatterns $FabricPatterns `
-      -TimeoutSeconds $OutcomeTimeoutSeconds `
-      -PollSeconds $PollSeconds `
-      -LaunchStart $launchStart `
-      -GameProcessNames $GameProcessNames `
-      -LauncherHandleId $launcherHandleId `
-      -LaunchStartTimeoutSeconds $LaunchStartTimeoutSeconds `
-      -RequireGameStartForTimeout ([bool]$RequireGameStartForTimeout) `
-      -IgnoreHandleIds $IgnoreHandleIds
-
-    if ($outcome.Type -ne "NoLaunch") {
-      return $outcome
+    $decision = Request-LauncherRecoveryDecision -PlayAttempts $maxPlayAttempts
+    if ($decision -eq "continue") {
+      Write-Host "Продолжаю попытки запуска после действия пользователя." -ForegroundColor Cyan
+      $launcherWindow = Select-WindowByTitlePattern -Patterns @($LauncherTitlePattern)
+      if ($null -eq $launcherWindow) {
+        $launcherWindow = Wait-ForLauncherWindowInteractive -TitlePattern $LauncherTitlePattern `
+          -CrashPatterns $CrashPatterns `
+          -FabricPatterns $FabricPatterns `
+          -PollSeconds $PollSeconds
+      }
+      if ($null -eq $launcherWindow) {
+        throw "Launcher window not found after user requested continue."
+      }
+      $launcherHandleId = [long]$launcherWindow.Handle.ToInt64()
+      continue
     }
+
+    if ($decision -eq "cancel_keep") {
+      throw [System.OperationCanceledException]::new("MCCompatUserCancelKeepChanges: launcher start canceled by user.")
+    }
+    throw [System.OperationCanceledException]::new("MCCompatUserCancelRollback: launcher start canceled by user.")
   }
-
-  throw ("No game launch detected after {0} Play click attempt(s). Consider increasing -PlayClickDelayMs or -LaunchStartTimeoutSeconds." -f $maxPlayAttempts)
 }
-

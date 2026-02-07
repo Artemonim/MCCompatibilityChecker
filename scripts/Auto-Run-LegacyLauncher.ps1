@@ -256,6 +256,10 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$HashCacheHashRetryDelayMs = 200,
 
+  # * If true, auto-restores mods from legacy log after user interruption (Ctrl+C).
+  [Parameter(Mandatory = $false)]
+  [bool]$AutoRestoreOnInterrupt = $true,
+
   # * Additional arguments to pass to Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
   [string[]]$CheckScriptArguments = @(),
@@ -321,6 +325,9 @@ $script:hashCacheDisabledThisSession = $false
 
 # * Session timing (initialized early so it's available in finally block).
 $sessionStartTime = Get-Date
+
+# * Tracks whether the session was interrupted by the user (Ctrl+C).
+$sessionInterrupted = $false
 
 # * Session summary helpers.
 function Get-LatestCompatReportPath {
@@ -849,6 +856,177 @@ function Close-FabricDialogWindow {
   [System.Windows.Forms.SendKeys]::SendWait("%{F4}")
 }
 
+function Select-UnknownGameWindow {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$CrashPatterns,
+    [Parameter(Mandatory = $true)]
+    [string[]]$FabricPatterns,
+    [Parameter(Mandatory = $true)]
+    [string[]]$GameProcessNames,
+    [Parameter(Mandatory = $true)]
+    [datetime]$LaunchStart
+  )
+
+  if (-not $GameProcessNames -or $GameProcessNames.Count -eq 0) { return $null }
+  $recent = Get-RecentProcessesByName -Names $GameProcessNames -StartedAfter $LaunchStart
+  if (-not $recent -or $recent.Count -eq 0) { return $null }
+
+  $pidSet = @{}
+  foreach ($p in $recent) {
+    if ($null -eq $p) { continue }
+    try {
+      $pidSet[[int]$p.Id] = $true
+    } catch {
+      continue
+    }
+  }
+  if ($pidSet.Count -eq 0) { return $null }
+
+  $windows = Get-WindowList
+  foreach ($window in $windows) {
+    if ($null -eq $window) { continue }
+    $processId = 0
+    try {
+      $processId = [int]$window.ProcessId
+    } catch {
+      continue
+    }
+    if (-not $pidSet.ContainsKey($processId)) { continue }
+
+    $title = [string]$window.Title
+    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+
+    $known = $false
+    foreach ($pattern in $CrashPatterns) {
+      if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+      if (Test-TitleMatch -Title $title -Pattern $pattern) { $known = $true; break }
+    }
+    if (-not $known) {
+      foreach ($pattern in $FabricPatterns) {
+        if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+        if (Test-TitleMatch -Title $title -Pattern $pattern) { $known = $true; break }
+      }
+    }
+    if (-not $known -and (Test-TitleMatch -Title $title -Pattern "Minecraft")) { $known = $true }
+    if ($known) { continue }
+
+    return $window
+  }
+
+  return $null
+}
+
+function Test-ProcessLooksLikeMinecraftGame {
+  param(
+    [Parameter(Mandatory = $true)]
+    $Process
+  )
+
+  if ($null -eq $Process) { return $false }
+  $name = [string]$Process.Name
+  if ([string]::IsNullOrWhiteSpace($name)) { return $false }
+  $nameLower = $name.ToLowerInvariant()
+
+  if ($nameLower -ne "java" -and $nameLower -ne "javaw") {
+    return $true
+  }
+
+  $processId = 0
+  try {
+    $processId = [int]$Process.Id
+  } catch {
+    return $false
+  }
+  if ($processId -le 0) { return $false }
+
+  try {
+    $cim = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop -Verbose:$false
+  } catch {
+    return $false
+  }
+  if ($null -eq $cim) { return $false }
+
+  $cmd = [string]$cim.CommandLine
+  if ([string]::IsNullOrWhiteSpace($cmd)) { return $false }
+
+  return ($cmd -match "net\.minecraft")
+}
+
+function Stop-SessionGameProcess {
+  [CmdletBinding(SupportsShouldProcess = $true)]
+  [OutputType([int])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$GameProcessNames,
+    [Parameter(Mandatory = $true)]
+    [datetime]$StartedAfter
+  )
+
+  if (-not $GameProcessNames -or $GameProcessNames.Count -eq 0) { return 0 }
+  $recent = Get-RecentProcessesByName -Names $GameProcessNames -StartedAfter $StartedAfter
+  if (-not $recent -or $recent.Count -eq 0) { return 0 }
+
+  $killed = 0
+  foreach ($p in $recent) {
+    if (-not (Test-ProcessLooksLikeMinecraftGame -Process $p)) { continue }
+    $label = "{0} (pid {1})" -f $p.Name, $p.Id
+    if (-not $PSCmdlet.ShouldProcess($label, "Kill game process")) { continue }
+    try {
+      Write-Host ("Stopping game process: {0}" -f $label) -ForegroundColor Gray
+      $p.Kill()
+      $killed++
+    } catch {
+      Write-Verbose ("Failed to kill process {0}: {1}" -f $label, $_.Exception.Message)
+    }
+  }
+
+  if ($killed -gt 0) {
+    Start-Sleep -Seconds 3
+  }
+
+  return $killed
+}
+
+function Test-WindowPresence {
+  param(
+    [Parameter(Mandatory = $true)]
+    [long]$HandleId
+  )
+
+  if ($HandleId -eq 0) { return $false }
+  $windows = Get-WindowList
+  foreach ($window in $windows) {
+    if ([long]$window.Handle.ToInt64() -eq $HandleId) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Request-UserToCloseUnknownWindow {
+  param(
+    [Parameter(Mandatory = $true)]
+    [long]$HandleId,
+    [Parameter(Mandatory = $false)]
+    [string]$WindowTitle = ""
+  )
+
+  if ($HandleId -eq 0) { return }
+  $label = if ([string]::IsNullOrWhiteSpace($WindowTitle)) { "неизвестное окно" } else { $WindowTitle }
+  $message = "Обнаружено неизвестное окно. Пожалуйста, закройте его и продолжите.`nОкно: {0}" -f $label
+
+  while (Test-WindowPresence -HandleId $HandleId) {
+    [void][System.Windows.Forms.MessageBox]::Show(
+      $message,
+      "Требуется действие пользователя",
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    Start-Sleep -Milliseconds 300
+  }
+}
+
 function Wait-ForOutcome {
   param(
     [Parameter(Mandatory = $true)]
@@ -870,6 +1048,7 @@ function Wait-ForOutcome {
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $launchStableByGrace = $false
 
   while ((Get-Date) -lt $deadline) {
     $crashWindow = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreCrashHandleIds
@@ -892,14 +1071,39 @@ function Wait-ForOutcome {
           continue
         }
         if (($now - $startTime).TotalSeconds -ge $GraceSeconds) {
-          return [pscustomobject]@{ Type = "Timeout"; Window = $null }
+          # * Mark that launch appears stable enough, but do not end early.
+          # * Continue observing until full TimeoutSeconds to catch late crashes.
+          $launchStableByGrace = $true
+          break
         }
+      }
+    }
+
+    # * Only check unknown windows after we have evidence the game actually launched.
+    if ($launchStableByGrace) {
+      $unknownWindow = Select-UnknownGameWindow -CrashPatterns $CrashPatterns -FabricPatterns $FabricPatterns `
+        -GameProcessNames $GameProcessNames -LaunchStart $LaunchStart
+      if ($null -ne $unknownWindow) {
+        return [pscustomobject]@{ Type = "UnknownWindow"; Window = $unknownWindow }
       }
     }
 
     Start-Sleep -Seconds $PollSeconds
   }
 
+  $lateCrash = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreCrashHandleIds
+  if ($null -ne $lateCrash) {
+    return [pscustomobject]@{ Type = "CrashDialog"; Window = $lateCrash }
+  }
+  $lateFabric = Select-WindowByTitlePattern -Patterns $FabricPatterns
+  if ($null -ne $lateFabric) {
+    return [pscustomobject]@{ Type = "FabricDialog"; Window = $lateFabric }
+  }
+  $unknownWindow = Select-UnknownGameWindow -CrashPatterns $CrashPatterns -FabricPatterns $FabricPatterns `
+    -GameProcessNames $GameProcessNames -LaunchStart $LaunchStart
+  if ($null -ne $unknownWindow) {
+    return [pscustomobject]@{ Type = "UnknownWindow"; Window = $unknownWindow }
+  }
   return [pscustomobject]@{ Type = "Timeout"; Window = $null }
 }
 
@@ -1103,8 +1307,34 @@ while ($true) {
     -GameProcessNames $GameProcessNames `
     -IgnoreCrashHandleIds $ignoreCrashIds
 
+  # * Race guard: a crash/fabric dialog can appear right after Wait-ForOutcome returns.
+  # * Re-check once before branching into outcome handling.
+  if ($outcome.Type -eq "Timeout") {
+    Start-Sleep -Milliseconds 600
+    $lateCrashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns -ExcludeHandleIds $ignoreCrashIds
+    if ($null -ne $lateCrashNow) {
+      Write-Host ("Late crash dialog detected after probe window: {0}" -f $lateCrashNow.Title) -ForegroundColor Yellow
+      $outcome = [pscustomobject]@{ Type = "CrashDialog"; Window = $lateCrashNow }
+    } else {
+      $lateFabricNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+      if ($null -ne $lateFabricNow) {
+        Write-Host ("Late Fabric dialog detected after probe window: {0}" -f $lateFabricNow.Title) -ForegroundColor Yellow
+        $outcome = [pscustomobject]@{ Type = "FabricDialog"; Window = $lateFabricNow }
+      }
+    }
+  }
+
   if ($outcome.Type -eq "CrashDialog") {
     Write-Host "Outcome: crash dialog detected. Running compatibility cleanup." -ForegroundColor Yellow
+
+    # * Ensure the game is fully closed before any mod file operations.
+    # * Without this, layering/isolation can hit file locks in initial quarantine.
+    if (-not $DryRun) {
+      $closedBeforeCleanup = Stop-SessionGameProcess -GameProcessNames $GameProcessNames -StartedAfter $sessionStartTime
+      if ($closedBeforeCleanup -gt 0) {
+        Write-Host ("Closed {0} running game process(es) before cleanup." -f $closedBeforeCleanup) -ForegroundColor Gray
+      }
+    }
 
     if (([bool]$UseHashCache) -and $script:hashCacheAttemptedThisSession -and (-not $script:hashCacheDisabledThisSession)) {
       Write-Host "Hash cache did not resolve the crash in this session. Retrying without hashes." -ForegroundColor Yellow
@@ -1139,6 +1369,7 @@ while ($true) {
                 $mixinResult = & $MixinAnalysisScriptPath @mixinParams
                 $mixinExitCode = $LASTEXITCODE
               } catch [System.Management.Automation.PipelineStoppedException] {
+                $sessionInterrupted = $true
                 Write-Host "Mixin analysis interrupted by user (Ctrl+C)." -ForegroundColor Yellow
               } catch {
                 Write-Host ("Warning: Mixin analysis failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
@@ -1195,6 +1426,7 @@ while ($true) {
                 $layeringResult = & $LayerScriptPath @layerParams
                 $layerExitCode = $LASTEXITCODE
               } catch [System.Management.Automation.PipelineStoppedException] {
+                $sessionInterrupted = $true
                 Write-Host "Layering interrupted by user (Ctrl+C)." -ForegroundColor Yellow
                 $layerExitCode = 1
               } catch {
@@ -1264,6 +1496,7 @@ while ($true) {
                   $layeringResult = & $LayerScriptPath @layerParams
                   $layerExitCode = $LASTEXITCODE
                 } catch [System.Management.Automation.PipelineStoppedException] {
+                  $sessionInterrupted = $true
                   Write-Host "Layering retry interrupted by user (Ctrl+C)." -ForegroundColor Yellow
                   $layerExitCode = 1
                 } catch {
@@ -1312,6 +1545,14 @@ while ($true) {
               }
 
               if ($layerExitCode -eq 0) {
+                # * Ensure no game instance survives layering before recovery/main-loop continuation.
+                if (-not $DryRun) {
+                  $closedAfterLayering = Stop-SessionGameProcess -GameProcessNames $GameProcessNames -StartedAfter $sessionStartTime
+                  if ($closedAfterLayering -gt 0) {
+                    Write-Host ("Closed {0} running game process(es) before post-layer actions." -f $closedAfterLayering) -ForegroundColor Gray
+                  }
+                }
+
                 # * Step 3: Recovery — try to restore phantom culprits.
                 if ($recoveryAvailable -and $sessionIsolationCulpritHistoryByJar.Count -ge 3) {
                   Write-Host "Running phantom culprit recovery analysis." -ForegroundColor Cyan
@@ -1362,6 +1603,10 @@ while ($true) {
                 Start-Sleep -Seconds 2
                 continue
               }
+              if ($layerExitCode -eq 130) {
+                Write-Host "Launcher start canceled by user during layering. Stopping by user choice." -ForegroundColor Yellow
+                exit 0
+              }
               Write-Host ("Layering finished with exit code {0}. Falling back to isolation." -f $layerExitCode) -ForegroundColor Yellow
             }
 
@@ -1382,6 +1627,7 @@ while ($true) {
                 $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
                 $isolateExitCode = $LASTEXITCODE
               } catch [System.Management.Automation.PipelineStoppedException] {
+                $sessionInterrupted = $true
                 Write-Host "Isolation interrupted by user (Ctrl+C)." -ForegroundColor Yellow
                 $isolateExitCode = 1
               } catch {
@@ -1453,6 +1699,7 @@ while ($true) {
                   $isolationResult = & $IsolateScriptPath @isolateParams @isolateExtraArgs
                   $isolateExitCode = $LASTEXITCODE
                 } catch [System.Management.Automation.PipelineStoppedException] {
+                  $sessionInterrupted = $true
                   Write-Host "Isolation retry interrupted by user (Ctrl+C)." -ForegroundColor Yellow
                   $isolateExitCode = 1
                 } catch {
@@ -1500,6 +1747,11 @@ while ($true) {
                     }
                   }
                 }
+              }
+
+              if ($isolateExitCode -eq 130) {
+                Write-Host "Launcher start canceled by user during isolation. Stopping by user choice." -ForegroundColor Yellow
+                exit 0
               }
 
               if ($isolateExitCode -ne 0) {
@@ -1559,8 +1811,29 @@ while ($true) {
   if ($outcome.Type -eq "FabricDialog") {
     Write-Host "Outcome: Fabric Loader dialog detected." -ForegroundColor Yellow
     Close-FabricDialogWindow -Window $outcome.Window -IsDryRun ([bool]$DryRun)
+  } elseif ($outcome.Type -eq "UnknownWindow") {
+    Write-Host "Outcome: unknown blocking window detected." -ForegroundColor Yellow
+    Write-Host "Обнаружено неизвестное окно. Пожалуйста, закройте его и продолжите." -ForegroundColor Yellow
+    $unknownTitle = ""
+    $unknownHandleId = 0
+    if ($null -ne $outcome.Window) {
+      $unknownTitle = [string]$outcome.Window.Title
+      $unknownHandleId = [long]$outcome.Window.Handle.ToInt64()
+    }
+    if ($unknownHandleId -ne 0) {
+      Request-UserToCloseUnknownWindow -HandleId $unknownHandleId -WindowTitle $unknownTitle
+    }
+    Write-Host "Неизвестное окно закрыто. Продолжаю попытки без отката модов." -ForegroundColor Cyan
+    Start-Sleep -Seconds 2
+    continue
   } else {
-    Write-Host ("Outcome: timeout after {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
+    Write-Host ("Outcome: no crash/fabric dialog detected within {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
+  }
+  if (-not $DryRun) {
+    $closedAfterNonCrashOutcome = Stop-SessionGameProcess -GameProcessNames $GameProcessNames -StartedAfter $sessionStartTime
+    if ($closedAfterNonCrashOutcome -gt 0) {
+      Write-Host ("Closed {0} running game process(es) before prompt." -f $closedAfterNonCrashOutcome) -ForegroundColor Gray
+    }
   }
   $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
   if ($hasSessionIsolants) {
@@ -1574,10 +1847,60 @@ while ($true) {
   }
   $prompt = $null
   if ($outcome.Type -eq "FabricDialog") {
-    $prompt = $(if ($hasSessionIsolants) { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Вернуть изолированные моды и продолжить попытки? (y/n)" } else { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Продолжить попытки? (y/n)" })
+    $prompt = $(if ($hasSessionIsolants) { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Выберите действие для изолированных модов:" } else { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Продолжить попытки? (y/n)" })
   } else {
-    $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Вернуть изолированные моды и продолжить попытки? (y/n)" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
+    $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Выберите действие для изолированных модов:" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
   }
+
+  if ($hasSessionIsolants) {
+    Write-Host $prompt -ForegroundColor Yellow
+    Write-Host "  c = продолжить с текущими изолятами (неполный набор модов)." -ForegroundColor Gray
+    Write-Host "  r = вернуть изоляты и продолжить с полного набора." -ForegroundColor Gray
+    Write-Host "  n = вернуть изоляты и завершить." -ForegroundColor Gray
+
+    $choice = ""
+    while ([string]::IsNullOrWhiteSpace($choice)) {
+      $answerRaw = [string](Read-Host "Выбор [c/r/n]")
+      $answer = $answerRaw.Trim().ToLowerInvariant()
+      if ($answer -match "^(c|continue|к)$") {
+        $choice = "continue-as-is"
+        break
+      }
+      if ($answer -match "^(r|restore|y|yes|д|да|в)$") {
+        $choice = "restore-and-continue"
+        break
+      }
+      if ($answer -match "^(n|no|н|нет)$") {
+        $choice = "restore-and-exit"
+        break
+      }
+      Write-Host "Неверный ввод. Введите c, r или n." -ForegroundColor Yellow
+    }
+
+    if ($choice -eq "continue-as-is") {
+      Write-Host "Продолжаю попытки без деизолирования модов." -ForegroundColor Cyan
+      Start-Sleep -Seconds 1
+      continue
+    }
+
+    $restoreLabel = if ($choice -eq "restore-and-exit") { "before exit" } else { "before continuing" }
+    Write-Host ("Restoring isolated mods {0}..." -f $restoreLabel) -ForegroundColor Cyan
+    $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+    if (-not $ok) {
+      Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
+      exit 1
+    }
+    $sessionIsolationCulpritByJar = @{}
+
+    if ($choice -eq "restore-and-exit") {
+      Write-Host "Если скрипт не устранил проблему или сломался об некоторые моды и их зависимости - на период работы скрипта изолируйте эти токсичные моды вручную." -ForegroundColor Yellow
+      Write-Host "Stopping by user choice." -ForegroundColor Yellow
+      exit 0
+    }
+
+    continue
+  }
+
   $answer = Read-Host $prompt
   if ($answer -notmatch "^(y|yes|д|да)$") {
     if ($hasSessionIsolants) {
@@ -1604,8 +1927,30 @@ while ($true) {
     $sessionIsolationCulpritByJar = @{}
   }
 }
+} catch [System.Management.Automation.PipelineStoppedException] {
+  $sessionInterrupted = $true
+  throw
 } finally {
+  # * Auto-restore from legacy log when the session was interrupted (Ctrl+C).
+  if ($sessionInterrupted -and $AutoRestoreOnInterrupt -and (-not $DryRun)) {
+    $restoreScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "..\tools\Restore-ModsFromLog.ps1"
+    if (Test-Path -LiteralPath $restoreScriptPath) {
+      Write-Host "User interruption detected. Restoring mods from legacy log..." -ForegroundColor Yellow
+      try {
+        & $restoreScriptPath -SinceTimestamp $sessionStartTime -NoExit
+      } catch {
+        Write-Host ("Warning: auto-restore failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+      }
+    }
+    else {
+      Write-Host ("Warning: restore script not found: {0}" -f $restoreScriptPath) -ForegroundColor Yellow
+    }
+  }
+
   try {
+    if (-not $DryRun) {
+      [void](Stop-SessionGameProcess -GameProcessNames $GameProcessNames -StartedAfter $sessionStartTime)
+    }
     if ($sessionIsolationCulpritHistoryByJar.Count -eq 0 -and (Test-Path -LiteralPath $transcriptLogPath)) {
       try {
         $lines = Get-Content -LiteralPath $transcriptLogPath -ErrorAction Stop
@@ -1651,5 +1996,3 @@ while ($true) {
     Stop-Transcript | Out-Null
   }
 }
-
-

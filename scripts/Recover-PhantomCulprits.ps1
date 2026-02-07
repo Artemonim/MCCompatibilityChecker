@@ -48,7 +48,7 @@ param(
   [int]$GameExitPollSeconds = 2,
 
   [Parameter(Mandatory = $false)]
-  [int]$SuccessConfirmSeconds = 30,
+  [int]$SuccessConfirmSeconds = 20,
 
   [Parameter(Mandatory = $false)]
   [string]$LauncherExePath = "",
@@ -109,7 +109,7 @@ param(
   [int]$LauncherWindowTimeoutSeconds = 60,
 
   [Parameter(Mandatory = $false)]
-  [int]$OutcomeTimeoutSeconds = 90,
+  [int]$OutcomeTimeoutSeconds = 20,
 
   [Parameter(Mandatory = $false)]
   [int]$PollIntervalSeconds = 2,
@@ -136,6 +136,42 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# * Launch wait scaling config.
+$launchWaitBaseSeconds = 20
+$launchWaitPerModSeconds = 0.1
+
+function Get-ActiveModCount {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModsDir
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
+  if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
+  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+  if ($null -eq $mods) { return 0 }
+  return @($mods).Count
+}
+
+function Get-ScaledLaunchWaitTime {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ActiveModCount,
+    [Parameter(Mandatory = $true)]
+    [double]$PerModSeconds,
+    [Parameter(Mandatory = $true)]
+    [int]$BaseSeconds
+  )
+
+  $rawSeconds = $BaseSeconds + ($ActiveModCount * $PerModSeconds)
+  $scaledSeconds = [int][Math]::Ceiling($rawSeconds)
+  if ($scaledSeconds -lt $BaseSeconds) { $scaledSeconds = $BaseSeconds }
+  return $scaledSeconds
+}
+
+$useDynamicOutcomeTimeout = -not $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
+$useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds")
 
 # ────────────────────────────────────────────────────────────────────────────
 # * Load shared modules.
@@ -345,6 +381,7 @@ foreach ($group in $qualifiedGroups) {
 
     # * Step 3: Launch game and check stability.
     $isSuccess = $false
+    $launchStart = $null
     try {
       $strayCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
       if ($null -ne $strayCrash) {
@@ -352,12 +389,22 @@ foreach ($group in $qualifiedGroups) {
         Start-Sleep -Seconds 2
       }
 
+      $effectiveConfirmSeconds = $SuccessConfirmSeconds
+      if ($useDynamicOutcomeTimeout -or $useDynamicSuccessConfirm) {
+        $activeModCount = Get-ActiveModCount -ModsDir $GameModsDir
+        $scaledLaunchSeconds = Get-ScaledLaunchWaitTime -ActiveModCount $activeModCount `
+          -PerModSeconds $launchWaitPerModSeconds `
+          -BaseSeconds $launchWaitBaseSeconds
+        if ($useDynamicOutcomeTimeout) { $OutcomeTimeoutSeconds = $scaledLaunchSeconds }
+        if ($useDynamicSuccessConfirm) { $effectiveConfirmSeconds = $scaledLaunchSeconds }
+      }
+
       $launchStart = Get-Date
       $outcome = Invoke-ConfiguredLaunchAttempt
       Write-Host ("  Outcome: {0}" -f $outcome.Type) -ForegroundColor Gray
 
       if ($outcome.Type -eq "Timeout") {
-        Start-Sleep -Seconds $SuccessConfirmSeconds
+        Start-Sleep -Seconds $effectiveConfirmSeconds
         $crashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
         if ($null -eq $crashNow) {
           $isSuccess = $true
@@ -399,6 +446,11 @@ foreach ($group in $qualifiedGroups) {
         Move-Item -LiteralPath $rootStorageTemp -Destination $rootStoragePath -Force -ErrorAction SilentlyContinue
       }
       throw
+    } finally {
+      if ($null -ne $launchStart) {
+        [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
+        [void](Wait-ConfiguredGameExit -StartedAfter $launchStart -WarningContext "Recovery cleanup")
+      }
     }
 
     if ($isSuccess) {

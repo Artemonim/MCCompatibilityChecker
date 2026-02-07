@@ -868,6 +868,7 @@ $script:lastOutcomeHandleId = 0
 $baselineSucceeded = $false
 $skipIsolation = $false
 $phase = "init"
+$isolationStartTime = Get-Date
 
 
 try {
@@ -1074,6 +1075,16 @@ try {
   }
   }
   }
+} catch [System.OperationCanceledException] {
+  $hadError = $true
+  $cancelMessage = [string]$_.Exception.Message
+  if ($cancelMessage -match "^MCCompatUserCancelKeepChanges:") {
+    $KeepMovedModsOnFailure = $true
+    Write-Host "Launch canceled by user. Keeping current mod isolation state." -ForegroundColor Yellow
+  } else {
+    Write-Host "Launch canceled by user. Rolling back current mod changes." -ForegroundColor Yellow
+  }
+  $exitCode = 130
 } catch [System.Management.Automation.PipelineStoppedException] {
   # * User pressed Ctrl+C. Restore all mods; skip error dump.
   # * Write-Host during PipelineStoppedException may not appear in the transcript.
@@ -1102,6 +1113,11 @@ try {
     Write-Host "" -ForegroundColor Yellow
     Write-Host "Isolation interrupted by user (Ctrl+C). Restoring mods..." -ForegroundColor Yellow
     Write-Host ("Phase at interruption: {0}" -f $phase) -ForegroundColor Gray
+  }
+  if (-not $DryRun) {
+    # * Ensure the game is closed before restore/exit.
+    [void](Stop-ConfiguredGameProcess -StartedAfter $isolationStartTime)
+    [void](Wait-ConfiguredGameExit -StartedAfter $isolationStartTime -WarningContext "Isolation cleanup")
   }
   if (-not $DryRun -and $movedItems.Count -gt 0) {
     if ($hadError -and $KeepMovedModsOnFailure) {
@@ -1301,7 +1317,7 @@ if (-not $script:blockedByDependency) {
     Write-Host ("Culprit candidate(s): {0}" -f (($culpritJarNames | Sort-Object -Unique) -join ", ")) -ForegroundColor Green
     Write-Host ("Stop reason: {0}" -f $stopReason) -ForegroundColor Cyan
     $exitCode = 0
-  } elseif (-not $hadError) {
+  } elseif ((-not $hadError) -and (-not $baselineSucceeded)) {
     Write-Host "No error change or successful launch detected." -ForegroundColor Yellow
     $exitCode = 2
   }
@@ -1350,4 +1366,3 @@ if ($EmitResultObject) {
 }
 
 exit $exitCode
-
