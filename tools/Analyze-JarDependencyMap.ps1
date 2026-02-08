@@ -44,6 +44,14 @@ param(
     [int]$TopDependencies = 30
 )
 
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "..\scripts\Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+    throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+
 Set-StrictMode -Version Latest
 
 $sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "..\scripts\Shared-Config.ps1"

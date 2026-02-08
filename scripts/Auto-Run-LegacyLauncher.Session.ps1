@@ -2,6 +2,96 @@ Write-Host ("Launcher title pattern: {0}" -f $LauncherWindowTitlePattern) -Foreg
 Write-Host "Attempt limit: unlimited" -ForegroundColor Gray
 $launcherWindow = $null
 $lastCrashDialogHandleId = 0
+$inputKeyRetryYes = "y"
+$inputKeyRetryNo = "n"
+$inputKeyContinueAsIs = "c"
+$inputKeyRestoreContinue = "r"
+$inputKeyRestoreExit = "n"
+$inputKeyKeepExit = "s"
+$inputKeyHintRetry = "{0}/{1}" -f $inputKeyRetryYes, $inputKeyRetryNo
+$inputKeyHintIsolants = "{0}/{1}/{2}/{3}" -f $inputKeyContinueAsIs, $inputKeyRestoreContinue, $inputKeyRestoreExit, $inputKeyKeepExit
+
+if (Get-Command -Name Set-McccLocalizationTagValue -ErrorAction SilentlyContinue) {
+  Set-McccLocalizationTagValue -TagMap @{
+    "<KEY_RETRY_YES>" = $inputKeyRetryYes
+    "<KEY_RETRY_NO>" = $inputKeyRetryNo
+    "<KEY_CONTINUE_AS_IS>" = $inputKeyContinueAsIs
+    "<KEY_RESTORE_CONTINUE>" = $inputKeyRestoreContinue
+    "<KEY_RESTORE_EXIT>" = $inputKeyRestoreExit
+    "<KEY_KEEP_EXIT>" = $inputKeyKeepExit
+    "<KEY_RETRY_HINT>" = $inputKeyHintRetry
+    "<KEY_ISOLANTS_HINT>" = $inputKeyHintIsolants
+  }
+}
+
+$regexRetryYes = "^(?:{0}|yes)$" -f [regex]::Escape($inputKeyRetryYes)
+$regexChoiceContinue = "^(?:{0}|continue)$" -f [regex]::Escape($inputKeyContinueAsIs)
+$regexChoiceRestoreContinue = "^(?:{0}|restore|{1}|yes)$" -f [regex]::Escape($inputKeyRestoreContinue), [regex]::Escape($inputKeyRetryYes)
+$regexChoiceRestoreExit = "^(?:{0}|{1}|no)$" -f [regex]::Escape($inputKeyRestoreExit), [regex]::Escape($inputKeyRetryNo)
+$regexChoiceKeepExit = "^(?:{0}|skip|stop)$" -f [regex]::Escape($inputKeyKeepExit)
+
+function Invoke-PreLaunchOutcomeDialogCleanup {
+  [CmdletBinding()]
+  [OutputType([long[]])]
+  param(
+    [Parameter(Mandatory = $false)]
+    [int]$MaxPasses = 6,
+    [Parameter(Mandatory = $false)]
+    [int[]]$ProcessIds = @()
+  )
+
+  if ($MaxPasses -lt 1) { $MaxPasses = 1 }
+  $ignoredHandleIds = [System.Collections.Generic.HashSet[long]]::new()
+
+  for ($pass = 1; $pass -le $MaxPasses; $pass++) {
+    $closedThisPass = $false
+
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns -ProcessIds $ProcessIds
+    if ($null -ne $fabricWindow) {
+      Write-Host ("Closing pre-existing Fabric dialog before launch: {0}" -f $fabricWindow.Title) -ForegroundColor Gray
+      $fabricHandle = Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $fabricWindow }) `
+        -DelaySeconds 0 `
+        -OffsetX -1 `
+        -OffsetY -1 `
+        -CloseExtraFabricDialogs $false
+      if ($fabricHandle -ne 0) {
+        $null = $ignoredHandleIds.Add([long]$fabricHandle)
+        $closedThisPass = $true
+      }
+    }
+
+    $crashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns -ProcessIds $ProcessIds
+    if ($null -ne $crashWindow) {
+      Write-Host ("Closing pre-existing crash dialog before launch: {0}" -f $crashWindow.Title) -ForegroundColor Gray
+      $crashHandle = Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $crashWindow }) `
+        -DelaySeconds 0 `
+        -OffsetX -1 `
+        -OffsetY -1 `
+        -CloseExtraFabricDialogs $true
+      if ($crashHandle -ne 0) {
+        $null = $ignoredHandleIds.Add([long]$crashHandle)
+        $closedThisPass = $true
+      }
+    }
+
+    if (-not $closedThisPass) {
+      break
+    }
+  }
+
+  # * Fallback: if a stale dialog refused to close, ignore it for outcome detection.
+  $leftoverHandles = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns) -ProcessIds $ProcessIds)
+  if ($leftoverHandles.Count -gt 0) {
+    Write-Host ("Warning: {0} pre-existing crash/fabric dialog window(s) are still open and will be ignored in this attempt." -f $leftoverHandles.Count) -ForegroundColor Yellow
+    foreach ($id in $leftoverHandles) {
+      if ($null -eq $id -or [long]$id -eq 0) { continue }
+      $null = $ignoredHandleIds.Add([long]$id)
+    }
+  }
+
+  if ($ignoredHandleIds.Count -eq 0) { return [long[]]@() }
+  return [long[]]($ignoredHandleIds | Sort-Object -Unique)
+}
 
 # * Capture click offsets from current cursor position once, before the run, if not provided.
 if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset) {
@@ -68,8 +158,8 @@ while ($true) {
     -IsDryRun ([bool]$DryRun) `
     -ShowWaitMessage $true
   if ($null -eq $launcherWindow) {
-    $answer = Read-Host "Лаунчер не найден. Продолжить попытки? (y/n)"
-    if ($answer -notmatch "^(y|yes|д|да)$") {
+    $answer = Read-Host "Launcher not found. Continue retrying? (<KEY_RETRY_HINT>)"
+    if ($answer -notmatch $regexRetryYes) {
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
       exit 0
     }
@@ -77,6 +167,38 @@ while ($true) {
     Start-Sleep -Seconds $PollIntervalSeconds
     continue
   }
+
+  if (-not $DryRun) {
+    $activeGamePids = New-Object System.Collections.Generic.List[int]
+    $recentGameProcesses = Get-RecentProcessesByName -Names $GameProcessNames -StartedAfter $sessionStartTime
+    foreach ($proc in @($recentGameProcesses)) {
+      if (Test-ProcessLooksLikeMinecraftGame -Process $proc) {
+        $activeGamePids.Add([int]$proc.Id) | Out-Null
+      }
+    }
+    if ($activeGamePids.Count -gt 0) {
+      $pidLabel = (@($activeGamePids | Sort-Object -Unique) -join ", ")
+      Write-Host ("Game is still running (pid: {0}). Waiting for it to exit before next Play click..." -f $pidLabel) -ForegroundColor Yellow
+      $exitedBeforeRetry = Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "next launch attempt"
+      if (-not $exitedBeforeRetry) {
+        Write-Host ("Game is still running. Retrying check in {0}s..." -f $PollIntervalSeconds) -ForegroundColor Yellow
+        Start-Sleep -Seconds $PollIntervalSeconds
+        continue
+      }
+    }
+  }
+
+  $launcherProcessIds = @()
+  $launcherProcessId = Get-WindowProcessId -Handle $launcherWindow.Handle
+  if ($launcherProcessId -gt 0) {
+    $launcherProcessIds = @([int]$launcherProcessId)
+  }
+
+  $preLaunchIgnoredOutcomeIds = @()
+  if (-not $DryRun) {
+    $preLaunchIgnoredOutcomeIds = @(Invoke-PreLaunchOutcomeDialogCleanup -ProcessIds $launcherProcessIds)
+  }
+
   Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
     -ButtonNames $PlayButtonNames `
     -ClickOffsetX $PlayClickOffsetX `
@@ -92,9 +214,9 @@ while ($true) {
   } else {
     $lastCrashDialogHandleId = 0
   }
-  $preExistingOutcomeHandles = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns))
+  $preExistingOutcomeHandles = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns) -ProcessIds $launcherProcessIds)
   $ignoreHandleSet = [System.Collections.Generic.HashSet[long]]::new()
-  foreach ($id in @($ignoreCrashIds + $preExistingOutcomeHandles)) {
+  foreach ($id in @($ignoreCrashIds + $preLaunchIgnoredOutcomeIds + $preExistingOutcomeHandles)) {
     if ($null -eq $id -or [long]$id -eq 0) { continue }
     $null = $ignoreHandleSet.Add([long]$id)
   }
@@ -116,13 +238,13 @@ while ($true) {
   if ($outcome.Type -eq "Timeout") {
     $lateDeadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $lateDeadline -and $outcome.Type -eq "Timeout") {
-      $lateCrashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns -ExcludeHandleIds $ignoreOutcomeHandleIds
+      $lateCrashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns -ExcludeHandleIds $ignoreOutcomeHandleIds -ProcessIds $launcherProcessIds
       if ($null -ne $lateCrashNow) {
         Write-Host ("Late crash dialog detected after probe window: {0}" -f $lateCrashNow.Title) -ForegroundColor Yellow
         $outcome = [pscustomobject]@{ Type = "CrashDialog"; Window = $lateCrashNow }
         break
       }
-      $lateFabricNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns -ExcludeHandleIds $ignoreOutcomeHandleIds
+      $lateFabricNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns -ExcludeHandleIds $ignoreOutcomeHandleIds -ProcessIds $launcherProcessIds
       if ($null -ne $lateFabricNow) {
         Write-Host ("Late Fabric dialog detected after probe window: {0}" -f $lateFabricNow.Title) -ForegroundColor Yellow
         $outcome = [pscustomobject]@{ Type = "FabricDialog"; Window = $lateFabricNow }
@@ -168,8 +290,8 @@ while ($true) {
         $fabricMissingDepsDetected = $true
         $missLabel = if ($depInfo.MissingDepIds.Count -gt 0) { $depInfo.MissingDepIds -join ", " } else { "<none>" }
         $reqLabel = if ($depInfo.RequiringModIds.Count -gt 0) { $depInfo.RequiringModIds -join ", " } else { "<none>" }
-        Write-Host ("Fabric диалог показывает отсутствующие зависимости: {0}. Требуется действие пользователя." -f $missLabel) -ForegroundColor Yellow
-        Write-Host ("Требующие моды: {0}" -f $reqLabel) -ForegroundColor Gray
+        Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
+        Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
 
         # * Mirror key Fabric dialog lines in console so the user can review details without switching windows.
         $fabricDependencyDetailLines = @(
@@ -190,7 +312,7 @@ while ($true) {
             Select-Object -First 40
         )
         if ($fabricDependencyDetailLines.Count -gt 0) {
-          Write-Host "Ключевые строки Fabric-диалога (из логов):" -ForegroundColor Gray
+          Write-Host "Key Fabric dialog lines (from logs):" -ForegroundColor Gray
           foreach ($detailLine in $fabricDependencyDetailLines) {
             Write-Host ("  - {0}" -f $detailLine) -ForegroundColor Gray
           }
@@ -214,23 +336,23 @@ while ($true) {
             $filteredIds = @($incompatibleIds | Where-Object { -not $ignoreSet.ContainsKey($_.ToLowerInvariant()) })
             $ignoredIds = @($incompatibleIds | Where-Object { $ignoreSet.ContainsKey($_.ToLowerInvariant()) })
             if ($ignoredIds.Count -gt 0) {
-              Write-Host ("Игнорирую mod id из списка исключений: {0}" -f ($ignoredIds -join ", ")) -ForegroundColor Gray
+              Write-Host ("Ignoring mod IDs from ignore list: {0}" -f ($ignoredIds -join ", ")) -ForegroundColor Gray
             }
           }
         }
 
         if ($filteredIds.Count -gt 0) {
-          Write-Host ("Fabric диалог без отсутствующих зависимостей. Перенаправляю в debug pipeline (моды: {0})." -f ($filteredIds -join ", ")) -ForegroundColor Cyan
+          Write-Host ("Fabric dialog has no missing dependencies. Routing to debug pipeline (mods: {0})." -f ($filteredIds -join ", ")) -ForegroundColor Cyan
           $fabricShouldRunCleanup = $true
         } elseif ($incompatibleIds.Count -gt 0) {
-          Write-Host "Все несовместимые mod id находятся в списке исключений. Требуется действие пользователя." -ForegroundColor Yellow
+          Write-Host "All incompatible mod IDs are in the ignore list. User action is required." -ForegroundColor Yellow
         } else {
-          Write-Host "Fabric диалог без отсутствующих зависимостей, но mod id в логах не найдены. Перенаправляю в debug pipeline." -ForegroundColor Yellow
+          Write-Host "Fabric dialog has no missing dependencies, but mod IDs were not found in logs. Routing to debug pipeline." -ForegroundColor Yellow
           $fabricShouldRunCleanup = $true
         }
       }
     } else {
-      Write-Host "Fabric диалог обнаружен, но срез логов пуст. Перенаправляю в debug pipeline." -ForegroundColor Yellow
+      Write-Host "Fabric dialog detected, but the log slice is empty. Routing to debug pipeline." -ForegroundColor Yellow
       $fabricShouldRunCleanup = $true
     }
 
@@ -242,7 +364,7 @@ while ($true) {
   }
 
   if ($outcome.Type -eq "CrashDialog") {
-    Write-Host "Outcome: crash dialog detected. Running compatibility cleanup." -ForegroundColor Yellow
+    Write-Host "Outcome: crash dialog detected. Running Baseline Analysis." -ForegroundColor Yellow
 
     # * Ensure the game is fully closed before any mod file operations.
     # * Without this, layering/isolation can hit file locks in initial quarantine.
@@ -311,7 +433,7 @@ while ($true) {
           $sessionIsolationCulpritHistoryByJar[$nameKey] = $move
         }
         if ($compatAddedCount -gt 0) {
-          Write-Host ("Compatibility cleanup isolated {0} mod(s) in this attempt." -f $compatAddedCount) -ForegroundColor Gray
+          Write-Host ("Baseline Analysis isolated {0} mod(s) in this attempt." -f $compatAddedCount) -ForegroundColor Gray
         }
       }
 
@@ -353,10 +475,10 @@ while ($true) {
             $fabricHandledModIds = @($fabricHandledModIds | Sort-Object -Unique)
             $fabricUnresolvedModIds = @($fabricUnresolvedModIds | Sort-Object -Unique)
             if ($fabricHandledModIds.Count -gt 0) {
-              Write-Host ("Fabric-guided cleanup handled mods: {0}" -f ($fabricHandledModIds -join ", ")) -ForegroundColor Gray
+              Write-Host ("Fabric-guided Baseline Analysis handled mods: {0}" -f ($fabricHandledModIds -join ", ")) -ForegroundColor Gray
             }
             if ($fabricUnresolvedModIds.Count -gt 0) {
-              Write-Host ("Fabric-guided cleanup unresolved mod ids: {0}" -f ($fabricUnresolvedModIds -join ", ")) -ForegroundColor Yellow
+              Write-Host ("Fabric-guided Baseline Analysis unresolved mod IDs: {0}" -f ($fabricUnresolvedModIds -join ", ")) -ForegroundColor Yellow
             }
           }
 
@@ -365,7 +487,7 @@ while ($true) {
             $ranMixinAnalysis = $false
             $mixinResolved = $false
             if ($mixinAnalysisAvailable) {
-              Write-Host "Compatibility cleanup made no changes. Trying Mixin error analysis." -ForegroundColor Cyan
+              Write-Host "Baseline Analysis made no changes. Trying Mixin Analysis." -ForegroundColor Cyan
               $mixinParams = Get-MixinAnalysisParam -LogSinceTimestamp $launchStart
               $mixinResult = $null
               $mixinExitCode = 1
@@ -399,20 +521,20 @@ while ($true) {
                     $sessionIsolationCulpritHistoryByJar[$name.ToLowerInvariant()] = $move
                   }
                   $mixinResolved = $true
-                  Write-Host "Mixin analysis resolved the crash. Returning to main loop." -ForegroundColor Cyan
+                  Write-Host "Mixin Analysis resolved the crash. Returning to main loop." -ForegroundColor Cyan
                   Start-Sleep -Seconds 2
                   continue
                 }
               }
               if (-not $mixinResolved -and $ranMixinAnalysis) {
-                Write-Host ("Mixin analysis did not resolve (exit {0}). Proceeding to layering." -f $mixinExitCode) -ForegroundColor Gray
+                Write-Host ("Mixin Analysis did not resolve (exit {0}). Proceeding to Layering." -f $mixinExitCode) -ForegroundColor Gray
               }
             }
 
-            # * Step 2: Try layering (additive strategy), then fall back to subtractive isolation.
+            # * Step 2: Try Наслоение (additive strategy), then fall back to subtractive Изоляция.
             $ranLayering = $false
             if ($layeringAvailable) {
-              Write-Host "Running layering strategy." -ForegroundColor Cyan
+              Write-Host "Running Layering strategy." -ForegroundColor Cyan
               $layerParams = Get-LayeringParam -IncludeEmitResultObject $true -IncludeKeepCulpritInGameLegacy $true
               $usedHashCacheNow = $false
               if ($layerParams.ContainsKey("UseHashCache")) {
@@ -488,17 +610,17 @@ while ($true) {
               }
 
               if ($layerExitCode -eq 0) {
-                # * Ensure no game instance survives layering before recovery/main-loop continuation.
+                # * Ensure no game instance survives Наслоение before recovery/main-loop continuation.
                 if (-not $DryRun) {
                   $closedAfterLayering = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
                   if ($closedAfterLayering -gt 0) {
-                    Write-Host ("Closed {0} running game process(es) before post-layer actions." -f $closedAfterLayering) -ForegroundColor Gray
+                    Write-Host ("Closed {0} running game process(es) before post-Layering actions." -f $closedAfterLayering) -ForegroundColor Gray
                   }
                 }
 
                 # * Step 3: Recovery — try to restore phantom culprits.
                 if ($recoveryAvailable -and $sessionIsolationCulpritHistoryByJar.Count -ge 3) {
-                  Write-Host "Running phantom culprit recovery analysis." -ForegroundColor Cyan
+                  Write-Host "Running Recovery analysis." -ForegroundColor Cyan
                   $recParams = Get-RecoveryParam
                   $culpritDataForRecovery = @($sessionIsolationCulpritHistoryByJar.Values | ForEach-Object {
                       [pscustomobject]@{
@@ -538,7 +660,7 @@ while ($true) {
                       }
                     }
                   } catch {
-                    Write-Host ("Warning: recovery failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                    Write-Host ("Warning: Recovery failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
                   }
                 }
                 Write-Host "Layering completed. Returning to main loop." -ForegroundColor Cyan
@@ -546,10 +668,10 @@ while ($true) {
                 continue
               }
               if ($layerExitCode -eq 130) {
-                Write-Host "Launcher start canceled by user during layering. Stopping by user choice." -ForegroundColor Yellow
+                Write-Host "Launcher start canceled by user during Layering. Stopping by user choice." -ForegroundColor Yellow
                 exit 0
               }
-              Write-Host ("Layering finished with exit code {0}. Falling back to isolation." -f $layerExitCode) -ForegroundColor Yellow
+              Write-Host ("Layering finished with exit code {0}. Falling back to Isolation." -f $layerExitCode) -ForegroundColor Yellow
             }
 
             if ($stageLayeringEnabled -and (-not $ranLayering -or $layerExitCode -ne 0)) {
@@ -560,7 +682,7 @@ while ($true) {
                 $tentativeLayerMoves = @($layeringResultObj.CulpritMoves | Where-Object { $null -ne $_ })
                 if ($tentativeLayerMoves.Count -gt 0) {
                   $script:suppressTranscriptCulpritInference = $true
-                  Write-Host "Layering did not complete successfully. Restoring tentative layering culprits before fallback isolation." -ForegroundColor Yellow
+                  Write-Host "Layering did not complete successfully. Restoring tentative Layering culprits before fallback Isolation." -ForegroundColor Yellow
                   $tentativeLayerNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                   foreach ($tentativeMove in $tentativeLayerMoves) {
                     if ($null -eq $tentativeMove) { continue }
@@ -581,21 +703,21 @@ while ($true) {
                   }
 
                   if ($restoredTentativeNames.Count -gt 0) {
-                    Write-Host ("Restored {0} tentative layering culprit(s) before fallback isolation." -f $restoredTentativeNames.Count) -ForegroundColor Gray
+                    Write-Host ("Restored {0} tentative Layering culprit(s) before fallback Isolation." -f $restoredTentativeNames.Count) -ForegroundColor Gray
                   }
                   if ($failedTentativeNames.Count -gt 0) {
                     $failedPreview = @($failedTentativeNames | Select-Object -First 10)
                     $failedSuffix = if ($failedTentativeNames.Count -gt $failedPreview.Count) { " (+{0} more)" -f ($failedTentativeNames.Count - $failedPreview.Count) } else { "" }
-                    Write-Host ("Warning: failed to restore tentative layering culprits: {0}{1}" -f ($failedPreview -join ", "), $failedSuffix) -ForegroundColor Yellow
-                    Write-Host "Tentative layering culprits were removed from session report despite restore failures." -ForegroundColor Yellow
+                    Write-Host ("Warning: failed to restore tentative Layering culprits: {0}{1}" -f ($failedPreview -join ", "), $failedSuffix) -ForegroundColor Yellow
+                    Write-Host "Tentative Layering culprits were removed from session report despite restore failures." -ForegroundColor Yellow
                   }
 
                   if (-not [bool]$restoreLayeringInfo.Success) {
-                    Write-Host "Warning: failed to restore one or more tentative layering culprits before fallback isolation." -ForegroundColor Yellow
+                    Write-Host "Warning: failed to restore one or more tentative Layering culprits before fallback Isolation." -ForegroundColor Yellow
                   }
                 }
               }
-              Write-Host "Running subtractive isolation." -ForegroundColor Cyan
+              Write-Host "Running subtractive Isolation." -ForegroundColor Cyan
               $isolateParams = Get-IsolationParam -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
               $usedHashCacheNow = $false
               if ($isolateParams.ContainsKey("UseHashCache")) {
@@ -615,7 +737,7 @@ while ($true) {
                 Write-Host "Isolation interrupted by user (Ctrl+C)." -ForegroundColor Yellow
                 $isolateExitCode = 1
               } catch {
-                Write-Host ("Warning: isolation failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                Write-Host ("Warning: Isolation failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
                 $isolateExitCode = 1
               }
 
@@ -657,7 +779,7 @@ while ($true) {
                   Write-Host "Isolation retry interrupted by user (Ctrl+C)." -ForegroundColor Yellow
                   $isolateExitCode = 1
                 } catch {
-                  Write-Host ("Warning: isolation retry failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                  Write-Host ("Warning: Isolation retry failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
                   $isolateExitCode = 1
                 }
 
@@ -676,7 +798,7 @@ while ($true) {
               }
 
               if ($isolateExitCode -eq 130) {
-                Write-Host "Launcher start canceled by user during isolation. Stopping by user choice." -ForegroundColor Yellow
+                Write-Host "Launcher start canceled by user during Isolation. Stopping by user choice." -ForegroundColor Yellow
                 exit 0
               }
 
@@ -691,14 +813,14 @@ while ($true) {
             }
           }
           if ($skipDeepPipelineForFabric) {
-            Write-Host "Compatibility cleanup made no changes in Fabric-guided mode. Skipping Mixin/Layering for this attempt." -ForegroundColor Yellow
+            Write-Host "Baseline Analysis made no changes in Fabric-guided mode. Skipping Mixin Analysis/Layering for this attempt." -ForegroundColor Yellow
             $compatExitCode = 0
           } else {
-            Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop." -ForegroundColor Yellow
+            Write-Host "Baseline Analysis made no changes. Stopping to avoid a loop." -ForegroundColor Yellow
             exit 3
           }
         }
-        Write-Host ("Compatibility cleanup failed with exit code {0}. Stopping." -f $compatExitCode) -ForegroundColor Red
+        Write-Host ("Baseline Analysis failed with exit code {0}. Stopping." -f $compatExitCode) -ForegroundColor Red
         exit $compatExitCode
       }
     } else {
@@ -750,7 +872,7 @@ while ($true) {
       if ($DryRun) {
         Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
       } elseif ($fabricMissingDepsDetected) {
-        Write-Host "Окно Fabric оставлено открытым для ручного просмотра отсутствующих зависимостей." -ForegroundColor Yellow
+        Write-Host "Fabric window was left open for manual review of missing dependencies." -ForegroundColor Yellow
       } else {
         [void](Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
             -DelaySeconds 0 `
@@ -768,12 +890,18 @@ while ($true) {
   }
 
   if ($outcome.Type -eq "FabricDialog" -and $AutoHandleFabricDialog -and $DryRun) {
-    Write-Host "DRYRUN попытался бы авто-обработать Fabric диалог." -ForegroundColor Gray
+    Write-Host "DRYRUN would try to auto-handle the Fabric dialog." -ForegroundColor Gray
   }
   if (-not $DryRun) {
-    $closedAfterNonCrashOutcome = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
-    if ($closedAfterNonCrashOutcome -gt 0) {
-      Write-Host ("Closed {0} running game process(es) before prompt." -f $closedAfterNonCrashOutcome) -ForegroundColor Gray
+    # * Do not force-stop the game after a clean Timeout outcome.
+    # * Killing a healthy run here can trigger a synthetic launcher crash dialog on the next loop.
+    if ($outcome.Type -eq "Timeout") {
+      Write-Host "Game appears to be running after a clean launch; leaving it open before prompt." -ForegroundColor Gray
+    } else {
+      $closedAfterNonCrashOutcome = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+      if ($closedAfterNonCrashOutcome -gt 0) {
+        Write-Host ("Closed {0} running game process(es) before prompt." -f $closedAfterNonCrashOutcome) -ForegroundColor Gray
+      }
     }
   }
   $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
@@ -796,55 +924,64 @@ while ($true) {
 
   $prompt = $null
   if ($outcome.Type -eq "NoLaunch") {
-    $prompt = $(if ($hasSessionIsolants) { "Запуск игры не обнаружен. Выберите действие для изолированных модов:" } else { "Запуск игры не обнаружен. Продолжить попытки? (y/n)" })
+    $prompt = $(if ($hasSessionIsolants) { "Game launch not detected. Choose action for isolated mods:" } else { "Game launch not detected. Continue retrying? (<KEY_RETRY_HINT>)" })
   } elseif ($outcome.Type -eq "FabricDialog") {
-    $prompt = $(if ($hasSessionIsolants) { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Выберите действие для изолированных модов:" } else { "Обнаружено окно Fabric Loader (несовместимость/зависимости). Продолжить попытки? (y/n)" })
+    $prompt = $(if ($hasSessionIsolants) { "Fabric Loader window detected (incompatibility/dependencies). Choose action for isolated mods:" } else { "Fabric Loader window detected (incompatibility/dependencies). Continue retrying? (<KEY_RETRY_HINT>)" })
   } elseif ($cleanOutcome) {
-    $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Выберите действие для изолированных модов:" } else { "Краш не обнаружен. Похоже, проблемных модов нет. Продолжить попытки? (y/n)" })
+    $prompt = $(if ($hasSessionIsolants) { "No crash detected. Choose action for isolated mods:" } else { "No crash detected. It seems there are no problematic mods. Continue retrying? (<KEY_RETRY_HINT>)" })
   } else {
-    $prompt = $(if ($hasSessionIsolants) { "Краш не обнаружен. Выберите действие для изолированных модов:" } else { "Краш не обнаружен. Продолжить попытки? (y/n)" })
+    $prompt = $(if ($hasSessionIsolants) { "No crash detected. Choose action for isolated mods:" } else { "No crash detected. Continue retrying? (<KEY_RETRY_HINT>)" })
   }
 
   if ($hasSessionIsolants) {
     Write-Host $prompt -ForegroundColor Yellow
-    Write-Host "  c = продолжить с текущими изолятами (неполный набор модов)." -ForegroundColor Gray
-    Write-Host "  r = вернуть изоляты и продолжить с полного набора." -ForegroundColor Gray
-    Write-Host "  n = вернуть изоляты и завершить." -ForegroundColor Gray
-    Write-Host "  s = пропустить Recovery и завершить (оставить текущие изоляты как несовместимые)." -ForegroundColor Gray
+    Write-Host "  <KEY_CONTINUE_AS_IS> = continue with current isolated mods (incomplete mod set)." -ForegroundColor Gray
+    Write-Host "  <KEY_RESTORE_CONTINUE> = restore isolated mods and continue with the full set." -ForegroundColor Gray
+    Write-Host "  <KEY_RESTORE_EXIT> = restore isolated mods and stop." -ForegroundColor Gray
+    Write-Host "  <KEY_KEEP_EXIT> = skip Recovery and stop (keep current isolated mods as incompatible)." -ForegroundColor Gray
 
     $choice = ""
     while ([string]::IsNullOrWhiteSpace($choice)) {
-      $answerRaw = [string](Read-Host "Выбор [c/r/n/s]")
+      $answerRaw = [string](Read-Host "Choice [<KEY_ISOLANTS_HINT>]")
       $answer = $answerRaw.Trim().ToLowerInvariant()
-      if ($answer -match "^(c|continue|к)$") {
+      if ($answer -match $regexChoiceContinue) {
         $choice = "continue-as-is"
         break
       }
-      if ($answer -match "^(r|restore|y|yes|д|да|в)$") {
+      if ($answer -match $regexChoiceRestoreContinue) {
         $choice = "restore-and-continue"
         break
       }
-      if ($answer -match "^(n|no|н|нет)$") {
+      if ($answer -match $regexChoiceRestoreExit) {
         $choice = "restore-and-exit"
         break
       }
-      if ($answer -match "^(s|skip|stop|з|завершить)$") {
+      if ($answer -match $regexChoiceKeepExit) {
         $choice = "keep-and-exit"
         break
       }
-      Write-Host "Неверный ввод. Введите c, r, n или s." -ForegroundColor Yellow
+      Write-Host "Invalid input. Enter <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_CONTINUE>, <KEY_RESTORE_EXIT>, or <KEY_KEEP_EXIT>." -ForegroundColor Yellow
     }
 
     if ($choice -eq "continue-as-is") {
-      Write-Host "Продолжаю попытки без деизолирования модов." -ForegroundColor Cyan
+      Write-Host "Continuing attempts without de-isolating mods." -ForegroundColor Cyan
       Start-Sleep -Seconds 1
       continue
     }
 
     if ($choice -eq "keep-and-exit") {
-      Write-Host "Recovery пропущен по выбору пользователя. Текущие изоляты оставлены как несовместимые." -ForegroundColor Yellow
+      Write-Host "Recovery skipped by user choice. Current isolated mods are kept as incompatible." -ForegroundColor Yellow
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
       exit 0
+    }
+
+    # * Restore needs mod file operations; ensure the game is closed to avoid file locks.
+    if (-not $DryRun) {
+      $closedBeforeRestore = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+      if ($closedBeforeRestore -gt 0) {
+        Write-Host ("Closed {0} running game process(es) before restore." -f $closedBeforeRestore) -ForegroundColor Gray
+      }
+      [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "restore isolated mods")
     }
 
     $restoreLabel = if ($choice -eq "restore-and-exit") { "before exit" } else { "before continuing" }
@@ -857,7 +994,7 @@ while ($true) {
     $sessionIsolationCulpritByJar = @{}
 
     if ($choice -eq "restore-and-exit") {
-      Write-Host "Если скрипт не устранил проблему или сломался об некоторые моды и их зависимости - на период работы скрипта изолируйте эти токсичные моды вручную." -ForegroundColor Yellow
+      Write-Host "If the script did not resolve the issue or broke on specific mods and dependencies, isolate those toxic mods manually while the script runs." -ForegroundColor Yellow
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
       exit 0
     }
@@ -866,7 +1003,7 @@ while ($true) {
   }
 
   $answer = Read-Host $prompt
-  if ($answer -notmatch "^(y|yes|д|да)$") {
+  if ($answer -notmatch $regexRetryYes) {
     if ($hasSessionIsolants) {
       Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
       $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
@@ -876,7 +1013,7 @@ while ($true) {
       }
       $sessionIsolationCulpritByJar = @{}
     }
-    Write-Host "Если скрипт не устранил проблему или сломался об некоторые моды и их зависимости - на период работы скрипта изолируйте эти токсичные моды вручную." -ForegroundColor Yellow
+    Write-Host "If the script did not resolve the issue or broke on specific mods and dependencies, isolate those toxic mods manually while the script runs." -ForegroundColor Yellow
     Write-Host "Stopping by user choice." -ForegroundColor Yellow
     exit 0
   }

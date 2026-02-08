@@ -9,10 +9,20 @@ You can pass files or folders as arguments; folders are scanned recursively.
 
 [CmdletBinding(PositionalBinding = $false)]
 param(
+  # * Skip localization asset checks.
+  [switch]$NoLocales,
   # * Optional file or directory paths to analyze (defaults to repo root).
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$Path = @()
 )
+
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "scripts\Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -73,9 +83,23 @@ function Get-ScriptFile {
   return ,@($item.FullName)
 }
 
-$analyzerCommand = Get-Command -Name Invoke-ScriptAnalyzer -ErrorAction SilentlyContinue
+try {
+  Import-Module -Name "PSScriptAnalyzer" -ErrorAction Stop
+}
+catch {
+  Write-Error (
+    "Failed to activate PSScriptAnalyzer module. Fix: Install-Module PSScriptAnalyzer -Scope CurrentUser; " +
+    "then restart PowerShell and run .\checker.ps1 again. Details: {0}" -f $_.Exception.Message
+  )
+  exit $ExitCodeOnErrors
+}
+
+$analyzerCommand = Get-Command -Name "Invoke-ScriptAnalyzer" -ErrorAction SilentlyContinue
 if (-not $analyzerCommand) {
-  Write-Error "PSScriptAnalyzer is not installed. Install-Module PSScriptAnalyzer -Scope CurrentUser"
+  Write-Error (
+    "Invoke-ScriptAnalyzer command is unavailable after importing PSScriptAnalyzer. " +
+    "Fix: Update-Module PSScriptAnalyzer or reinstall it (Install-Module PSScriptAnalyzer -Scope CurrentUser)."
+  )
   exit $ExitCodeOnErrors
 }
 
@@ -96,6 +120,7 @@ if (-not $uniqueFiles -or $uniqueFiles.Count -eq 0) {
 
 $findings = New-Object System.Collections.Generic.List[object]
 $hadAnalyzerError = $false
+$localeValidationFailed = $false
 foreach ($file in $uniqueFiles) {
   try {
     $settingsPath = Join-Path -Path $repoRoot -ChildPath "PSScriptAnalyzerSettings.psd1"
@@ -119,6 +144,45 @@ foreach ($file in $uniqueFiles) {
   }
 }
 
+if (-not $NoLocales) {
+  $localeCheckerPath = Join-Path -Path $repoRoot -ChildPath "tools\Check-Localization.py"
+  if (-not (Test-Path -LiteralPath $localeCheckerPath)) {
+    $hadAnalyzerError = $true
+    Write-Warning ("Localization checker not found: {0}" -f $localeCheckerPath)
+  } else {
+    $pythonExe = Get-Command -Name "python" -ErrorAction SilentlyContinue
+    $pythonArgs = @()
+    if ($null -eq $pythonExe) {
+      $pythonExe = Get-Command -Name "py" -ErrorAction SilentlyContinue
+      if ($null -ne $pythonExe) {
+        $pythonArgs += "-3"
+      }
+    }
+
+    if ($null -eq $pythonExe) {
+      $hadAnalyzerError = $true
+      Write-Warning "Python runtime was not found (tried: python, py). Use -NoLocales to skip localization checks."
+    } else {
+      Write-Output "Running localization checks..."
+      try {
+        & $pythonExe.Source @pythonArgs $localeCheckerPath
+        $localeExitCode = $LASTEXITCODE
+      } catch {
+        $hadAnalyzerError = $true
+        $localeExitCode = $ExitCodeOnErrors
+        Write-Warning ("Localization checker execution failed: {0}" -f $_.Exception.Message)
+      }
+
+      if ($localeExitCode -eq 1) {
+        $localeValidationFailed = $true
+      } elseif ($localeExitCode -ne 0) {
+        $hadAnalyzerError = $true
+        Write-Warning ("Localization checker failed with exit code {0}" -f $localeExitCode)
+      }
+    }
+  }
+}
+
 if ($findings.Count -gt 0) {
   $findings |
     Sort-Object -Property ScriptName, Line, RuleName |
@@ -134,11 +198,18 @@ if ($WriteSummary) {
   } else {
     Write-Output "No ScriptAnalyzer findings."
   }
+  if ($NoLocales) {
+    Write-Output "Localization check: skipped (-NoLocales)."
+  } elseif ($localeValidationFailed) {
+    Write-Output "Localization check: validation failed."
+  } elseif (-not $hadAnalyzerError) {
+    Write-Output "Localization check: passed."
+  }
   if ($hadAnalyzerError) {
-    Write-Warning "One or more files failed analysis."
+    Write-Warning "One or more checks failed to execute."
   }
 }
 
 if ($hadAnalyzerError) { exit $ExitCodeOnErrors }
-if ($findings.Count -gt 0) { exit $ExitCodeOnFindings }
+if ($localeValidationFailed -or $findings.Count -gt 0) { exit $ExitCodeOnFindings }
 exit 0

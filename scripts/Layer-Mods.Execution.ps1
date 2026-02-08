@@ -15,7 +15,7 @@
 
       if (-not $tierMods -or $tierMods.Count -eq 0) { continue }
 
-      Write-Host ("Наслоение, уровень {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Cyan
+      Write-Host ("Layering, tier {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Cyan
 
       $remaining = [System.Collections.Generic.List[object]]::new(@($tierMods))
       $batchSize = 1
@@ -187,7 +187,7 @@
             $hadUnresolvableFabric = $true
             $consecutiveFabricFails++
             if ($consecutiveFabricFails -ge $maxConsecutiveFabricFails) {
-              Write-Host ("  {0} consecutive Fabric failures. Stopping уровень {1}." -f $consecutiveFabricFails, $tier) -ForegroundColor Yellow
+              Write-Host ("  {0} consecutive Fabric failures. Stopping tier {1}." -f $consecutiveFabricFails, $tier) -ForegroundColor Yellow
               break
             }
             continue
@@ -207,7 +207,7 @@
         . $layerBatchTriagePath
 
         # * Unexpected outcome — stop уровень.
-        Write-Host ("  Unexpected outcome: {0}. Stopping уровень." -f $layerResult.Type) -ForegroundColor Yellow
+        Write-Host ("  Unexpected outcome: {0}. Stopping tier." -f $layerResult.Type) -ForegroundColor Yellow
         break
       }
 

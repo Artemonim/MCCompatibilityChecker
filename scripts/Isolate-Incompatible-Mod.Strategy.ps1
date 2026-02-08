@@ -13,9 +13,9 @@
       if ($effectiveIsolationStrategy -eq "Exponential") {
         $exponentialCandidates = @($candidateMods | Where-Object { -not $pinnedJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
         if ($exponentialCandidates.Count -gt 0) {
-          Write-Host ("Exponential isolation enabled. Candidates: {0}" -f $exponentialCandidates.Count) -ForegroundColor Gray
+          Write-Host ("Exponential Isolation enabled. Candidates: {0}" -f $exponentialCandidates.Count) -ForegroundColor Gray
         } else {
-          Write-Host "Exponential isolation enabled, but no candidates remain after pinned exclusions." -ForegroundColor Yellow
+          Write-Host "Exponential Isolation enabled, but no candidates remain after pinned exclusions." -ForegroundColor Yellow
         }
         if ($exponentialCandidates.Count -gt 0) {
           $exponentialResult = Invoke-ExponentialIsolation -Mods $exponentialCandidates `
@@ -24,7 +24,7 @@
             -PinnedJarNames $pinnedJarNames
           $didExponential = $true
           $candidateMods = @($exponentialResult.Remaining)
-          Write-Host ("Exponential isolation completed. Switching to linear with {0} mod(s) ({1})." -f $candidateMods.Count, $exponentialResult.Reason) -ForegroundColor Gray
+          Write-Host ("Exponential Isolation completed. Switching to linear with {0} mod(s) ({1})." -f $candidateMods.Count, $exponentialResult.Reason) -ForegroundColor Gray
         }
       }
 
@@ -55,7 +55,7 @@
         } else {
           # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
           # ! Stop early to prevent moving a random mod to Legacy.
-          Write-Host "Warning: baseline issue not reproduced in linear phase. Stopping isolation to avoid false culprit selection." -ForegroundColor Yellow
+          Write-Host "Warning: baseline issue not reproduced in linear phase. Stopping Isolation to avoid false culprit selection." -ForegroundColor Yellow
           $candidateMods = @()
         }
 

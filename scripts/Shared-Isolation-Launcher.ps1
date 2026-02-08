@@ -498,9 +498,36 @@ function Wait-ForOutcome {
   $observedGamePids = @{}
   $gameObservedOnce = $false
   $gameExited = $false
+  $launcherProcessIds = @()
+  if ($LauncherHandleId -ne 0) {
+    try {
+      $launcherProcessId = Get-WindowProcessId -Handle ([IntPtr]$LauncherHandleId)
+      if ($launcherProcessId -gt 0) {
+        $launcherProcessIds = @([int]$launcherProcessId)
+      }
+    } catch {
+      $launcherProcessIds = @()
+    }
+  }
+
+  $selectOutcomeWindow = {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string[]]$Patterns,
+      [Parameter(Mandatory = $false)]
+      [long[]]$ExcludeHandleIds = @()
+    )
+
+    if ($launcherProcessIds.Count -gt 0) {
+      $ownedWindow = Select-WindowByTitlePattern -Patterns $Patterns -ExcludeHandleIds $ExcludeHandleIds -ProcessIds $launcherProcessIds
+      if ($null -ne $ownedWindow) { return $ownedWindow }
+    }
+
+    return (Select-WindowByTitlePattern -Patterns $Patterns -ExcludeHandleIds $ExcludeHandleIds)
+  }
 
   while ((Get-Date) -lt $deadline) {
-    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
+    $fabricWindow = & $selectOutcomeWindow -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
     if ($null -ne $fabricWindow) {
       return [pscustomobject]@{
         Type = "FabricDialog"
@@ -511,7 +538,7 @@ function Wait-ForOutcome {
       }
     }
 
-    $crashWindow = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+    $crashWindow = & $selectOutcomeWindow -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
     if ($null -ne $crashWindow) {
       return [pscustomobject]@{
         Type = "CrashDialog"
@@ -563,7 +590,7 @@ function Wait-ForOutcome {
         # * Crash/Fabric dialogs may appear with delay after process exit.
         $postExitDeadline = (Get-Date).AddSeconds(5)
         while ((Get-Date) -lt $postExitDeadline) {
-          $fabricAfterExit = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
+          $fabricAfterExit = & $selectOutcomeWindow -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
           if ($null -ne $fabricAfterExit) {
             return [pscustomobject]@{
               Type = "FabricDialog"
@@ -573,7 +600,7 @@ function Wait-ForOutcome {
               LaunchObserved = $true
             }
           }
-          $crashAfterExit = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+          $crashAfterExit = & $selectOutcomeWindow -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
           if ($null -ne $crashAfterExit) {
             return [pscustomobject]@{
               Type = "CrashDialog"
@@ -619,7 +646,7 @@ function Wait-ForOutcome {
   }
 
   # * Late outcome check: dialogs/process exit can occur at the timeout boundary.
-  $fabricWindowLate = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
+  $fabricWindowLate = & $selectOutcomeWindow -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
   if ($null -ne $fabricWindowLate) {
     return [pscustomobject]@{
       Type = "FabricDialog"
@@ -630,7 +657,7 @@ function Wait-ForOutcome {
     }
   }
 
-  $crashWindowLate = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+  $crashWindowLate = & $selectOutcomeWindow -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
   if ($null -ne $crashWindowLate) {
     return [pscustomobject]@{
       Type = "CrashDialog"
@@ -665,7 +692,7 @@ function Wait-ForOutcome {
     # * Final boundary check: delayed dialogs can appear after game exit.
     $postExitLateDeadline = (Get-Date).AddSeconds(5)
     while ((Get-Date) -lt $postExitLateDeadline) {
-      $fabricAfterExitLate = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
+      $fabricAfterExitLate = & $selectOutcomeWindow -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
       if ($null -ne $fabricAfterExitLate) {
         return [pscustomobject]@{
           Type = "FabricDialog"
@@ -675,7 +702,7 @@ function Wait-ForOutcome {
           LaunchObserved = $launchTriggered
         }
       }
-      $crashAfterExitLate = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
+      $crashAfterExitLate = & $selectOutcomeWindow -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
       if ($null -ne $crashAfterExitLate) {
         return [pscustomobject]@{
           Type = "CrashDialog"
@@ -768,13 +795,13 @@ function Request-UserToCloseBlockingWindow {
 
   if ($HandleId -eq 0) { return }
 
-  $label = if ([string]::IsNullOrWhiteSpace($WindowTitle)) { "неизвестное мешающее окно" } else { $WindowTitle }
-  $message = "Не удалось закрыть мешающее окно автоматически. Закройте его вручную и нажмите OK для продолжения.`nОкно: {0}" -f $label
+  $label = if ([string]::IsNullOrWhiteSpace($WindowTitle)) { "unknown interfering window" } else { $WindowTitle }
+  $message = "Failed to close the interfering window automatically. Please close it manually and click OK to continue.`nWindow: {0}" -f $label
 
   while (Test-WindowPresence -HandleId $HandleId) {
     [void][System.Windows.Forms.MessageBox]::Show(
       $message,
-      "Требуется действие пользователя",
+      "User action required",
       [System.Windows.Forms.MessageBoxButtons]::OK,
       [System.Windows.Forms.MessageBoxIcon]::Warning
     )
@@ -794,7 +821,7 @@ function Wait-ForLauncherWindowInteractive {
     [int]$PollSeconds
   )
 
-  $promptMessage = "Не удалось увидеть окно лаунчера. Закройте неизвестное мешающее окно (включая игру, если она запущена) и нажмите OK для продолжения."
+  $promptMessage = "Could not see the launcher window. Please close any unknown interfering windows (including the game if it's running) and click OK to continue."
   # * Retry counter: wait and retry before prompting the user.
   # * The launcher may be temporarily invisible while re-rendering or
   # * a transient overlay window (e.g. from the game restart) may block detection.
@@ -839,7 +866,7 @@ function Wait-ForLauncherWindowInteractive {
 
     [void][System.Windows.Forms.MessageBox]::Show(
       $promptMessage,
-      "Требуется действие пользователя",
+      "User action required",
       [System.Windows.Forms.MessageBoxButtons]::OK,
       [System.Windows.Forms.MessageBoxIcon]::Warning
     )
@@ -856,23 +883,23 @@ function Request-LauncherRecoveryDecision {
   )
 
   $attemptLabel = if ($PlayAttempts -gt 0) {
-    ("Попыток запуска: {0}." -f $PlayAttempts)
+    ("Launch attempts: {0}." -f $PlayAttempts)
   } else {
-    "Попытка запуска не обнаружена."
+    "Launch attempt not detected."
   }
 
   $prompt = @(
-    "Невозможно запустить или обнаружить лаунчер. Попробуйте перезапустить лаунчер."
+    "Unable to launch or detect the launcher. Please try restarting the launcher."
     $attemptLabel
     ""
-    "Да — продолжить попытки."
-    "Нет — отменить."
-    "Отмена — отменить с откатом изменений."
+    "Yes — continue retrying."
+    "No — cancel."
+    "Cancel — cancel with rollback."
   ) -join [Environment]::NewLine
 
   $result = [System.Windows.Forms.MessageBox]::Show(
     $prompt,
-    "Требуется действие пользователя",
+    "User action required",
     [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
     [System.Windows.Forms.MessageBoxIcon]::Warning
   )
@@ -1007,7 +1034,7 @@ function Invoke-LaunchAttempt {
 
     $decision = Request-LauncherRecoveryDecision -PlayAttempts $maxPlayAttempts
     if ($decision -eq "continue") {
-      Write-Host "Продолжаю попытки запуска после действия пользователя." -ForegroundColor Cyan
+      Write-Host "Continuing launch attempts after user action." -ForegroundColor Cyan
       $launcherWindow = Select-WindowByTitlePattern -Patterns @($LauncherTitlePattern)
       if ($null -eq $launcherWindow) {
         $launcherWindow = Wait-ForLauncherWindowInteractive -TitlePattern $LauncherTitlePattern `

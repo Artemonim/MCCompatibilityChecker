@@ -219,6 +219,14 @@ param(
   [switch]$Help
 )
 
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -293,6 +301,59 @@ function Get-SeverityFromEvidence {
   }
   if ($hasWarn) { return "warn" }
   return "error"
+}
+
+function Get-NormalizedEvidenceLine {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Line
+  )
+
+  $trimmed = [string]$Line
+  if ([string]::IsNullOrWhiteSpace($trimmed)) { return "" }
+  $trimmed = $trimmed.Trim()
+  # * Collapse whitespace so duplicate evidence from different log sources is counted once.
+  return ([regex]::Replace($trimmed, "\s+", " ").ToLowerInvariant())
+}
+
+function Get-ModIdSetFromLine {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Line
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Line)) { return @() }
+  $result = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $idMatches = [regex]::Matches($Line, "\((?<id>[a-z0-9_\-\.]+)\)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  foreach ($m in $idMatches) {
+    if (-not $m.Success) { continue }
+    $id = [string]$m.Groups["id"].Value
+    if ([string]::IsNullOrWhiteSpace($id)) { continue }
+    $null = $result.Add($id.ToLowerInvariant())
+  }
+  if ($result.Count -eq 0) { return @() }
+  return @($result)
+}
+
+function Test-HasFabricDialogSignal {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Lines
+  )
+
+  foreach ($line in $Lines) {
+    $text = [string]$line
+    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+    if (
+      $text -match "(?i)^\s*Some\s+of\s+your\s+mods\s+are\s+incompatible\b" -or
+      $text -match "(?i)^\s*A\s+potential\s+solution\s+has\s+been\s+determined\b" -or
+      $text -match "(?i)^\s*More\s+details:\s*$" -or
+      $text -match "(?i)^\s*(?:[-*•]\s+)?(?:Remove|Replace)\s+mod\b"
+    ) {
+      return $true
+    }
+  }
+  return $false
 }
 
 function Build-ModIdToJarMap {
@@ -459,6 +520,124 @@ if ($ignoreSet.Count -gt 0) {
   }
 }
 
+$patterns = Get-IncompatibleModPatternSet -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
+$fabricConflictDeferredModIds = @()
+$modConflictStats = @{}
+$modReferrersByTarget = @{}
+
+if ($evidenceByModId.Count -gt 0) {
+  foreach ($modId in @($evidenceByModId.Keys)) {
+    $rawEvidence = @($evidenceByModId[$modId])
+    $uniqueLineSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $uniqueEvidence = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $rawEvidence) {
+      $text = [string]$line
+      if ([string]::IsNullOrWhiteSpace($text)) { continue }
+      $normalized = Get-NormalizedEvidenceLine -Line $text
+      if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+      if ($uniqueLineSet.Add($normalized)) {
+        $uniqueEvidence.Add($text.Trim()) | Out-Null
+      }
+    }
+
+    $evidenceByModId[$modId] = @($uniqueEvidence.ToArray())
+
+    $fabricSuggestionCount = 0
+    $incompatibleDetailCount = 0
+    $referencesOtherSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($line in @($evidenceByModId[$modId])) {
+      $text = [string]$line
+      if ([string]::IsNullOrWhiteSpace($text)) { continue }
+      if (
+        [regex]::IsMatch($text, $patterns.FabricRemovePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) -or
+        [regex]::IsMatch($text, $patterns.FabricReplacePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) -or
+        [regex]::IsMatch($text, "(?i)\bFix:\s+add\s+\[")
+      ) {
+        $fabricSuggestionCount++
+      }
+      if ([regex]::IsMatch($text, $patterns.IncompatibleDetailPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+        $incompatibleDetailCount++
+      }
+
+      $mentionedIds = @(Get-ModIdSetFromLine -Line $text)
+      foreach ($mentionedId in $mentionedIds) {
+        if ([string]::IsNullOrWhiteSpace($mentionedId)) { continue }
+        if ($mentionedId -eq $modId) { continue }
+        $null = $referencesOtherSet.Add($mentionedId)
+        if (-not $modReferrersByTarget.ContainsKey($mentionedId)) {
+          $modReferrersByTarget[$mentionedId] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
+        $null = $modReferrersByTarget[$mentionedId].Add($modId)
+      }
+    }
+
+    $evidenceCount = @($evidenceByModId[$modId]).Count
+    $referencesOtherCount = $referencesOtherSet.Count
+    $conflictScore = [int]($evidenceCount + ($incompatibleDetailCount * 2) + ($referencesOtherCount * 2))
+
+    $modConflictStats[$modId] = [pscustomobject]@{
+      EvidenceCount = [int]$evidenceCount
+      FabricSuggestionCount = [int]$fabricSuggestionCount
+      IncompatibleDetailCount = [int]$incompatibleDetailCount
+      ReferencesOtherCount = [int]$referencesOtherCount
+      ReferencedByOtherCount = 0
+      ConflictScore = [int]$conflictScore
+    }
+  }
+
+  foreach ($modId in @($modConflictStats.Keys)) {
+    $referencedByCount = 0
+    if ($modReferrersByTarget.ContainsKey($modId)) {
+      $referencedByCount = [int]$modReferrersByTarget[$modId].Count
+    }
+    $stats = $modConflictStats[$modId]
+    $modConflictStats[$modId] = [pscustomobject]@{
+      EvidenceCount = [int]$stats.EvidenceCount
+      FabricSuggestionCount = [int]$stats.FabricSuggestionCount
+      IncompatibleDetailCount = [int]$stats.IncompatibleDetailCount
+      ReferencesOtherCount = [int]$stats.ReferencesOtherCount
+      ReferencedByOtherCount = [int]$referencedByCount
+      ConflictScore = [int]$stats.ConflictScore
+    }
+  }
+}
+
+$hasFabricDialogSignal = Test-HasFabricDialogSignal -Lines $allLogLines
+if ($hasFabricDialogSignal -and $evidenceByModId.Count -gt 1 -and $modConflictStats.Count -gt 0) {
+  $deferred = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($modId in @($modConflictStats.Keys)) {
+    $stats = $modConflictStats[$modId]
+    $onlyFabricSuggestion = ($stats.EvidenceCount -gt 0 -and $stats.EvidenceCount -eq $stats.FabricSuggestionCount)
+    if (-not $onlyFabricSuggestion) { continue }
+    if ($stats.ReferencedByOtherCount -le 0) { continue }
+    if (-not $modReferrersByTarget.ContainsKey($modId)) { continue }
+
+    $maxReferrerScore = -1
+    foreach ($referrer in @($modReferrersByTarget[$modId])) {
+      if (-not $modConflictStats.ContainsKey($referrer)) { continue }
+      $refScore = [int]$modConflictStats[$referrer].ConflictScore
+      if ($refScore -gt $maxReferrerScore) {
+        $maxReferrerScore = $refScore
+      }
+    }
+
+    if ($maxReferrerScore -gt [int]$stats.ConflictScore) {
+      $null = $deferred.Add($modId)
+    }
+  }
+
+  if ($deferred.Count -gt 0 -and $deferred.Count -lt $evidenceByModId.Count) {
+    $fabricConflictDeferredModIds = @($deferred | Sort-Object)
+    foreach ($modId in $fabricConflictDeferredModIds) {
+      if ($evidenceByModId.ContainsKey($modId)) {
+        $null = $evidenceByModId.Remove($modId)
+      }
+    }
+    Write-Host ("Fabric conflict-priority deferred secondary mod IDs: {0}" -f ($fabricConflictDeferredModIds -join ", ")) -ForegroundColor Gray
+  }
+}
+
 # * Legacy.log is now maintained as a persistent culprit-move log by Auto-Run-LegacyLauncher.
 # * Evidence logging removed; culprit entries are appended by Layer-Mods / Isolate scripts.
 
@@ -579,6 +758,22 @@ if ($dependencyPriorityByJarName.Count -gt 0) {
 
 $modIdOrder = New-Object System.Collections.Generic.List[object]
 foreach ($modId in $evidenceByModId.Keys) {
+  $conflictScore = 0
+  $evidenceCount = 0
+  $fabricSuggestionCount = 0
+  $incompatibleDetailCount = 0
+  $referencesOtherCount = 0
+  $referencedByOtherCount = 0
+  if ($modConflictStats.ContainsKey($modId)) {
+    $conflictStats = $modConflictStats[$modId]
+    $conflictScore = [int]$conflictStats.ConflictScore
+    $evidenceCount = [int]$conflictStats.EvidenceCount
+    $fabricSuggestionCount = [int]$conflictStats.FabricSuggestionCount
+    $incompatibleDetailCount = [int]$conflictStats.IncompatibleDetailCount
+    $referencesOtherCount = [int]$conflictStats.ReferencesOtherCount
+    $referencedByOtherCount = [int]$conflictStats.ReferencedByOtherCount
+  }
+
   $latestWrite = [datetime]::MinValue
   $bestTier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
   $bestDependentCount = -1
@@ -627,11 +822,19 @@ foreach ($modId in $evidenceByModId.Keys) {
     Known = [bool]$bestKnown
     DependentCountSort = [int]$bestDependentSort
     PriorityDecision = $priorityDecision
+    ConflictScore = [int]$conflictScore
+    EvidenceCount = [int]$evidenceCount
+    FabricSuggestionCount = [int]$fabricSuggestionCount
+    IncompatibleDetailCount = [int]$incompatibleDetailCount
+    ReferencesOtherCount = [int]$referencesOtherCount
+    ReferencedByOtherCount = [int]$referencedByOtherCount
   }
 
   $null = $modIdOrder.Add([pscustomobject]@{
       ModId = $modId
       LastWriteTime = $latestWrite
+      ConflictScore = [int]$conflictScore
+      EvidenceCount = [int]$evidenceCount
       PriorityTier = [int]$bestTier
       PriorityDependentCount = [int]$bestDependentCount
       PriorityDependentCountSort = [int]$bestDependentSort
@@ -640,6 +843,8 @@ foreach ($modId in $evidenceByModId.Keys) {
     })
 }
 $modIdSortProps = @(
+  @{ Expression = { $_.ConflictScore }; Descending = $true }
+  @{ Expression = { $_.EvidenceCount }; Descending = $true }
   @{ Expression = { $_.PriorityTier }; Ascending = $true }
   @{ Expression = { $_.PriorityDependentCountSort }; Ascending = $true }
   @{ Expression = { $_.LastWriteTime }; Descending = $true }
@@ -658,6 +863,12 @@ foreach ($modId in $orderedModIds) {
   $priorityDependents = if ($null -ne $modPriority) { [int]$modPriority.DependentCount } else { -1 }
   $priorityKnown = if ($null -ne $modPriority) { [bool]$modPriority.Known } else { $false }
   $priorityDecision = if ($null -ne $modPriority) { [string]$modPriority.PriorityDecision } else { "" }
+  $conflictScore = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ConflictScore").Count -gt 0) { [int]$modPriority.ConflictScore } else { 0 }
+  $evidenceCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("EvidenceCount").Count -gt 0) { [int]$modPriority.EvidenceCount } else { 0 }
+  $fabricSuggestionCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("FabricSuggestionCount").Count -gt 0) { [int]$modPriority.FabricSuggestionCount } else { 0 }
+  $incompatibleDetailCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("IncompatibleDetailCount").Count -gt 0) { [int]$modPriority.IncompatibleDetailCount } else { 0 }
+  $referencesOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencesOtherCount").Count -gt 0) { [int]$modPriority.ReferencesOtherCount } else { 0 }
+  $referencedByOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencedByOtherCount").Count -gt 0) { [int]$modPriority.ReferencedByOtherCount } else { 0 }
 
   $gameJarPaths = @()
   if ($gameIdToJars.ContainsKey($modId)) { $gameJarPaths = @($gameIdToJars[$modId]) }
@@ -680,6 +891,12 @@ foreach ($modId in $orderedModIds) {
         dependentMods = $priorityDependents
         dependentModsKnown = $priorityKnown
         priorityDecision = $priorityDecision
+        conflictScore = $conflictScore
+        evidenceCount = $evidenceCount
+        fabricSuggestionCount = $fabricSuggestionCount
+        incompatibleDetailCount = $incompatibleDetailCount
+        referencesOtherCount = $referencesOtherCount
+        referencedByOtherCount = $referencedByOtherCount
       })
     continue
   }
@@ -746,6 +963,12 @@ foreach ($modId in $orderedModIds) {
         dependentMods = $priorityDependents
         dependentModsKnown = $priorityKnown
         priorityDecision = $priorityDecision
+        conflictScore = $conflictScore
+        evidenceCount = $evidenceCount
+        fabricSuggestionCount = $fabricSuggestionCount
+        incompatibleDetailCount = $incompatibleDetailCount
+        referencesOtherCount = $referencesOtherCount
+        referencedByOtherCount = $referencedByOtherCount
       })
   }
 }
@@ -839,7 +1062,7 @@ if ($dependencyPriorityApplied -and $modIdOrder.Count -gt 0) {
   $preview = @($modIdOrder | Sort-Object -Property $modIdSortProps | Select-Object -First 8)
   if ($preview.Count -gt 0) {
     $previewLabel = $preview | ForEach-Object {
-      "{0}(tier={1},dependents={2})" -f $_.ModId, $_.PriorityTier, $_.PriorityDependentCount
+      "{0}(conflicts={1},tier={2},dependents={3})" -f $_.ModId, $_.ConflictScore, $_.PriorityTier, $_.PriorityDependentCount
     }
     Write-Host ("Dependency-priority order (top): {0}" -f ($previewLabel -join " -> ")) -ForegroundColor Gray
   }
@@ -863,6 +1086,7 @@ $report = [pscustomobject]@{
   dependencyOrderingMode = $countMode
   dependencyTier2MaxDependents = [int]$DependencyAwareTier2MaxDependents
   dependencyTier3MaxDependents = [int]$DependencyAwareTier3MaxDependents
+  fabricConflictDeferredModIds = @($fabricConflictDeferredModIds)
   count = $actions.Count
   items = $actions
 }

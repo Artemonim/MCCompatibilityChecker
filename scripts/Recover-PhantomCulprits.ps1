@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Post-isolation recovery: detects culprits that share the same Mixin error and
+Post-Изоляция Recovery: detects culprits that share the same Mixin error and
 attempts to restore them by removing the actual root-cause mod instead.
 
 .DESCRIPTION
@@ -64,7 +64,7 @@ param(
   [string]$LauncherWindowTitlePattern = "Legacy Launcher",
 
   [Parameter(Mandatory = $false)]
-  [string[]]$PlayButtonNames = @("Запустить", "Play", "Start"),
+  [string[]]$PlayButtonNames = @("Launch", "Play", "Start"),
 
   [Parameter(Mandatory = $false)]
   [int]$PlayClickOffsetX = -1,
@@ -91,7 +91,7 @@ param(
   [bool]$EnableBroadUiSearch = $false,
 
   [Parameter(Mandatory = $false)]
-  [string[]]$CrashWindowTitlePatterns = @("Что-то сломалось"),
+  [string[]]$CrashWindowTitlePatterns = @("Something broke"),
 
   [Parameter(Mandatory = $false)]
   [string[]]$FabricWindowTitlePatterns = @("Fabric Loader", "owo-sentinel"),
@@ -133,6 +133,17 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$DryRun
 )
+
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
+  $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -509,7 +520,7 @@ foreach ($group in $qualifiedGroups) {
       }
     } catch {
       # ! Error during launch/verification — revert all changes and re-throw.
-      Write-Host ("  Error during recovery verification: {0}. Rolling back." -f $_.Exception.Message) -ForegroundColor Red
+      Write-Host ("  Error during Recovery verification: {0}. Rolling back." -f $_.Exception.Message) -ForegroundColor Red
       foreach ($mJar in $restoredPaths.Keys) {
         $mGamePath = Join-Path -Path $GameModsDir -ChildPath $mJar
         if (Test-Path -LiteralPath $mGamePath) {

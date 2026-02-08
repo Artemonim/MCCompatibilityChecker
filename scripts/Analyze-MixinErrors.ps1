@@ -75,7 +75,7 @@ param(
   [string]$LauncherWindowTitlePattern = "Legacy Launcher",
 
   [Parameter(Mandatory = $false)]
-  [string[]]$PlayButtonNames = @("Запустить", "Play", "Start"),
+  [string[]]$PlayButtonNames = @("Launch", "Play", "Start"),
 
   [Parameter(Mandatory = $false)]
   [int]$PlayClickOffsetX = -1,
@@ -102,7 +102,7 @@ param(
   [bool]$EnableBroadUiSearch = $false,
 
   [Parameter(Mandatory = $false)]
-  [string[]]$CrashWindowTitlePatterns = @("Что-то сломалось"),
+  [string[]]$CrashWindowTitlePatterns = @("Something broke"),
 
   [Parameter(Mandatory = $false)]
   [string[]]$FabricWindowTitlePatterns = @("Fabric Loader", "owo-sentinel"),
@@ -150,6 +150,17 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$DryRun
 )
+
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
+  $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"

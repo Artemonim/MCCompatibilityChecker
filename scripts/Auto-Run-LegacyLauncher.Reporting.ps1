@@ -243,7 +243,7 @@ function Write-SessionReport {
   )
 
   Write-Host ""
-  Write-Host "Session report" -ForegroundColor Cyan
+  Write-Host "Summary" -ForegroundColor Cyan
   $endTime = Get-Date
   Write-Host ("End time: {0}" -f $endTime.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
   if ($SessionStartTime -ne [datetime]::MinValue) {
@@ -334,11 +334,11 @@ function Write-SessionReport {
 
     # * Display by stage.
     $stageLabels = @{
-      "compatibility-cleanup" = "Compatibility cleanup"
-      "mixin-analysis" = "Mixin analysis"
+      "compatibility-cleanup" = "Baseline Analysis"
+      "mixin-analysis" = "Mixin Analysis"
       "layering"       = "Layering"
-      "isolation"      = "Subtractive isolation"
-      "recovery"       = "Recovery (root cause)"
+      "isolation"      = "Isolation"
+      "recovery"       = "Recovery"
       "unknown"        = "Other"
     }
     foreach ($stage in @("compatibility-cleanup", "mixin-analysis", "layering", "isolation", "recovery", "unknown")) {

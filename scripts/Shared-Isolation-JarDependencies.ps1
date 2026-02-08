@@ -1132,7 +1132,7 @@ function Select-QuickIsolateJarsByTier {
   if ($skipped.Count -gt 0) {
     $contextLabel = if ([string]::IsNullOrWhiteSpace($Context)) { "" } else { " ({0})" -f $Context }
     $skippedLabel = ($skipped | Sort-Object -Unique) -join ", "
-    Write-Host ("Быстрая изоляция пропустила моды уровня core{0}: {1}" -f $contextLabel, $skippedLabel) -ForegroundColor Gray
+    Write-Host ("Fast Isolation skipped core-tier mods{0}: {1}" -f $contextLabel, $skippedLabel) -ForegroundColor Gray
   }
 
   if ($allowed.Count -eq 0) { return @() }
@@ -1163,7 +1163,7 @@ function Select-QuickIsolateJarsByTier {
     $selectedLabel = ($selectedItems | ForEach-Object { [string]$_.Jar.Name }) -join ", "
     $deferredLabel = ($deferredItems | ForEach-Object { [string]$_.Jar.Name }) -join ", "
     $contextLabel = if ([string]::IsNullOrWhiteSpace($Context)) { "" } else { " ({0})" -f $Context }
-    Write-Host ("Приоритетный выбор{0}: изолируем {1}; откладываем {2}" -f $contextLabel, $selectedLabel, $deferredLabel) -ForegroundColor Gray
+    Write-Host ("Priority choice{0}: isolate {1}; defer {2}" -f $contextLabel, $selectedLabel, $deferredLabel) -ForegroundColor Gray
     $resultItems = $selectedItems
 
     if ($null -ne $decisionMap) {

@@ -171,7 +171,7 @@ param(
 
   # * Button names to start the game.
   [Parameter(Mandatory = $false)]
-  [string[]]$PlayButtonNames = @("Запустить", "Play", "Start"),
+  [string[]]$PlayButtonNames = @("Launch", "Play", "Start"),
 
   # * Optional click offsets (pixels) relative to the top-left of the launcher window.
   # * Set both to enable coordinate-based click fallback.
@@ -214,7 +214,7 @@ param(
 
   # * Crash dialog title fragments.
   [Parameter(Mandatory = $false)]
-  [string[]]$CrashWindowTitlePatterns = @("Что-то сломалось"),
+  [string[]]$CrashWindowTitlePatterns = @("Something broke"),
 
   # * Fabric or dependency dialog title fragments.
   [Parameter(Mandatory = $false)]
@@ -333,6 +333,14 @@ param(
   [switch]$Help
 )
 
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -433,6 +441,10 @@ $profileOverrides = Get-ProfileOverride `
   -KeyTypeMap $profileTypeMap
 foreach ($key in $profileOverrides.Keys) {
   Set-Variable -Name $key -Value $profileOverrides[$key] -Scope Local
+}
+
+if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns") -and (-not $profileOverrides.ContainsKey("CrashWindowTitlePatterns"))) {
+  $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
 }
 
 $stageMixinAnalysisEnabled = Get-IniBool -Ini $configIni -Section "Stages" -Key "EnableMixinAnalysis" -Default $true

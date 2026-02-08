@@ -270,7 +270,7 @@ param(
   [string]$LauncherWindowTitlePattern = "Legacy Launcher",
 
   [Parameter(Mandatory = $false)]
-  [string[]]$PlayButtonNames = @("Запустить", "Play", "Start"),
+  [string[]]$PlayButtonNames = @("Launch", "Play", "Start"),
 
   [Parameter(Mandatory = $false)]
   [int]$PlayClickOffsetX = -1,
@@ -300,7 +300,7 @@ param(
   [bool]$EnableBroadUiSearch = $false,
 
   [Parameter(Mandatory = $false)]
-  [string[]]$CrashWindowTitlePatterns = @("Что-то сломалось"),
+  [string[]]$CrashWindowTitlePatterns = @("Something broke"),
 
   [Parameter(Mandatory = $false)]
   [string[]]$FabricWindowTitlePatterns = @("Fabric Loader", "owo-sentinel"),
@@ -395,6 +395,17 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$Help
 )
+
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
+  $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -638,7 +649,7 @@ if ($depMap -and $depMap.Count -gt 0) {
     }
   }
 } else {
-  Write-Host "Warning: dependency map is empty. Классификация по уровням недоступна; все моды считаются уровнем 1." -ForegroundColor Yellow
+  Write-Host "Warning: dependency map is empty. Tier classification is unavailable; all mods are treated as tier 1." -ForegroundColor Yellow
   foreach ($mod in $candidateMods) {
     Add-Member -InputObject $mod -NotePropertyName DependentModCount -NotePropertyValue 0 -Force
     Add-Member -InputObject $mod -NotePropertyName DependentModTier -NotePropertyValue 1 -Force
@@ -703,10 +714,10 @@ Write-Host ("Layering strategy. Total mods: {0}" -f $candidateMods.Count) -Foreg
 if ($script:mcccCacheEnabled -and $script:mcccKnownGoodJarNameSet.Count -gt 0) {
   Write-Host ("  Hash cache: skipping {0} previously passed mod(s)." -f $script:mcccKnownGoodJarNameSet.Count) -ForegroundColor Gray
 }
-Write-Host ("  Уровень 4 (core): {0} mod(s) - активны с начала" -f $tier4Mods.Count) -ForegroundColor Gray
-Write-Host ("  Уровень 3 (слой 1): {0} mod(s)" -f $tier3Mods.Count) -ForegroundColor Gray
-Write-Host ("  Уровень 2 (слой 2): {0} mod(s)" -f $tier2Mods.Count) -ForegroundColor Gray
-Write-Host ("  Уровень 1 (слой 3): {0} mod(s)" -f $tier1Mods.Count) -ForegroundColor Gray
+Write-Host ("  Tier 4 (core): {0} mod(s) - active from the start" -f $tier4Mods.Count) -ForegroundColor Gray
+Write-Host ("  Tier 3 (layer 1): {0} mod(s)" -f $tier3Mods.Count) -ForegroundColor Gray
+Write-Host ("  Tier 2 (layer 2): {0} mod(s)" -f $tier2Mods.Count) -ForegroundColor Gray
+Write-Host ("  Tier 1 (layer 3): {0} mod(s)" -f $tier1Mods.Count) -ForegroundColor Gray
 
 if ($nonCoreMods.Count -eq 0) {
   if ($script:mcccCacheEnabled -and $script:mcccKnownGoodJarNameSet.Count -gt 0) {
@@ -720,12 +731,12 @@ if ($nonCoreMods.Count -eq 0) {
 if ($DryRun) {
   Write-Host "--- Dry Run Plan ---" -ForegroundColor Cyan
   foreach ($mod in $tier4Mods) {
-    Write-Host ("  [core] {0} | уровень=4 | dependents={1}" -f $mod.Name, $mod.DependentModCount) -ForegroundColor Gray
+    Write-Host ("  [core] {0} | tier=4 | dependents={1}" -f $mod.Name, $mod.DependentModCount) -ForegroundColor Gray
   }
   foreach ($tier in @(3, 2, 1)) {
     $tierMods = switch ($tier) { 3 { $tier3Mods } 2 { $tier2Mods } 1 { $tier1Mods } }
     foreach ($mod in $tierMods) {
-      Write-Host ("  [layer] {0} | уровень={1} | dependents={2}" -f $mod.Name, $tier, $mod.DependentModCount) -ForegroundColor Gray
+      Write-Host ("  [layer] {0} | tier={1} | dependents={2}" -f $mod.Name, $tier, $mod.DependentModCount) -ForegroundColor Gray
     }
   }
   Write-Host "Dry run complete. No changes made." -ForegroundColor Green
@@ -924,7 +935,7 @@ function Invoke-Tier1BatchNarrowing {
   }
 
   if ($parked.Count -gt 0) {
-    Write-Host ("  Сужение уровня 1: запарковано {0} активных модов уровня 1 вне текущего батча." -f $parked.Count) -ForegroundColor Gray
+    Write-Host ("  Tier 1 narrowing: parked {0} active tier 1 mods outside the current batch." -f $parked.Count) -ForegroundColor Gray
   }
 
   return @($parked.ToArray())
@@ -965,7 +976,7 @@ function Restore-Tier1BatchNarrowing {
   }
 
   if ($restored -gt 0) {
-    Write-Host ("  Сужение уровня 1: восстановлено {0} запаркованных модов уровня 1." -f $restored) -ForegroundColor Gray
+    Write-Host ("  Tier 1 narrowing: restored {0} parked tier 1 mods." -f $restored) -ForegroundColor Gray
   }
 
   return $restored
@@ -990,13 +1001,13 @@ function Complete-Tier1BatchNarrowing {
 
   if (-not $RunConsistencyProbe) { return $true }
 
-  Write-Host "  Сужение уровня 1: контрольный запуск с восстановленным уровнем 1." -ForegroundColor Cyan
+  Write-Host "  Tier 1 narrowing: probe launch with restored tier 1." -ForegroundColor Cyan
   $probeResult = Invoke-LayeringLaunchAndCheck -PhasePrefix $ProbePhasePrefix
   if ($probeResult.Type -eq "Success" -or $probeResult.Type -eq "UserExit") {
     return $true
   }
 
-  Write-Host ("  Контрольный запуск уровня 1 провалился после восстановления модов: {0}" -f $probeResult.Type) -ForegroundColor Yellow
+  Write-Host ("  Tier 1 probe failed after restoring mods: {0}" -f $probeResult.Type) -ForegroundColor Yellow
   return $false
 }
 
@@ -1634,17 +1645,17 @@ if ($culpritJarNames.Count -gt 0) {
     Write-Host ("Layering found tentative culprit(s): {0}" -f $culpritLabel) -ForegroundColor Yellow
   }
   if (-not $hadError -and $exitCode -eq 4) {
-    Write-Host "Layering aborted early: crash persisted after single-mod re-probe; falling back to isolation is recommended." -ForegroundColor Yellow
+    Write-Host "Layering aborted early: crash persisted after single-mod re-probe; falling back to Isolation is recommended." -ForegroundColor Yellow
   }
 } elseif (-not $hadError -and $exitCode -eq 0 -and $hadUnresolvableFabric) {
   Write-Host "Layering incomplete: some batches had unresolvable Fabric dependencies." -ForegroundColor Yellow
   $exitCode = 3
 } elseif (-not $hadError -and $exitCode -eq 4) {
-  Write-Host "Layering aborted early: crash persisted after single-mod re-probe; falling back to isolation is recommended." -ForegroundColor Yellow
+  Write-Host "Layering aborted early: crash persisted after single-mod re-probe; falling back to Isolation is recommended." -ForegroundColor Yellow
 } elseif (-not $hadError -and $exitCode -eq 0) {
-  Write-Host "Layering complete. All mods layered successfully — no culprit found." -ForegroundColor Green
+  Write-Host "Layering complete. All mods layered successfully - no culprit found." -ForegroundColor Green
 } elseif ($exitCode -eq 2) {
-  Write-Host "Layering aborted: core libraries (уровень 4) could not launch." -ForegroundColor Yellow
+  Write-Host "Layering aborted: core libraries (tier 4) could not launch." -ForegroundColor Yellow
 }
 
 if ($EmitResultObject) {

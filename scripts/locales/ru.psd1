@@ -1,0 +1,218 @@
+@{
+  Locale = "ru"
+  Templates = @{
+    # =========================================================================
+    # ИНСТРУКЦИЯ ДЛЯ ПЕРЕВОДЧИКА:
+    # =========================================================================
+    # 1. ТЕХНИЧЕСКИЕ ТЕГИ: [*], [+], [-], [!] 
+    #    - Это префиксы логов. Оставляйте их в НАЧАЛЕ строки.
+    #    - НЕ ПЕРЕВОДИТЕ и не удаляйте их.
+    #
+    # 2. ПЛЕЙСХОЛДЕРЫ: {0}, {1}, {2}...
+    #    - Это динамические данные (имена модов, числа, пути).
+    #    - ОБЯЗАТЕЛЬНО: Должны присутствовать в итоговой строке.
+    #    - Можно менять их порядок, если того требует грамматика.
+    #
+    # 3. ТЕХНИЧЕСКИЕ МЕТКИ: [core], [layer], [tier]
+    #    - Категории модов. 
+    #    - ВАЖНО: Чтобы перевести их для ВСЕХ строк, редактируйте секцию 'Substrings' ниже.
+    #    - НЕ МЕНЯЙТЕ их внутри 'Templates', если не нужен специфический перевод для одной строки.
+    #
+    # 4. ПОДСКАЗКИ ВВОДА: <KEY_...>
+    #    - Технические теги, значения клавиш подставляются из кода.
+    #    - НЕ МЕНЯЙТЕ имена тегов (например, <KEY_RETRY_HINT>).
+    #
+    # 5. СПЕЦСИМВОЛЫ:
+    #    - `n  : Символ новой строки (формат PowerShell).
+    #    - \" : Экранированная кавычка внутри строки.
+    # =========================================================================
+
+    "  @Mixin target missing: mod '{0}' → class '{1}'" = "  @Mixin target missing: mod '{0}' → class '{1}'"
+    "  Basic algorithm could not identify culprit. Running binary Isolation on {0} mod(s)." = "  Basic algorithm could not identify culprit. Running binary Изоляция on {0} mod(s)."
+    "  Binary Isolation culprit: {0}" = "  Binary Изоляция culprit: {0}"
+    "  Binary Isolation returned empty set. Skipping batch." = "  Binary Изоляция returned empty set. Skipping batch."
+    "  Crash persists without batch mods. Aborting Layering." = "  Crash persists without batch mods. Aborting Наслоение."
+    "  Create 'config.local.ini' or edit 'config.ini' in the repo root to set your custom paths to mods." = "  Создайте 'config.local.ini' или отредактируйте 'config.ini' в корне репозитория, чтобы задать свои пути к модам."
+    "  Mixin apply failed: mod '{0}' → class '{1}' (config: {2})" = "  Mixin apply failed: mod '{0}' → class '{1}' (config: {2})"
+    "  Re-probe still fails without {0}. Not blaming it; aborting Layering." = "  Re-probe still fails without {0}. Not blaming it; aborting Наслоение."
+    "  Tier 1 (layer 3): {0} mod(s)" = "  Уровень 1 (слой 3): {0} mod(s)"
+    "  Tier 1 narrowing: parked {0} active tier 1 mods outside the current batch." = "  Сужение уровня 1: запарковано {0} активных модов уровня 1 вне текущего батча."
+    "  Tier 1 narrowing: probe launch with restored tier 1." = "  Сужение уровня 1: контрольный запуск с восстановленным уровнем 1."
+    "  Tier 1 narrowing: restored {0} parked tier 1 mods." = "  Сужение уровня 1: восстановлено {0} запаркованных модов уровня 1."
+    "  Tier 1 probe failed after restoring mods: {0}" = "  Контрольный запуск уровня 1 провалился после восстановления модов: {0}"
+    "  Tier 2 (layer 2): {0} mod(s)" = "  Уровень 2 (слой 2): {0} mod(s)"
+    "  Tier 3 (layer 1): {0} mod(s)" = "  Уровень 3 (слой 1): {0} mod(s)"
+    "  Tier 4 (core): {0} mod(s) - active from the start" = "  Уровень 4 (core): {0} mod(s) - активны с начала"
+    "  Unexpected outcome: {0}. Stopping tier." = "  Unexpected outcome: {0}. Останавливаем уровень."
+    "  [+] Copied to: {0}" = "  [+] Скопировано в: {0}"
+    "  [-] Removed from legacy storage: {0}" = "  [-] Удалено из legacy-хранилища: {0}"
+    "  [core] {0} | tier=4 | dependents={1}" = "  [core] {0} | уровень=4 | dependents={1}"
+    "  [layer] {0} | tier={1} | dependents={2}" = "  [слой] {0} | уровень={1} | dependents={2}"
+    "  <KEY_CONTINUE_AS_IS> = continue with current isolated mods (incomplete mod set)." = "  <KEY_CONTINUE_AS_IS> = продолжить с текущими изолятами (неполный набор модов)."
+    "  <KEY_RESTORE_EXIT> = restore isolated mods and stop." = "  <KEY_RESTORE_EXIT> = вернуть изоляты и завершить."
+    "  <KEY_RESTORE_CONTINUE> = restore isolated mods and continue with the full set." = "  <KEY_RESTORE_CONTINUE> = вернуть изоляты и продолжить с полного набора."
+    "  <KEY_KEEP_EXIT> = skip Recovery and stop (keep current isolated mods as incompatible)." = "  <KEY_KEEP_EXIT> = пропустить Recovery и завершить (оставить текущие изоляты как несовместимые)."
+    "  {0} consecutive Fabric failures. Stopping tier {1}." = "  {0} consecutive Fabric failures. Stopping уровень {1}."
+    "  {0} → {1}" = "  {0} → {1}"
+    ": Auto-handle Fabric dialogs when no missing deps (default: true)." = ": Авто-обрабатывать Fabric-диалоги, когда нет missing deps (по умолчанию: true)."
+    ": Enable detailed logging to console and MCCC.log." = ": Включить подробные логи в консоль и MCCC.log."
+    ": Ignore legacy folders in storage." = ": Игнорировать legacy-папки в хранилище."
+    ": Ignore these mod IDs during compatibility cleanup." = ": Игнорировать эти mod ID во время compatibility cleanup."
+    ": Load advanced overrides from config.ini profile." = ": Загрузить расширенные переопределения из профиля config.ini."
+    ": Path to Legacy Launcher executable." = ": Путь к исполняемому файлу Legacy Launcher."
+    ": Show the complete (very long) technical help.`n" = ": Показать полную (очень длинную) техническую справку.`n"
+    ": Simulate process without clicking or deleting." = ": Имитировать процесс без кликов и удаления."
+    ": Use game-side legacy folders for isolation." = ": Использовать game-side legacy-папки для изоляции."
+    ": Use linear search for isolation (slower but simple)." = ": Использовать линейный поиск для изоляции (медленнее, но проще)."
+    "All incompatible mod IDs are in the ignore list. User action is required." = "Все несовместимые mod id находятся в списке исключений. Требуется действие пользователя."
+    "Analyzer failed for {0}: {1}" = "Analyzer завершился с ошибкой для {0}: {1}"
+    "Baseline Analysis" = "Базовый Анализ"
+    "Baseline Analysis failed with exit code {0}. Stopping." = "Базовый Анализ failed with exit code {0}. Stopping."
+    "Baseline Analysis isolated {0} mod(s) in this attempt." = "Базовый Анализ isolated {0} mod(s) in this attempt."
+    "Baseline Analysis made no changes in Fabric-guided mode. Skipping Mixin Analysis/Layering for this attempt." = "Базовый Анализ made no changes in Fabric-guided mode. Skipping Mixin-анализ/Наслоение for this attempt."
+    "Baseline Analysis made no changes. Stopping to avoid a loop." = "Базовый Анализ made no changes. Stopping to avoid a loop."
+    "Baseline Analysis made no changes. Trying Mixin Analysis." = "Базовый Анализ made no changes. Trying Mixin-анализ."
+    "Binary Isolation attempt {0}: testing {1} mod(s)" = "Binary Изоляция attempt {0}: testing {1} mod(s)"
+    "Binary Isolation: verifying {0} candidate(s) removed at once..." = "Binary Изоляция: verifying {0} candidate(s) removed at once..."
+    "Choice [<KEY_ISOLANTS_HINT>]" = "Выбор [<KEY_ISOLANTS_HINT>]"
+    "Closed {0} running game process(es) before post-Layering actions." = "Closed {0} running game process(es) before post-Наслоение actions."
+    "Commonly Used Parameters:" = "Часто используемые параметры:"
+    "Continuing Isolation after Fabric quick-isolate..." = "Continuing Изоляция after Fabric quick-isolate..."
+    "Continuing Isolation after dependency restore..." = "Continuing Изоляция after dependency restore..."
+    "Continuing Isolation after quick-isolate..." = "Continuing Изоляция after quick-isolate..."
+    "Continuing attempts without de-isolating mods." = "Продолжаю попытки без деизолирования модов."
+    "Continuing launch attempts after user action." = "Продолжаю попытки запуска после действия пользователя."
+    "Core libraries (tier 4) crash on their own. Layering is impossible." = "Core-библиотеки (уровень 4) сами по себе вызывают краш. Наслоение невозможно."
+    "DRYRUN would try to auto-handle the Fabric dialog." = "DRYRUN попытался бы авто-обработать Fabric диалог."
+    "Deps:     {0}" = "Связи:   {0}"
+    "Entrypoint script not found: {0}" = "Скрипт точки входа не найден: {0}"
+    "Exponential Isolation attempt {0}: testing {1} mod(s)" = "Exponential Изоляция attempt {0}: testing {1} mod(s)"
+    "Exponential Isolation completed. Switching to linear with {0} mod(s) ({1})." = "Exponential Изоляция completed. Switching to linear with {0} mod(s) ({1})."
+    "Exponential Isolation enabled, but no candidates remain after pinned exclusions." = "Exponential Изоляция enabled, but no candidates remain after pinned exclusions."
+    "Exponential Isolation enabled. Candidates: {0}" = "Exponential Изоляция enabled. Candidates: {0}"
+    "Exponential Isolation selected last chunk: {0} mod(s)" = "Exponential Изоляция selected last chunk: {0} mod(s)"
+    "Exponential Isolation selected remaining group: {0} mod(s)" = "Exponential Изоляция selected remaining group: {0} mod(s)"
+    "Fabric dialog detected, but the log slice is empty. Routing to debug pipeline." = "Fabric диалог обнаружен, но срез логов пуст. Перенаправляю в debug pipeline."
+    "Fabric dialog has no missing dependencies, but mod IDs were not found in logs. Routing to debug pipeline." = "Fabric диалог без отсутствующих зависимостей, но mod id в логах не найдены. Перенаправляю в debug pipeline."
+    "Fabric dialog has no missing dependencies. Routing to debug pipeline (mods: {0})." = "Fabric диалог без отсутствующих зависимостей. Перенаправляю в debug pipeline (моды: {0})."
+    "Fabric dialog shows missing dependencies: {0}. User action is required." = "Fabric dialog показывает отсутствующие зависимости: {0}. Требуется действие пользователя."
+    "Fabric window was left open for manual review of missing dependencies." = "Окно Fabric оставлено открытым для ручного просмотра отсутствующих зависимостей."
+    "Fabric-guided Baseline Analysis handled mods: {0}" = "Fabric-guided Базовый Анализ handled mods: {0}"
+    "Fabric-guided Baseline Analysis unresolved mod IDs: {0}" = "Fabric-guided Базовый Анализ unresolved mod ids: {0}"
+    "Failed to restore {0}: {1}" = "Не удалось восстановить {0}: {1}"
+    "Fast Isolation skipped core-tier mods{0}: {1}" = "Быстрая Изоляция пропустила моды уровня core{0}: {1}"
+    "Filtering legacy log entries after: {0}" = "Фильтрую записи legacy-лога после: {0}"
+    "Found {0} culprit(s) to restore." = "Найдено виновников для восстановления: {0}."
+    "Hybrid tiers: exponential<= {0}, linear>= {1}" = "Гибридные уровни: экспоненциально<= {0}, линейно>= {1}"
+    "If the script did not resolve the issue or broke on specific mods and dependencies, isolate those toxic mods manually while the script runs." = "Если скрипт не устранил проблему или сломался об некоторые моды и их зависимости - на период работы скрипта изолируйте эти токсичные моды вручную."
+    "Ignoring mod IDs from ignore list: {0}" = "Игнорирую mod id из списка исключений: {0}"
+    "Invalid input. Enter <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_CONTINUE>, <KEY_RESTORE_EXIT>, or <KEY_KEEP_EXIT>." = "Неверный ввод. Введите <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_CONTINUE>, <KEY_RESTORE_EXIT> или <KEY_KEEP_EXIT>."
+    "Isolation" = "Изоляция"
+    "Isolation completed. Returning to main loop." = "Изоляция completed. Returning to main loop."
+    "Isolation failed with exit code {0}. Stopping." = "Изоляция failed with exit code {0}. Stopping."
+    "Isolation interrupted by user (Ctrl+C)." = "Изоляция interrupted by user (Ctrl+C)."
+    "Isolation retry interrupted by user (Ctrl+C)." = "Изоляция retry interrupted by user (Ctrl+C)."
+    "Isolation stopped due to dependency dialog in {0}. Missing deps: {1}; Requiring mods: {2}" = "Изоляция stopped due to dependency dialog in {0}. Missing deps: {1}; Requiring mods: {2}"
+    "Isolation with hash cache skipped mods but did not succeed. Retrying without hashes." = "Изоляция with hash cache skipped mods but did not succeed. Retrying without hashes."
+    "Key Fabric dialog lines (from logs):" = "Ключевые строки Fabric-диалога (из логов):"
+    "Fabric Loader window detected (incompatibility/dependencies). Continue retrying? (<KEY_RETRY_HINT>)" = "Обнаружено окно Fabric Loader (несовместимости/зависимости). Продолжить попытки? (<KEY_RETRY_HINT>)"
+    "Game launch not detected. Continue retrying? (<KEY_RETRY_HINT>)" = "Запуск игры не обнаружен. Продолжить попытки? (<KEY_RETRY_HINT>)"
+    "Launcher not found. Continue retrying? (<KEY_RETRY_HINT>)" = "Лаунчер не найден. Продолжить попытки? (<KEY_RETRY_HINT>)"
+    "Launcher start canceled by user during Isolation. Stopping by user choice." = "Launcher start canceled by user during Изоляция. Stopping by user choice."
+    "Launcher start canceled by user during Layering. Stopping by user choice." = "Launcher start canceled by user during Наслоение. Stopping by user choice."
+    "Layering" = "Наслоение"
+    "Layering aborted early: crash persisted after single-mod re-probe; falling back to Isolation is recommended." = "Наслоение aborted early: crash persisted after single-mod re-probe; falling back to Изоляция is recommended."
+    "Layering aborted: core libraries (tier 4) could not launch." = "Наслоение aborted: core libraries (уровень 4) could not launch."
+    "Layering complete. All mods layered successfully - no culprit found." = "Наслоение complete. All mods layered successfully — no culprit found."
+    "Layering complete. Culprit(s): {0}" = "Наслоение complete. Culprit(s): {0}"
+    "Layering completed. Returning to main loop." = "Наслоение completed. Returning to main loop."
+    "Layering did not complete successfully. Restoring tentative Layering culprits before fallback Isolation." = "Наслоение did not complete successfully. Restoring tentative Наслоение culprits before fallback Изоляция."
+    "Layering finished with exit code {0}. Falling back to Isolation." = "Наслоение finished with exit code {0}. Falling back to Изоляция."
+    "Layering found tentative culprit(s): {0}" = "Наслоение found tentative culprit(s): {0}"
+    "Layering incomplete: some batches had unresolvable Fabric dependencies." = "Наслоение incomplete: some batches had unresolvable Fabric dependencies."
+    "Layering, tier {0}: {1} mod(s)" = "Наслоение, уровень {0}: {1} mod(s)"
+    "MCCompatibilityChecker - Concise Help" = "MCCompatibilityChecker - Краткая справка"
+    "Manual diagnostics required: check tier 4 mods or use standard isolation." = "Требуется ручная диагностика: проверьте моды уровня 4 или используйте стандартную изоляцию."
+    "Mixin Analysis" = "Mixin-анализ"
+    "Mixin Analysis did not resolve (exit {0}). Proceeding to Layering." = "Mixin-анализ did not resolve (exit {0}). Proceeding to Наслоение."
+    "Mixin Analysis resolved the crash. Returning to main loop." = "Mixin-анализ resolved the crash. Returning to main loop."
+    "No JAR files found in: {0}" = "JAR-файлы не найдены в: {0}"
+    "No PowerShell scripts found to analyze." = "PowerShell-скрипты для анализа не найдены."
+    "No crash detected. It seems there are no problematic mods. Continue retrying? (<KEY_RETRY_HINT>)" = "Краш не обнаружен. Похоже, проблемных модов нет. Продолжить попытки? (<KEY_RETRY_HINT>)"
+    "No crash detected. Continue retrying? (<KEY_RETRY_HINT>)" = "Краш не обнаружен. Продолжить попытки? (<KEY_RETRY_HINT>)"
+    "No culprits detected in this session." = "В этой сессии виновники не обнаружены."
+    "No culprits found to restore in the log after {0}." = "В логе после {0} виновники для восстановления не найдены."
+    "No culprits found to restore in the log." = "В логе не найдено виновников для восстановления."
+    "One or more files failed analysis." = "Один или несколько файлов не прошли анализ."
+    "Outcome: crash dialog detected. Running Baseline Analysis." = "Outcome: crash dialog detected. Running Базовый Анализ."
+    "PSScriptAnalyzer is not installed. Install-Module PSScriptAnalyzer -Scope CurrentUser" = "PSScriptAnalyzer не установлен. Выполните: Install-Module PSScriptAnalyzer -Scope CurrentUser"
+    "Path not found: {0}" = "Путь не найден: {0}"
+    "Path:     {0}" = "Путь:    {0}"
+    "Plan: {0} | tier={1} | dependents={2} | known={3} | mtime={4}" = "План: {0} | уровень={1} | dependents={2} | known={3} | mtime={4}"
+    "Priority choice{0}: isolate {1}; defer {2}" = "Приоритетный выбор{0}: изолируем {1}; откладываем {2}"
+    "Recovery skipped by user choice. Current isolated mods are kept as incompatible." = "Recovery пропущен по выбору пользователя. Текущие изоляты оставлены как несовместимые."
+    "Recovery: {0} culprits share Mixin error: mod '{1}' → class '{2}'" = "Recovery: {0} culprits share Mixin error: mod '{1}' → class '{2}'"
+    "Requiring mods: {0}" = "Требующие моды: {0}"
+    "Restore process completed." = "Процесс восстановления завершен."
+    "Restored {0} missing dependencies for tier 4. Retrying launch..." = "Восстановлено {0} отсутствующих зависимостей для уровня 4. Повторный запуск..."
+    "Restored {0} tentative Layering culprit(s) before fallback Isolation." = "Restored {0} tentative Наслоение culprit(s) before fallback Изоляция."
+    "Restoring: {0}" = "Восстанавливаю: {0}"
+    "Running Layering strategy." = "Running Наслоение strategy."
+    "Running subtractive Isolation." = "Running subtractive Изоляция."
+    "Scan path does not exist: {0}" = "Путь сканирования не существует: {0}"
+    "Setup Tip:" = "Подсказка по настройке:"
+    "Shared localization helpers not found: {0}" = "Shared-локализация не найдена: {0}"
+    "Skipping non-PowerShell file: {0}" = "Пропускаю не-PowerShell файл: {0}"
+    "Source file not found: {0}" = "Исходный файл не найден: {0}"
+    "Summary" = "Сводка"
+    "Tentative Layering culprits were removed from session report despite restore failures." = "Tentative Наслоение culprits were removed from session report despite restore failures."
+    "Tier 4 baseline check showed a Fabric dialog, but no restorable dependencies were found." = "Базовая проверка уровня 4 показала диалог Fabric, но восстанавливаемых зависимостей не найдено."
+    "Tier 4 retry failed: {0}. Cannot continue." = "Повторный запуск уровня 4 провалился: {0}. Невозможно продолжить."
+    "Tier {0}: exponential Isolation completed. Linear with {1} mod(s) ({2})." = "Уровень {0}: exponential Изоляция completed. Linear with {1} mod(s) ({2})."
+    "Tier {0}: exponential Isolation enabled. Candidates: {1}" = "Уровень {0}: exponential Изоляция enabled. Candidates: {1}"
+    "Tier {0}: {1} mod(s)" = "Уровень {0}: {1} mod(s)"
+    "Usage:" = "Использование:"
+    "Version:  {0}" = "Версия:  {0}"
+    "Warning: Isolation failed: {0}" = "Warning: Изоляция failed: {0}"
+    "Warning: Isolation retry failed: {0}" = "Warning: Изоляция retry failed: {0}"
+    "Warning: baseline issue not reproduced in linear phase. Stopping Isolation to avoid false culprit selection." = "Warning: baseline issue not reproduced in linear phase. Stopping Изоляция to avoid false culprit selection."
+    "Warning: baseline issue not reproduced in {0}. Stopping Isolation to avoid false culprit selection." = "Warning: baseline issue not reproduced in {0}. Stopping Изоляция to avoid false culprit selection."
+    "Warning: dependency map is empty. Tier classification is unavailable; all mods are treated as tier 1." = "Warning: dependency map is empty. Классификация по уровням недоступна; все моды считаются уровнем 1."
+    "Warning: failed to restore one or more tentative Layering culprits before fallback Isolation." = "Warning: failed to restore one or more tentative Наслоение culprits before fallback Изоляция."
+    "Warning: failed to restore tentative Layering culprits: {0}{1}" = "Warning: failed to restore tentative Наслоение culprits: {0}{1}"
+    "[*] Recursive: {0}" = "[*] Рекурсивно: {0}"
+    "[*] Scan path: {0}" = "[*] Путь сканирования: {0}"
+    "[*] Scanning: {0}" = "[*] Сканирование: {0}"
+    "[*] Searching dependency: '{0}'" = "[*] Поиск зависимости: '{0}'"
+    "[+] Dependency edges: {0}" = "[+] Ребер зависимостей: {0}"
+    "[+] JAR parse/read errors: {0}" = "[+] Ошибок чтения/парсинга JAR: {0}"
+    "[+] Mods found: {0}" = "[+] Найдено модов: {0}"
+    "`n[+] JARs scanned: {0}" = "`n[+] Просканировано JAR: {0}"
+    "`n[+] Reports written to: {0}" = "`n[+] Отчеты записаны в: {0}"
+    "`n[+] Top dependencies (by reference count):" = "`n[+] Топ зависимостей (по количеству ссылок):"
+    "`n[+] Найдено совпадений: {0}" = "`n[+] Найдено совпадений: {0}"
+    "`n[-] Совпадений не найдено." = "`n[-] Совпадений не найдено."
+    "`nМод: {0} ({1})" = "`nМод: {0} ({1})"
+  }
+  Substrings = @{
+    # =========================================================================
+    # ГЛОБАЛЬНАЯ ТЕРМИНОЛОГИЯ (Substrings):
+    # Эти слова заменяются АВТОМАТИЧЕСКИ во ВСЕХ строках.
+    # =========================================================================
+    "[core]"  = "[ядро]"
+    "[layer]" = "[слой]"
+    "[tier]"  = "[уровень]"
+    "tier"    = "уровень"
+
+    # * Названия этапов
+    "Baseline Analysis" = "Базовый Анализ"
+    "Mixin Analysis"    = "Mixin-анализ"
+    "Layering"          = "Наслоение"
+    "Isolation"         = "Изоляция"
+  }
+  Ui = @{
+    CrashWindowTitlePatterns = @(
+      "Что-то сломалось..."
+    )
+  }
+}

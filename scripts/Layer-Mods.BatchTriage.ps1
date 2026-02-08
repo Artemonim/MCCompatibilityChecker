@@ -87,7 +87,7 @@
               continue
             }
 
-            Write-Host ("  Re-probe still fails without {0}. Not blaming it; aborting layering." -f $singleJarName) -ForegroundColor Yellow
+            Write-Host ("  Re-probe still fails without {0}. Not blaming it; aborting Layering." -f $singleJarName) -ForegroundColor Yellow
 
             # * Restore the mod back before abort to avoid partial state.
             $item = Get-MovedItemByJarName -JarName $singleJarName
@@ -114,7 +114,7 @@
             break
           }
 
-          Write-Host ("  Basic algorithm could not identify culprit. Running binary isolation on {0} mod(s)." -f $batch.Count) -ForegroundColor Cyan
+          Write-Host ("  Basic algorithm could not identify culprit. Running binary Isolation on {0} mod(s)." -f $batch.Count) -ForegroundColor Cyan
 
           # * Capture crash signature as baseline for binary isolation.
           $crashSignature = ""
@@ -155,7 +155,7 @@
             if ($binaryResult.Reason -eq "all_removed_no_change") {
               if ($multiCulpritIteration -eq 1) {
                 # * First attempt: crash persists without ANY batch mods.
-                Write-Host "  Crash persists without batch mods. Aborting layering." -ForegroundColor Yellow
+                Write-Host "  Crash persists without batch mods. Aborting Layering." -ForegroundColor Yellow
                 $abortLayering = $true
                 $exitCode = 4
               } else {
@@ -168,7 +168,7 @@
 
             $binaryRemaining = @($binaryResult.Remaining)
             if (-not $binaryRemaining -or $binaryRemaining.Count -eq 0) {
-              Write-Host "  Binary isolation returned empty set. Skipping batch." -ForegroundColor Yellow
+              Write-Host "  Binary Isolation returned empty set. Skipping batch." -ForegroundColor Yellow
               break
             }
 
@@ -187,7 +187,7 @@
 
               if ($linearResult.Type -eq "Success" -or $linearResult.Type -eq "UserExit") {
                 # * Removing this mod fixed it — it's the (last) culprit.
-                Write-Host ("  Binary isolation culprit: {0}" -f $brMod.Name) -ForegroundColor Green
+                Write-Host ("  Binary Isolation culprit: {0}" -f $brMod.Name) -ForegroundColor Green
                 Move-CulpritToLegacy -JarName $brMod.Name -EvidenceKey $crashEvidenceKey
                 $binaryResolved = $true
                 break

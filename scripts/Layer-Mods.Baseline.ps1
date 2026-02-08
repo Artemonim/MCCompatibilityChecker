@@ -49,24 +49,24 @@
 
   if ($baselineResult.Type -eq "Crash") {
     if ($baselineRetriedCoreOnly -or (-not $baselineWithHashCachedMods)) {
-      Write-Host "Core-библиотеки (уровень 4) сами по себе вызывают краш. Наслоение невозможно." -ForegroundColor Red
+      Write-Host "Core libraries (tier 4) crash on their own. Layering is impossible." -ForegroundColor Red
     } else {
       Write-Host "Baseline crash happened with tier 4 plus hash-cached mods. Core-only baseline was not isolated." -ForegroundColor Red
     }
-    Write-Host "Требуется ручная диагностика: проверьте моды уровня 4 или используйте стандартную изоляцию." -ForegroundColor Yellow
+    Write-Host "Manual diagnostics required: check tier 4 mods or use standard isolation." -ForegroundColor Yellow
     $exitCode = 2
     # ! Fall through to finally for restore.
   } elseif ($baselineResult.Type -eq "FabricDialog") {
     $restoredCount = Restore-MissingDependency -MissingDepIds $baselineResult.MissingDepIds
     if ($restoredCount -gt 0) {
-      Write-Host ("Восстановлено {0} отсутствующих зависимостей для уровня 4. Повторный запуск..." -f $restoredCount) -ForegroundColor Cyan
+      Write-Host ("Restored {0} missing dependencies for tier 4. Retrying launch..." -f $restoredCount) -ForegroundColor Cyan
       $baselineResult = Invoke-LayeringLaunchAndCheck -PhasePrefix "baseline_tier4_retry"
       if ($baselineResult.Type -ne "Success") {
-        Write-Host ("Повторный запуск уровня 4 провалился: {0}. Невозможно продолжить." -f $baselineResult.Type) -ForegroundColor Red
+        Write-Host ("Tier 4 retry failed: {0}. Cannot continue." -f $baselineResult.Type) -ForegroundColor Red
         $exitCode = 2
       }
     } else {
-      Write-Host "Базовая проверка уровня 4 показала диалог Fabric, но восстанавливаемых зависимостей не найдено." -ForegroundColor Red
+      Write-Host "Tier 4 baseline check showed a Fabric dialog, but no restorable dependencies were found." -ForegroundColor Red
       $exitCode = 2
     }
   }

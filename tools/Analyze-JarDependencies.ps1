@@ -1,8 +1,8 @@
-# * Скрипт для поиска зависимостей внутри JAR-файлов Minecraft модов (Fabric/Forge)
-# * Использует прямое чтение ZIP-архивов для высокой производительности.
+# * Script to search for dependencies inside Minecraft mod JAR files (Fabric/Forge)
+# * Uses direct ZIP archive reading for high performance.
 
 param(
-    [Parameter(Mandatory = $true, HelpMessage = "Часть имени или ID зависимости для поиска (например, 'owo')")]
+    [Parameter(Mandatory = $true, HelpMessage = "Part of the dependency name or ID to search for (e.g., 'owo')")]
     [string]$SearchTerm,
 
     [Parameter(Mandatory = $false)]
@@ -15,7 +15,15 @@ param(
     [switch]$NoRecurse
 )
 
-# * Подключаем библиотеку для работы с архивами
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "..\scripts\Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+    throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+
+# * Include library for archive handling
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $results = @()
@@ -28,8 +36,8 @@ if ($NoRecurse) {
     $scanRecursively = $false
 }
 
-Write-Host ("[*] Сканирование: {0}" -f $ScanPath) -ForegroundColor Cyan
-Write-Host ("[*] Поиск зависимости: '{0}'" -f $SearchTerm) -ForegroundColor Cyan
+Write-Host ("[*] Scanning: {0}" -f $ScanPath) -ForegroundColor Cyan
+Write-Host ("[*] Searching dependency: '{0}'" -f $SearchTerm) -ForegroundColor Cyan
 
 $jarFiles = Get-ChildItem -Path $ScanPath -Filter "*.jar" -Recurse:$scanRecursively
 
@@ -37,7 +45,7 @@ foreach ($jarFile in $jarFiles) {
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($jarFile.FullName)
 
-        # ? 1. Проверка Fabric (fabric.mod.json)
+        # ? 1. Check Fabric (fabric.mod.json)
         $fabricEntry = $zip.Entries | Where-Object { $_.FullName -eq "fabric.mod.json" }
         if ($fabricEntry) {
             $stream = $fabricEntry.Open()
@@ -49,7 +57,7 @@ foreach ($jarFile in $jarFiles) {
             $modJson = $content | ConvertFrom-Json
             $foundDeps = @()
 
-            # ! Проверяем все возможные блоки зависимостей в Fabric
+            # ! Check all possible dependency blocks in Fabric
             $depBlocks = @("depends", "suggests", "recommends", "breaks", "conflicts")
             foreach ($block in $depBlocks) {
                 if ($modJson.PSObject.Properties.Name -contains $block) {
@@ -73,7 +81,7 @@ foreach ($jarFile in $jarFiles) {
             }
         }
 
-        # ? 2. Проверка Forge (META-INF/mods.toml)
+        # ? 2. Check Forge (META-INF/mods.toml)
         if (-not $fabricEntry) {
             $tomlEntry = $zip.Entries | Where-Object { $_.FullName -eq "META-INF/mods.toml" }
             if ($tomlEntry) {
@@ -100,21 +108,21 @@ foreach ($jarFile in $jarFiles) {
 
     } catch {
         if ($zip) { $zip.Dispose() }
-        # ! Игнорируем ошибки доступа или поврежденные архивы, если нужно
-        # Write-Warning ("Ошибка при обработке {0}: {1}" -f $jarFile.Name, $_.Exception.Message)
+        # ! Ignore access errors or corrupted archives if needed
+        # Write-Warning ("Error while processing {0}: {1}" -f $jarFile.Name, $_.Exception.Message)
     }
 }
 
-# * Вывод результатов
+# * Output results
 if ($results.Count -gt 0) {
-    Write-Host ("`n[+] Найдено совпадений: {0}" -f $results.Count) -ForegroundColor Green
+    Write-Host ("`n[+] Matches found: {0}" -f $results.Count) -ForegroundColor Green
     foreach ($result in $results) {
-        Write-Host ("`nМод: {0} ({1})" -f $result.ModName, $result.Type) -ForegroundColor Yellow
+        Write-Host ("`nMod: {0} ({1})" -f $result.ModName, $result.Type) -ForegroundColor Yellow
         Write-Host ("JAR:     {0}" -f $result.JarName)
-        Write-Host ("Версия:  {0}" -f $result.Version)
-        Write-Host ("Связи:   {0}" -f $result.Dependencies)
-        Write-Host ("Путь:    {0}" -f $result.Path)
+        Write-Host ("Version:  {0}" -f $result.Version)
+        Write-Host ("Deps:     {0}" -f $result.Dependencies)
+        Write-Host ("Path:     {0}" -f $result.Path)
     }
 } else {
-    Write-Host "`n[-] Совпадений не найдено." -ForegroundColor Red
+    Write-Host "`n[-] No matches found." -ForegroundColor Red
 }

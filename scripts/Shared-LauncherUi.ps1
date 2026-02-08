@@ -193,7 +193,9 @@ function Select-WindowByTitlePattern {
     [Parameter(Mandatory = $true)]
     [string[]]$Patterns,
     [Parameter(Mandatory = $false)]
-    [long[]]$ExcludeHandleIds = @()
+    [long[]]$ExcludeHandleIds = @(),
+    [Parameter(Mandatory = $false)]
+    [int[]]$ProcessIds = @()
   )
 
   $excludeSet = @{}
@@ -202,8 +204,20 @@ function Select-WindowByTitlePattern {
     $excludeSet[[long]$id] = $true
   }
 
+  $processSet = @{}
+  foreach ($processId in $ProcessIds) {
+    if ($null -eq $processId) { continue }
+    $processIdValue = [int]$processId
+    if ($processIdValue -le 0) { continue }
+    $processSet[$processIdValue] = $true
+  }
+
   $windows = Get-WindowList
   foreach ($window in $windows) {
+    if ($processSet.Count -gt 0) {
+      $windowProcessId = [int]$window.ProcessId
+      if (-not $processSet.ContainsKey($windowProcessId)) { continue }
+    }
     if ($excludeSet.Count -gt 0) {
       $handleId = [long]$window.Handle.ToInt64()
       if ($excludeSet.ContainsKey($handleId)) { continue }
@@ -221,15 +235,29 @@ function Select-WindowByTitlePattern {
 function Get-WindowHandleMatch {
   param(
     [Parameter(Mandatory = $true)]
-    [string[]]$Patterns
+    [string[]]$Patterns,
+    [Parameter(Mandatory = $false)]
+    [int[]]$ProcessIds = @()
   )
 
   if (-not $Patterns -or $Patterns.Count -eq 0) { return @() }
+
+  $processSet = @{}
+  foreach ($processId in $ProcessIds) {
+    if ($null -eq $processId) { continue }
+    $processIdValue = [int]$processId
+    if ($processIdValue -le 0) { continue }
+    $processSet[$processIdValue] = $true
+  }
 
   $handles = [System.Collections.Generic.HashSet[long]]::new()
   $windows = Get-WindowList
   foreach ($window in $windows) {
     if ($null -eq $window -or $null -eq $window.Handle) { continue }
+    if ($processSet.Count -gt 0) {
+      $windowProcessId = [int]$window.ProcessId
+      if (-not $processSet.ContainsKey($windowProcessId)) { continue }
+    }
     foreach ($pattern in $Patterns) {
       if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
       if (Test-TitleMatch -Title $window.Title -Pattern $pattern) {
@@ -241,6 +269,18 @@ function Get-WindowHandleMatch {
 
   if ($handles.Count -eq 0) { return @() }
   return @($handles | Sort-Object -Unique)
+}
+
+function Get-WindowProcessId {
+  param(
+    [Parameter(Mandatory = $true)]
+    [IntPtr]$Handle
+  )
+
+  if ($null -eq $Handle -or $Handle -eq [IntPtr]::Zero) { return 0 }
+  $processId = 0
+  [void][MCCompatWin32]::GetWindowThreadProcessId($Handle, [ref]$processId)
+  return [int]$processId
 }
 
 function Wait-ForLauncherWindow {

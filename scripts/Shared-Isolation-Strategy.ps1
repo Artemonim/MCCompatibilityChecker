@@ -528,7 +528,7 @@ function Invoke-BinaryIsolation {
   if ($remaining.Count -gt 1) {
     $allNames = @($remaining | ForEach-Object { $_.Name })
     $pinnedJarNames = @($pinnedJarNameSet.Values)
-    Write-Host ("Binary isolation: verifying {0} candidate(s) removed at once..." -f $allNames.Count) -ForegroundColor Gray
+    Write-Host ("Binary Isolation: verifying {0} candidate(s) removed at once..." -f $allNames.Count) -ForegroundColor Gray
     $verifyResult = Invoke-IsolationProbe -TestJarNames $allNames `
       -BaselineSignature $BaselineSignature `
       -BaselineEvidenceKey $BaselineEvidenceKey `
@@ -560,7 +560,7 @@ function Invoke-BinaryIsolation {
     $otherGroup = @($remaining[$halfCount..($remaining.Count - 1)])
     if (-not $otherGroup -or $otherGroup.Count -eq 0) { break }
 
-    Write-Host ("Binary isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
+    Write-Host ("Binary Isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
 
     $testNames = @($testGroup | ForEach-Object { $_.Name })
     $pinnedJarNames = @($pinnedJarNameSet.Values)
@@ -594,7 +594,7 @@ function Invoke-BinaryIsolation {
         }
         continue
       }
-      Write-Host "Warning: dependency dialog detected but no recovery actions were taken. Continuing binary refinement." -ForegroundColor Yellow
+      Write-Host "Warning: dependency dialog detected but no Recovery actions were taken. Continuing binary refinement." -ForegroundColor Yellow
       $groupMatches = $false
     } else {
       $groupMatches = [bool]$probeResult.GroupMatches
@@ -673,7 +673,7 @@ function Invoke-ExponentialIsolation {
     $testGroup = @($remaining[0..($probeSize - 1)])
     if (-not $testGroup -or $testGroup.Count -eq 0) { break }
 
-    Write-Host ("Exponential isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
+    Write-Host ("Exponential Isolation attempt {0}: testing {1} mod(s)" -f $attemptIndex, $testGroup.Count) -ForegroundColor Cyan
 
     $testNames = @($testGroup | ForEach-Object { $_.Name })
     $pinnedJarNames = @($pinnedJarNameSet.Values)
@@ -711,10 +711,10 @@ function Invoke-ExponentialIsolation {
         if ($probeMax -gt $totalCount) { $probeMax = $totalCount }
         $probeSize = 1
         $previousSize = 0
-        Write-Host ("Exponential isolation restarted after dependency recovery. Remaining: {0}" -f $totalCount) -ForegroundColor Gray
+        Write-Host ("Exponential isolation restarted after dependency Recovery. Remaining: {0}" -f $totalCount) -ForegroundColor Gray
         continue
       }
-      Write-Host "Warning: dependency dialog detected but no recovery actions were taken. Continuing exponential probing." -ForegroundColor Yellow
+      Write-Host "Warning: dependency dialog detected but no Recovery actions were taken. Continuing exponential probing." -ForegroundColor Yellow
       $previousSize = $probeSize
       $probeSize = $probeSize * 2
       continue
@@ -747,9 +747,9 @@ function Invoke-ExponentialIsolation {
   }
 
   if ($selectedReason -eq "exponential_match") {
-    Write-Host ("Exponential isolation selected last chunk: {0} mod(s)" -f $selectedChunk.Count) -ForegroundColor Gray
+    Write-Host ("Exponential Isolation selected last chunk: {0} mod(s)" -f $selectedChunk.Count) -ForegroundColor Gray
   } else {
-    Write-Host ("Exponential isolation selected remaining group: {0} mod(s)" -f $selectedChunk.Count) -ForegroundColor Gray
+    Write-Host ("Exponential Isolation selected remaining group: {0} mod(s)" -f $selectedChunk.Count) -ForegroundColor Gray
   }
 
   $pinnedJarNames = @($pinnedJarNameSet.Values)
@@ -812,7 +812,7 @@ function Invoke-LinearBaselineRefresh {
     if (-not [string]::IsNullOrWhiteSpace($launchConfigKey)) {
       Register-SessionLaunchConfigSuccess -ConfigKey $launchConfigKey -Context $ctx
     }
-    Write-Host ("Warning: baseline issue not reproduced in {0}. Stopping isolation to avoid false culprit selection." -f $PhasePrefix) -ForegroundColor Yellow
+    Write-Host ("Warning: baseline issue not reproduced in {0}. Stopping Isolation to avoid false culprit selection." -f $PhasePrefix) -ForegroundColor Yellow
     Wait-ConfiguredLauncherInteractive -Context $ctx
     return [pscustomobject]@{
       Outcome = $baselineOutcome
@@ -1042,13 +1042,13 @@ function Invoke-LinearIsolation {
         } else {
           Write-Host ("Warning: could not resolve or filtered requiring mod jar(s) for ids: {0}. Continuing isolation." -f ($newModIdsArr -join ", ")) -ForegroundColor Yellow
         }
-        Write-Host "Continuing isolation after Fabric quick-isolate..." -ForegroundColor Cyan
+        Write-Host "Continuing Isolation after Fabric quick-isolate..." -ForegroundColor Cyan
         continue
       }
 
       if ($isLikelyRemovedDep) {
         # * We restored the dependency; proceed with next candidate.
-        Write-Host "Continuing isolation after dependency restore..." -ForegroundColor Cyan
+        Write-Host "Continuing Isolation after dependency restore..." -ForegroundColor Cyan
         continue
       }
     }
@@ -1183,7 +1183,7 @@ function Invoke-LinearIsolation {
       }
       if ($movedExtra) {
         # * Continue isolation with newly identified mods removed.
-        Write-Host "Continuing isolation after quick-isolate..." -ForegroundColor Cyan
+        Write-Host "Continuing Isolation after quick-isolate..." -ForegroundColor Cyan
         continue
       }
       return [pscustomobject]@{
@@ -1241,7 +1241,7 @@ function Invoke-HybridIsolation {
       })
     if (-not $tierMods -or $tierMods.Count -eq 0) { continue }
 
-    Write-Host ("Уровень {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Gray
+    Write-Host ("Tier {0}: {1} mod(s)" -f $tier, $tierMods.Count) -ForegroundColor Gray
 
     $pinnedJarNames = @()
     if ($state.PinnedJarNameSet.Count -gt 0) {
@@ -1269,7 +1269,7 @@ function Invoke-HybridIsolation {
 
     $tierRemaining = $tierCandidates
     if ($strategy.DependencyAwareExponentialMaxTier -gt 0 -and $tier -le $strategy.DependencyAwareExponentialMaxTier) {
-      Write-Host ("Уровень {0}: exponential isolation enabled. Candidates: {1}" -f $tier, $tierCandidates.Count) -ForegroundColor Gray
+      Write-Host ("Tier {0}: exponential Isolation enabled. Candidates: {1}" -f $tier, $tierCandidates.Count) -ForegroundColor Gray
       $tierBaselineSignature = if ([string]::IsNullOrWhiteSpace($state.ActiveBaselineSignature)) { $BaselineSignature } else { $state.ActiveBaselineSignature }
       $tierBaselineEvidenceKey = if ([string]::IsNullOrWhiteSpace($state.ActiveBaselineEvidenceKey)) { $BaselineEvidenceKey } else { $state.ActiveBaselineEvidenceKey }
       $exponentialResult = Invoke-ExponentialIsolation -Mods $tierCandidates `
@@ -1278,7 +1278,7 @@ function Invoke-HybridIsolation {
         -PinnedJarNames $pinnedJarNames `
         -Context $ctx
       $tierRemaining = @($exponentialResult.Remaining)
-      Write-Host ("Уровень {0}: exponential isolation completed. Linear with {1} mod(s) ({2})." -f $tier, $tierRemaining.Count, $exponentialResult.Reason) -ForegroundColor Gray
+      Write-Host ("Tier {0}: exponential Isolation completed. Linear with {1} mod(s) ({2})." -f $tier, $tierRemaining.Count, $exponentialResult.Reason) -ForegroundColor Gray
     }
 
     if (-not $tierRemaining -or $tierRemaining.Count -eq 0) { continue }

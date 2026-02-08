@@ -12,6 +12,14 @@ param(
     [switch]$NoExit
 )
 
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "..\scripts\Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+    throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+
 function Complete-Restore {
     param(
         [Parameter(Mandatory = $true)]

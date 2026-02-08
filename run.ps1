@@ -44,13 +44,21 @@ param(
   [string[]]$RemainingArgs
 )
 
+$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "scripts\Shared-Localization.ps1"
+if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
+  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+}
+. $sharedLocalizationPath
+Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
+Enable-McccConsoleLocalization
+
 $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath "scripts\Auto-Run-LegacyLauncher.ps1"
 if (-not (Test-Path -LiteralPath $scriptPath)) {
   throw ("Entrypoint script not found: {0}" -f $scriptPath)
 }
 
 if ($Help) {
-  Write-Host "`nMCCompatibilityChecker - Concise Help" -ForegroundColor Cyan -FontWeight Bold
+  Write-Host "`nMCCompatibilityChecker - Concise Help" -ForegroundColor Cyan
   Write-Host "--------------------------------------" -ForegroundColor Cyan
 
   Write-Host "Setup Tip:" -ForegroundColor White
@@ -111,4 +119,3 @@ if ($null -eq $RemainingArgs) {
 
 & $scriptPath @forwardCommon @RemainingArgs
 exit $LASTEXITCODE
-
