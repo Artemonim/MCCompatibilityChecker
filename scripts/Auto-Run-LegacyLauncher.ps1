@@ -57,6 +57,9 @@ If set, passes -GameLegacy to compatibility checker.
 .PARAMETER CheckScriptArguments
 Additional arguments to pass to Check-Mod-Compatibility.ps1.
 
+.PARAMETER IgnoreModIds
+If set, ignores these mod IDs during compatibility cleanup.
+
 .PARAMETER CrashCloseClickOffsetX
 Optional click offset for closing crash dialog (relative to crash window).
 
@@ -68,6 +71,10 @@ Crash dialog title fragments.
 
 .PARAMETER FabricWindowTitlePatterns
 Fabric or dependency dialog title fragments.
+
+.PARAMETER AutoHandleFabricDialog
+If true, attempts to auto-handle Fabric dialogs by running compatibility cleanup when no
+missing dependencies are detected in logs.
 
 .PARAMETER CheckScriptPath
 Path to compatibility script.
@@ -213,6 +220,10 @@ param(
   [Parameter(Mandatory = $false)]
   [string[]]$FabricWindowTitlePatterns = @("Fabric Loader", "owo-sentinel"),
 
+  # * If true, auto-handles Fabric dialogs by running compatibility cleanup when no missing deps are detected.
+  [Parameter(Mandatory = $false)]
+  [bool]$AutoHandleFabricDialog = $true,
+
   # * Path to compatibility script.
   [Parameter(Mandatory = $false)]
   [string]$CheckScriptPath = "",
@@ -271,6 +282,10 @@ param(
   # * Additional arguments to pass to Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
   [string[]]$CheckScriptArguments = @(),
+
+  # * If set, ignores these mod IDs during compatibility cleanup.
+  [Parameter(Mandatory = $false)]
+  [string[]]$IgnoreModIds = @(),
 
   # * Optional log path to pass into Check-Mod-Compatibility.ps1.
   [Parameter(Mandatory = $false)]
@@ -335,6 +350,7 @@ $sessionMixinConflicts = @()
 # * Hash-cache session controls (auto-disable after an unresolved crash).
 $script:hashCacheAttemptedThisSession = $false
 $script:hashCacheDisabledThisSession = $false
+$script:suppressTranscriptCulpritInference = $false
 
 # * Session timing (initialized early so it's available in finally block).
 $sessionStartTime = Get-Date
@@ -402,6 +418,8 @@ $profileTypeMap = @{
   CrashCloseClickOffsetX = "int"
   CrashCloseClickOffsetY = "int"
   CrashCloseDelaySeconds = "int"
+  AutoHandleFabricDialog = "bool"
+  IgnoreModIds = "string[]"
   LauncherWindowTimeoutSeconds = "int"
   OutcomeTimeoutSeconds = "int"
   PollIntervalSeconds = "int"
@@ -456,6 +474,13 @@ if (-not (Test-Path -LiteralPath $sharedLogPath)) {
   throw ("Shared log helpers not found: {0}" -f $sharedLogPath)
 }
 . $sharedLogPath
+
+# * Load shared isolation log parsing helpers (used for Fabric dialog auto-handling).
+$sharedIsolationLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-LogParsing.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationLogPath)) {
+  throw ("Shared isolation log helpers not found: {0}" -f $sharedIsolationLogPath)
+}
+. $sharedIsolationLogPath
 
 # * Load shared launcher/outcome helpers.
 $sharedIsolationLauncherPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Launcher.ps1"
@@ -528,6 +553,14 @@ $mixinAnalysisAvailable = $stageMixinAnalysisEnabled -and (Test-Path -LiteralPat
 $RecoveryScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Recover-PhantomCulprits.ps1"
 $recoveryAvailable = $stageRecoveryEnabled -and (Test-Path -LiteralPath $RecoveryScriptPath)
 
+# * Session-level dependency map cache (built once after first failed launch).
+$script:sessionDependencyMapPrepared = $false
+$script:sessionDependencyMapPreparedReason = ""
+$script:sessionDependencyMapAvailable = $false
+$script:sessionDependencyMapJsonPath = ""
+$script:sessionDependencyMapToolPath = Join-Path -Path $PSScriptRoot -ChildPath "..\tools\Analyze-JarDependencyMap.ps1"
+$script:sessionDependencyMapOutDir = Join-Path -Path $PSScriptRoot -ChildPath "..\reports"
+
 if (-not $stageMixinAnalysisEnabled) {
   Write-Host "Mixin analysis stage disabled in config ([Stages].EnableMixinAnalysis=false)." -ForegroundColor Gray
 }
@@ -574,7 +607,7 @@ try {
     if (-not $DryRun) {
       [void](Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime)
     }
-    if ($sessionIsolationCulpritHistoryByJar.Count -eq 0 -and (Test-Path -LiteralPath $transcriptLogPath)) {
+    if ($sessionIsolationCulpritHistoryByJar.Count -eq 0 -and (-not [bool]$script:suppressTranscriptCulpritInference) -and (Test-Path -LiteralPath $transcriptLogPath)) {
       try {
         $lines = Get-Content -LiteralPath $transcriptLogPath -ErrorAction Stop
         foreach ($line in $lines) {
@@ -602,7 +635,10 @@ try {
       }
     }
 
-    $latestCompatReportPath = Get-LatestCompatReportPath -ReportDir $PSScriptRoot
+    $latestCompatReportPath = Get-LatestCompatReportPath `
+      -ReportDir $PSScriptRoot `
+      -SinceTimestamp $sessionStartTime `
+      -SinceSkewSeconds 5
     $reportParams = @{
       CulpritHistoryByJar = $sessionIsolationCulpritHistoryByJar
       CulpritCurrentByJar = $sessionIsolationCulpritByJar

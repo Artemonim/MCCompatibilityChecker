@@ -1011,6 +1011,69 @@ function Get-DependencyAwareTier {
   return 4
 }
 
+function Get-DependencyAwareJarPriorityInfo {
+  <#
+  .SYNOPSIS
+  Returns dependency-aware priority metadata for a jar name.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarName
+  )
+
+  $fallbackTier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
+  if ([string]::IsNullOrWhiteSpace($JarName)) {
+    return [pscustomobject]@{
+      Tier = $fallbackTier
+      DependentCount = -1
+      Known = $false
+      DependentCountSort = [int]::MaxValue
+    }
+  }
+
+  $jarKey = $JarName.ToLowerInvariant()
+  $tier = $fallbackTier
+  $depCount = -1
+  $known = $false
+
+  $tierVar = Get-Variable -Name "dependencyAwareTierByJarName" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $tierVar -and $tierVar.Value -is [hashtable]) {
+    $tierMap = [hashtable]$tierVar.Value
+    if ($tierMap.ContainsKey($jarKey)) {
+      $tier = [int]$tierMap[$jarKey]
+    }
+  }
+
+  $statsVar = Get-Variable -Name "dependencyAwareStatsByJarName" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $statsVar -and $statsVar.Value -is [hashtable]) {
+    $statsMap = [hashtable]$statsVar.Value
+    if ($statsMap.ContainsKey($jarKey)) {
+      $stats = $statsMap[$jarKey]
+      if ($null -ne $stats) {
+        if ($stats.PSObject.Properties.Name -contains "DependentCount") {
+          $depCount = [int]$stats.DependentCount
+        }
+        if ($stats.PSObject.Properties.Name -contains "Known") {
+          $known = [bool]$stats.Known
+        }
+      }
+    }
+  }
+
+  if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
+    $depCount = 0
+    $known = $true
+  }
+
+  $depCountSort = if ($depCount -ge 0) { [int]$depCount } else { [int]::MaxValue }
+  return [pscustomobject]@{
+    Tier = [int]$tier
+    DependentCount = [int]$depCount
+    Known = [bool]$known
+    DependentCountSort = $depCountSort
+  }
+}
+
 # * Filters quick-isolate candidates to avoid core-tier mods early.
 function Select-QuickIsolateJarsByTier {
   param(
@@ -1018,11 +1081,23 @@ function Select-QuickIsolateJarsByTier {
     [AllowEmptyCollection()]
     [object[]]$Jars,
     [Parameter(Mandatory = $false)]
-    [string]$Context = ""
+    [string]$Context = "",
+    [Parameter(Mandatory = $false)]
+    [int]$MaxResults = 0
   )
 
   if (-not $Jars -or $Jars.Count -eq 0) { return @() }
-  if (-not $UseDependencyAwareOrdering) { return ,@($Jars) }
+  if (-not $UseDependencyAwareOrdering) {
+    if ($MaxResults -gt 0 -and $Jars.Count -gt $MaxResults) {
+      $head = @()
+      for ($i = 0; $i -lt $Jars.Count; $i++) {
+        if ($i -ge $MaxResults) { break }
+        $head += @($Jars[$i])
+      }
+      return ,@($head)
+    }
+    return ,@($Jars)
+  }
   $effectiveMaxTier = $DependencyAwareQuickIsolateMaxTier
   if ($script:currentDependencyTier -gt 0 -and $effectiveMaxTier -gt 0) {
     $effectiveMaxTier = [Math]::Min($effectiveMaxTier, $script:currentDependencyTier)
@@ -1038,17 +1113,17 @@ function Select-QuickIsolateJarsByTier {
     if ($null -eq $jar) { continue }
     $jarName = [string]$jar.Name
     if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
-    $key = $jarName.ToLowerInvariant()
-
-    $tier = 4
-    if ($script:dependencyAwareTierByJarName.ContainsKey($key)) {
-      $tier = [int]$script:dependencyAwareTierByJarName[$key]
-    } elseif (-not [bool]$DependencyAwareTreatUnknownAsCore) {
-      $tier = 1
-    }
+    $priority = Get-DependencyAwareJarPriorityInfo -JarName $jarName
+    $tier = [int]$priority.Tier
 
     if ($tier -le $effectiveMaxTier) {
-      $allowed.Add($jar) | Out-Null
+      $allowed.Add([pscustomobject]@{
+          Jar = $jar
+          Tier = [int]$priority.Tier
+          DependentCount = [int]$priority.DependentCount
+          DependentCountSort = [int]$priority.DependentCountSort
+          Known = [bool]$priority.Known
+        }) | Out-Null
     } else {
       $skipped.Add($jarName) | Out-Null
     }
@@ -1060,5 +1135,69 @@ function Select-QuickIsolateJarsByTier {
     Write-Host ("Быстрая изоляция пропустила моды уровня core{0}: {1}" -f $contextLabel, $skippedLabel) -ForegroundColor Gray
   }
 
-  return ,@($allowed.ToArray())
+  if ($allowed.Count -eq 0) { return @() }
+
+  $ordered = @($allowed.ToArray() | Sort-Object -Property `
+      @{ Expression = { $_.Tier }; Ascending = $true }, `
+      @{ Expression = { $_.DependentCountSort }; Ascending = $true }, `
+      @{ Expression = { if ($null -ne $_.Jar -and $null -ne $_.Jar.PSObject.Properties["LastWriteTime"]) { [datetime]$_.Jar.LastWriteTime } else { [datetime]::MinValue } }; Descending = $true }, `
+      @{ Expression = { if ($null -ne $_.Jar) { [string]$_.Jar.Name } else { "" } }; Ascending = $true })
+
+  $decisionVar = Get-Variable -Name "dependencyPriorityDecisionByJarName" -Scope Script -ErrorAction SilentlyContinue
+  $decisionMap = $null
+  if ($null -ne $decisionVar -and $decisionVar.Value -is [hashtable]) {
+    $decisionMap = [hashtable]$decisionVar.Value
+  }
+
+  $resultItems = $ordered
+  if ($MaxResults -gt 0 -and $ordered.Count -gt $MaxResults) {
+    $selectedItems = @()
+    $deferredItems = @()
+    for ($i = 0; $i -lt $ordered.Count; $i++) {
+      if ($i -lt $MaxResults) {
+        $selectedItems += @($ordered[$i])
+      } else {
+        $deferredItems += @($ordered[$i])
+      }
+    }
+    $selectedLabel = ($selectedItems | ForEach-Object { [string]$_.Jar.Name }) -join ", "
+    $deferredLabel = ($deferredItems | ForEach-Object { [string]$_.Jar.Name }) -join ", "
+    $contextLabel = if ([string]::IsNullOrWhiteSpace($Context)) { "" } else { " ({0})" -f $Context }
+    Write-Host ("Приоритетный выбор{0}: изолируем {1}; откладываем {2}" -f $contextLabel, $selectedLabel, $deferredLabel) -ForegroundColor Gray
+    $resultItems = $selectedItems
+
+    if ($null -ne $decisionMap) {
+      foreach ($item in $selectedItems) {
+        if ($null -eq $item -or $null -eq $item.Jar) { continue }
+        $name = [string]$item.Jar.Name
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        $reason = "dependency-priority: selected tier={0}, dependents={1}; deferred: {2}" -f $item.Tier, $item.DependentCount, $deferredLabel
+        $decisionMap[$name.ToLowerInvariant()] = [pscustomobject]@{
+          Context = $Context
+          Tier = [int]$item.Tier
+          DependentCount = [int]$item.DependentCount
+          Known = [bool]$item.Known
+          DeferredJars = @($deferredItems | ForEach-Object { [string]$_.Jar.Name })
+          Reason = $reason
+        }
+      }
+    }
+  } elseif ($null -ne $decisionMap) {
+    foreach ($item in $resultItems) {
+      if ($null -eq $item -or $null -eq $item.Jar) { continue }
+      $name = [string]$item.Jar.Name
+      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+      $reason = "dependency-priority: selected tier={0}, dependents={1}" -f $item.Tier, $item.DependentCount
+      $decisionMap[$name.ToLowerInvariant()] = [pscustomobject]@{
+        Context = $Context
+        Tier = [int]$item.Tier
+        DependentCount = [int]$item.DependentCount
+        Known = [bool]$item.Known
+        DeferredJars = @()
+        Reason = $reason
+      }
+    }
+  }
+
+  return ,@($resultItems | ForEach-Object { $_.Jar })
 }

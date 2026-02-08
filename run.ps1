@@ -78,6 +78,12 @@ if ($Help) {
   Write-Host "  -UseLinearIsolation     " -NoNewline -ForegroundColor Yellow
   Write-Host ": Use linear search for isolation (slower but simple)." -ForegroundColor Gray
 
+  Write-Host "  -AutoHandleFabricDialog " -NoNewline -ForegroundColor Yellow
+  Write-Host ": Auto-handle Fabric dialogs when no missing deps (default: true)." -ForegroundColor Gray
+
+  Write-Host "  -IgnoreModIds <id,...>  " -NoNewline -ForegroundColor Yellow
+  Write-Host ": Ignore these mod IDs during compatibility cleanup." -ForegroundColor Gray
+
   Write-Host "  -Profile <name>         " -NoNewline -ForegroundColor Yellow
   Write-Host ": Load advanced overrides from config.ini profile." -ForegroundColor Gray
 

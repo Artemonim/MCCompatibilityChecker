@@ -203,28 +203,33 @@ function Get-FabricModIdsFromJar {
     }
     $obj = $jsonText | ConvertFrom-Json -ErrorAction Stop
     $ids = @{}
-    if ($null -ne $obj.id -and -not [string]::IsNullOrWhiteSpace([string]$obj.id)) {
-      $ids[[string]$obj.id.ToLowerInvariant()] = $true
+    $hasId = ($obj -and $obj.PSObject -and ($obj.PSObject.Properties.Name -contains "id"))
+    if ($hasId) {
+      $idValue = [string]$obj.id
+      if (-not [string]::IsNullOrWhiteSpace($idValue)) {
+        $ids[$idValue.Trim().ToLowerInvariant()] = $true
+      }
     }
-    if ($null -ne $obj.provides) {
+    $hasProvides = ($obj -and $obj.PSObject -and ($obj.PSObject.Properties.Name -contains "provides"))
+    if ($hasProvides -and $null -ne $obj.provides) {
       if ($obj.provides -is [string]) {
         $value = [string]$obj.provides
         if (-not [string]::IsNullOrWhiteSpace($value)) {
-          $ids[$value.ToLowerInvariant()] = $true
+          $ids[$value.Trim().ToLowerInvariant()] = $true
         }
       } elseif ($obj.provides -is [System.Collections.IDictionary] -or $obj.provides -is [System.Management.Automation.PSCustomObject]) {
         # * In fabric.mod.json, "provides" can be a map of ID to version.
         foreach ($prop in $obj.provides.psobject.properties) {
           $value = [string]$prop.Name
           if (-not [string]::IsNullOrWhiteSpace($value)) {
-            $ids[$value.ToLowerInvariant()] = $true
+            $ids[$value.Trim().ToLowerInvariant()] = $true
           }
         }
       } else {
         foreach ($entryId in $obj.provides) {
           $value = [string]$entryId
           if (-not [string]::IsNullOrWhiteSpace($value)) {
-            $ids[$value.ToLowerInvariant()] = $true
+            $ids[$value.Trim().ToLowerInvariant()] = $true
           }
         }
       }

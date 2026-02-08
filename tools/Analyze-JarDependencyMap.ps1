@@ -526,6 +526,7 @@ $missingDependencies = $dependencyUsage | Where-Object { $_.IsPresentAsMod -eq $
 Write-Host ("`n[+] JARs scanned: {0}" -f $jarFiles.Count) -ForegroundColor Green
 Write-Host ("[+] Mods found: {0}" -f $modRecords.Count) -ForegroundColor Green
 Write-Host ("[+] Dependency edges: {0}" -f $dependencyEdges.Count) -ForegroundColor Green
+Write-Host ("[+] JAR parse/read errors: {0}" -f $errorRecords.Count) -ForegroundColor Green
 
 if ($dependencyUsage.Count -gt 0) {
     Write-Host ("`n[+] Top dependencies (by reference count):") -ForegroundColor Cyan
@@ -542,7 +543,9 @@ if ($dependencyUsage.Count -gt 0) {
 }
 
 if ($missingDependencies.Count -gt 0) {
-    Write-Host ("`n[!] Dependencies missing in scan path: {0}" -f $missingDependencies.Count) -ForegroundColor Yellow
+    $requiredMissingDependencies = @($missingDependencies | Where-Object { $_.RequiredCount -gt 0 })
+    Write-Host ("`n[!] Dependency IDs without provider mods in scan path: {0}" -f $missingDependencies.Count) -ForegroundColor Yellow
+    Write-Host ("[!] Of them required by at least one mod: {0}" -f $requiredMissingDependencies.Count) -ForegroundColor Yellow
 }
 
 $dependencyMap = [PSCustomObject]@{

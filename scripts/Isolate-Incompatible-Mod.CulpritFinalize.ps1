@@ -55,6 +55,26 @@
       $culpritGameLegacyPath = $moveResult.GameLegacyPath
 
       $evKey = if ($script:activeBaselineEvidenceKey) { $script:activeBaselineEvidenceKey } else { "" }
+      $priority = Get-DependencyAwareJarPriorityInfo -JarName $culpritName
+      $priorityDecision = ""
+      $decisionVar = Get-Variable -Name "dependencyPriorityDecisionByJarName" -Scope Script -ErrorAction SilentlyContinue
+      if ($null -ne $decisionVar -and $decisionVar.Value -is [hashtable]) {
+        $decisionMap = [hashtable]$decisionVar.Value
+        $decisionKey = $culpritName.ToLowerInvariant()
+        if ($decisionMap.ContainsKey($decisionKey)) {
+          $decisionInfo = $decisionMap[$decisionKey]
+          if ($null -ne $decisionInfo -and $decisionInfo.PSObject.Properties.Name -contains "Reason") {
+            $priorityDecision = [string]$decisionInfo.Reason
+          }
+        }
+      }
+      if ([string]::IsNullOrWhiteSpace($priorityDecision)) {
+        if ([bool]$priority.Known) {
+          $priorityDecision = "dependency-priority: selected lower-impact tier first"
+        } else {
+          $priorityDecision = "dependency-priority: selected with unknown dependency metadata"
+        }
+      }
       $culpritMoves.Add([pscustomobject]@{
           JarName = $culpritName
           GameModsDir = $GameModsDir
@@ -64,6 +84,10 @@
           Minecraft = $mcVersionForLegacy
           KeepCulpritInGameLegacy = [bool]$keepGameLegacyEffective
           CrashEvidenceKey = $evKey
+          DependencyTier = [int]$priority.Tier
+          DependentModCount = [int]$priority.DependentCount
+          DependentModCountKnown = [bool]$priority.Known
+          PriorityDecision = $priorityDecision
           Stage = "isolation"
         })
     }

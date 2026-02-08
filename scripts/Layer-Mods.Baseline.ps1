@@ -20,15 +20,39 @@
 
   # ── Phase 2: baseline launch with tier-4 only. ──
   $phase = "baseline_tier4"
+  $baselineWithHashCachedMods = ($script:mcccCacheEnabled -and $script:mcccKnownGoodJarNameSet.Count -gt 0)
+  $baselineRetriedCoreOnly = $false
   $baselineLabel = "Baseline: launching with core libraries only (tier 4)."
-  if ($script:mcccCacheEnabled -and $script:mcccKnownGoodJarNameSet.Count -gt 0) {
+  if ($baselineWithHashCachedMods) {
     $baselineLabel = "Baseline: launching with core libraries (tier 4) plus hash-cached mods."
   }
   Write-Host $baselineLabel -ForegroundColor Cyan
   $baselineResult = Invoke-LayeringLaunchAndCheck -PhasePrefix "baseline_tier4"
 
+  if ($baselineResult.Type -eq "Crash" -and $baselineWithHashCachedMods) {
+    Write-Host "Baseline with hash-cached mods crashed. Retrying strict core-only baseline (tier 4)." -ForegroundColor Yellow
+    $baselineRetriedCoreOnly = $true
+    $cacheEnabledBeforeRetry = [bool]$script:mcccCacheEnabled
+    $script:mcccCacheEnabled = $false
+    try {
+      $baselineResult = Invoke-LayeringLaunchAndCheck -PhasePrefix "baseline_tier4_core_only_retry"
+    } finally {
+      if ($baselineResult.Type -ne "Success") {
+        $script:mcccCacheEnabled = $cacheEnabledBeforeRetry
+      }
+    }
+
+    if ($baselineResult.Type -eq "Success") {
+      Write-Host "Strict core-only baseline succeeded. Hash-cached mods are excluded for this layering run." -ForegroundColor Yellow
+    }
+  }
+
   if ($baselineResult.Type -eq "Crash") {
-    Write-Host "Core-библиотеки (уровень 4) сами по себе вызывают краш. Наслоение невозможно." -ForegroundColor Red
+    if ($baselineRetriedCoreOnly -or (-not $baselineWithHashCachedMods)) {
+      Write-Host "Core-библиотеки (уровень 4) сами по себе вызывают краш. Наслоение невозможно." -ForegroundColor Red
+    } else {
+      Write-Host "Baseline crash happened with tier 4 plus hash-cached mods. Core-only baseline was not isolated." -ForegroundColor Red
+    }
     Write-Host "Требуется ручная диагностика: проверьте моды уровня 4 или используйте стандартную изоляцию." -ForegroundColor Yellow
     $exitCode = 2
     # ! Fall through to finally for restore.

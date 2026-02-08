@@ -672,6 +672,8 @@ $candidateMods = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File
     Sort-Object -Property LastWriteTime -Descending)
 
 $script:dependencyAwareTierByJarName = @{}
+$script:dependencyAwareStatsByJarName = @{}
+$script:dependencyPriorityDecisionByJarName = @{}
 $script:currentDependencyTier = 0
 $script:dependencyMapByModId = @{}
 $script:dependencyMapProvidedIdsByJar = @{}
@@ -785,6 +787,10 @@ if ($UseDependencyAwareOrdering -and $candidateMods -and $candidateMods.Count -g
           $known = $true
         }
         $script:dependencyAwareTierByJarName[$jarKey] = Get-DependencyAwareTier -DependentCount $depCount -Known $known
+        $script:dependencyAwareStatsByJarName[$jarKey] = [pscustomobject]@{
+          DependentCount = [int]$depCount
+          Known = [bool]$known
+        }
       }
 
       foreach ($mod in $candidateMods) {
@@ -806,6 +812,12 @@ if ($UseDependencyAwareOrdering -and $candidateMods -and $candidateMods.Count -g
         Add-Member -InputObject $mod -NotePropertyName DependentModCount -NotePropertyValue $depCount -Force
         Add-Member -InputObject $mod -NotePropertyName DependentModTier -NotePropertyValue $tier -Force
         Add-Member -InputObject $mod -NotePropertyName DependentModCountKnown -NotePropertyValue $known -Force
+        if (-not $script:dependencyAwareStatsByJarName.ContainsKey($jarKey)) {
+          $script:dependencyAwareStatsByJarName[$jarKey] = [pscustomobject]@{
+            DependentCount = [int]$depCount
+            Known = [bool]$known
+          }
+        }
       }
 
       $candidateMods = @($candidateMods | Sort-Object -Property `

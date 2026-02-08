@@ -39,11 +39,84 @@ function Resolve-IsolationStrategyContext {
   $useStorageVar = Get-Variable -Name "useStorage" -Scope Script -ErrorAction SilentlyContinue
   if ($null -ne $useStorageVar) { $useStorageLocal = [bool]$useStorageVar.Value }
 
+  $logPathLocal = ""
+  $logPathVar = Get-Variable -Name "LogPath" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $logPathVar) { $logPathLocal = [string]$logPathVar.Value }
+
+  $logMaxAgeMinutesLocal = 30
+  $logMaxAgeVar = Get-Variable -Name "LogMaxAgeMinutes" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $logMaxAgeVar) { $logMaxAgeMinutesLocal = [int]$logMaxAgeVar.Value }
+
+  $logReadRetryCountLocal = 5
+  $logReadRetryCountVar = Get-Variable -Name "LogReadRetryCount" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $logReadRetryCountVar) { $logReadRetryCountLocal = [int]$logReadRetryCountVar.Value }
+
+  $logReadRetryDelayMsLocal = 500
+  $logReadRetryDelayVar = Get-Variable -Name "LogReadRetryDelayMs" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $logReadRetryDelayVar) { $logReadRetryDelayMsLocal = [int]$logReadRetryDelayVar.Value }
+
+  $skipGameLogsLocal = $false
+  $skipGameLogsVar = Get-Variable -Name "SkipGameLogs" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $skipGameLogsVar) { $skipGameLogsLocal = [bool]$skipGameLogsVar.Value }
+
+  $logSinceSkewSecondsLocal = 120
+  $logSinceSkewVar = Get-Variable -Name "LogSinceSkewSeconds" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $logSinceSkewVar) { $logSinceSkewSecondsLocal = [int]$logSinceSkewVar.Value }
+
+  $errorSignatureLineLimitLocal = 2
+  $errorSignatureVar = Get-Variable -Name "ErrorSignatureLineLimit" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $errorSignatureVar) { $errorSignatureLineLimitLocal = [int]$errorSignatureVar.Value }
+
+  $includeWarnMixinsLocal = $false
+  $includeWarnMixinsVar = Get-Variable -Name "IncludeWarnMixinsAsIncompatible" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $includeWarnMixinsVar) { $includeWarnMixinsLocal = [bool]$includeWarnMixinsVar.Value }
+
+  $ignoreModListForSignatureChangeLocal = $true
+  $ignoreModListVar = Get-Variable -Name "IgnoreModListForSignatureChange" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $ignoreModListVar) { $ignoreModListForSignatureChangeLocal = [bool]$ignoreModListVar.Value }
+
+  $logPostRunDelaySecondsLocal = 3
+  $logPostRunDelayVar = Get-Variable -Name "LogPostRunDelaySeconds" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $logPostRunDelayVar) { $logPostRunDelaySecondsLocal = [int]$logPostRunDelayVar.Value }
+
+  $binaryLinearThresholdLocal = 8
+  $binaryLinearThresholdVar = Get-Variable -Name "BinaryLinearThreshold" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $binaryLinearThresholdVar) { $binaryLinearThresholdLocal = [int]$binaryLinearThresholdVar.Value }
+
+  $dependencyAwareExponentialMaxTierLocal = 2
+  $dependencyAwareExponentialMaxTierVar = Get-Variable -Name "DependencyAwareExponentialMaxTier" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $dependencyAwareExponentialMaxTierVar) { $dependencyAwareExponentialMaxTierLocal = [int]$dependencyAwareExponentialMaxTierVar.Value }
+
+  $dependencyAwareTreatUnknownAsCoreLocal = $true
+  $dependencyAwareTreatUnknownAsCoreVar = Get-Variable -Name "DependencyAwareTreatUnknownAsCore" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $dependencyAwareTreatUnknownAsCoreVar) { $dependencyAwareTreatUnknownAsCoreLocal = [bool]$dependencyAwareTreatUnknownAsCoreVar.Value }
+
+  $moveRetryCountLocal = 15
+  $moveRetryCountVar = Get-Variable -Name "MoveRetryCount" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $moveRetryCountVar) { $moveRetryCountLocal = [int]$moveRetryCountVar.Value }
+
+  $moveRetryDelayMsLocal = 1000
+  $moveRetryDelayVar = Get-Variable -Name "MoveRetryDelayMs" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $moveRetryDelayVar) { $moveRetryDelayMsLocal = [int]$moveRetryDelayVar.Value }
+
+  $gameQuarantineDirLocal = ""
+  $gameQuarantineDirVar = Get-Variable -Name "gameQuarantineDir" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $gameQuarantineDirVar) { $gameQuarantineDirLocal = [string]$gameQuarantineDirVar.Value }
+
+  $storageQuarantineDirLocal = ""
+  $storageQuarantineDirVar = Get-Variable -Name "storageQuarantineDir" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $storageQuarantineDirVar) { $storageQuarantineDirLocal = [string]$storageQuarantineDirVar.Value }
+
+  $forceRestoreLocal = $false
+  $forceRestoreVar = Get-Variable -Name "ForceRestore" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $forceRestoreVar) { $forceRestoreLocal = [bool]$forceRestoreVar.Value }
+
   return [pscustomobject]@{
     Paths = [pscustomobject]@{
       GameModsDir = $launcherContext.Paths.GameModsDir
       StorageModsDir = $storageModsDir
       LauncherExePath = $launcherContext.Paths.LauncherExePath
+      LogPath = $logPathLocal
     }
     Launcher = $launcherContext.Launcher
     Ui = $launcherContext.Ui
@@ -51,31 +124,31 @@ function Resolve-IsolationStrategyContext {
     Process = $launcherContext.Process
     Cache = $launcherContext.Cache
     Log = [pscustomobject]@{
-      LogPath = $LogPath
-      LogMaxAgeMinutes = $LogMaxAgeMinutes
-      LogReadRetryCount = $LogReadRetryCount
-      LogReadRetryDelayMs = $LogReadRetryDelayMs
-      SkipGameLogs = [bool]$SkipGameLogs
-      LogSinceSkewSeconds = $LogSinceSkewSeconds
+      LogPath = $logPathLocal
+      LogMaxAgeMinutes = $logMaxAgeMinutesLocal
+      LogReadRetryCount = $logReadRetryCountLocal
+      LogReadRetryDelayMs = $logReadRetryDelayMsLocal
+      SkipGameLogs = [bool]$skipGameLogsLocal
+      LogSinceSkewSeconds = $logSinceSkewSecondsLocal
     }
     Strategy = [pscustomobject]@{
-      ErrorSignatureLineLimit = $ErrorSignatureLineLimit
-      IncludeWarnMixinsAsIncompatible = [bool]$IncludeWarnMixinsAsIncompatible
-      IgnoreModListForSignatureChange = [bool]$IgnoreModListForSignatureChange
-      LogPostRunDelaySeconds = $LogPostRunDelaySeconds
-      BinaryLinearThreshold = $BinaryLinearThreshold
-      DependencyAwareExponentialMaxTier = $DependencyAwareExponentialMaxTier
-      DependencyAwareTreatUnknownAsCore = [bool]$DependencyAwareTreatUnknownAsCore
+      ErrorSignatureLineLimit = $errorSignatureLineLimitLocal
+      IncludeWarnMixinsAsIncompatible = [bool]$includeWarnMixinsLocal
+      IgnoreModListForSignatureChange = [bool]$ignoreModListForSignatureChangeLocal
+      LogPostRunDelaySeconds = $logPostRunDelaySecondsLocal
+      BinaryLinearThreshold = $binaryLinearThresholdLocal
+      DependencyAwareExponentialMaxTier = $dependencyAwareExponentialMaxTierLocal
+      DependencyAwareTreatUnknownAsCore = [bool]$dependencyAwareTreatUnknownAsCoreLocal
     }
     Quarantine = [pscustomobject]@{
       UseStorage = $useStorageLocal
-      MoveRetryCount = $MoveRetryCount
-      MoveRetryDelayMs = $MoveRetryDelayMs
-      GameQuarantineDir = $gameQuarantineDir
-      StorageQuarantineDir = $storageQuarantineDir
+      MoveRetryCount = $moveRetryCountLocal
+      MoveRetryDelayMs = $moveRetryDelayMsLocal
+      GameQuarantineDir = $gameQuarantineDirLocal
+      StorageQuarantineDir = $storageQuarantineDirLocal
       MovedItems = $movedItemsLocal
       MovedJarNameSet = $movedSetLocal
-      ForceRestore = [bool]$ForceRestore
+      ForceRestore = [bool]$forceRestoreLocal
     }
     State = [pscustomobject]@{
       Phase = if ($null -ne $phaseVar) { [string]$phaseVar.Value } else { "" }
@@ -380,7 +453,7 @@ function Invoke-FabricDependencyRecovery {
     if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
     if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
     $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $requiringArr -AllowTokenFallback:$false
-    $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency dialog"
+    $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency dialog" -MaxResults 1
     if ($culpritJars -and $culpritJars.Count -gt 0 -and $ProtectedJarNameSet.Count -gt 0) {
       $culpritJars = @($culpritJars | Where-Object {
           -not $ProtectedJarNameSet.ContainsKey($_.Name.ToLowerInvariant())
@@ -954,7 +1027,7 @@ function Invoke-LinearIsolation {
         if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
         if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
         $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
-        $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "fabric dialog"
+        $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "fabric dialog" -MaxResults 1
         if ($culpritJars -and $culpritJars.Count -gt 0) {
           foreach ($cj in $culpritJars) {
             if ($quarantine.MovedJarNameSet.ContainsKey($cj.Name)) { continue }
@@ -1049,7 +1122,7 @@ function Invoke-LinearIsolation {
         if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
         if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
         $requiringJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIdsArr -AllowTokenFallback:$false
-        $requiringJars = Select-QuickIsolateJarsByTier -Jars $requiringJars -Context "dependency signature"
+        $requiringJars = Select-QuickIsolateJarsByTier -Jars $requiringJars -Context "dependency signature" -MaxResults 1
         if ($requiringJars -and $requiringJars.Count -gt 0) {
           $culpritJarNames = @()
           foreach ($rj in $requiringJars) {
@@ -1091,7 +1164,7 @@ function Invoke-LinearIsolation {
         if ($quarantine.GameQuarantineDir) { $searchDirs += $quarantine.GameQuarantineDir }
         if ($quarantine.StorageQuarantineDir) { $searchDirs += $quarantine.StorageQuarantineDir }
         $culpritJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $newModIds -AllowTokenFallback:$false
-        $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency signature"
+        $culpritJars = Select-QuickIsolateJarsByTier -Jars $culpritJars -Context "dependency signature" -MaxResults 1
         if ($culpritJars -and $culpritJars.Count -gt 0) {
           foreach ($cj in $culpritJars) {
             # * Skip if already moved.

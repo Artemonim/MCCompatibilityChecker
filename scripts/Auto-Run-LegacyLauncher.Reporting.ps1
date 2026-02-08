@@ -1,14 +1,25 @@
 function Get-LatestCompatReportPath {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$ReportDir
+    [string]$ReportDir,
+    [Parameter(Mandatory = $false)]
+    [datetime]$SinceTimestamp = [datetime]::MinValue,
+    [Parameter(Mandatory = $false)]
+    [int]$SinceSkewSeconds = 5
   )
 
   if (-not (Test-Path -LiteralPath $ReportDir)) { return "" }
-  $reports = Get-ChildItem -LiteralPath $ReportDir -Filter "compat-report-*.json" -File -ErrorAction SilentlyContinue |
-    Sort-Object -Property LastWriteTime -Descending
-  if (-not $reports -or $reports.Count -eq 0) { return "" }
-  return [string]$reports[0].FullName
+  $reports = @(Get-ChildItem -LiteralPath $ReportDir -Filter "compat-report-*.json" -File -ErrorAction SilentlyContinue |
+      Sort-Object -Property LastWriteTime -Descending)
+  if ($reports.Count -eq 0) { return "" }
+  if ($SinceTimestamp -eq [datetime]::MinValue) {
+    return [string]$reports[0].FullName
+  }
+
+  $threshold = $SinceTimestamp.AddSeconds(-1 * [math]::Abs($SinceSkewSeconds))
+  $freshReports = @($reports | Where-Object { $_.LastWriteTime -ge $threshold })
+  if ($freshReports.Count -eq 0) { return "" }
+  return [string]$freshReports[0].FullName
 }
 
 function Write-SessionReport {
@@ -41,6 +52,58 @@ function Write-SessionReport {
   }
   if (-not [string]::IsNullOrWhiteSpace($CompatReportPath)) {
     Write-Host ("Compatibility report: {0}" -f $CompatReportPath) -ForegroundColor Gray
+  } elseif ($SessionStartTime -ne [datetime]::MinValue) {
+    Write-Host "Compatibility report was not generated in this session." -ForegroundColor Gray
+  }
+
+  $compatPriorityChoices = @()
+  $compatReportFresh = $true
+  if (-not [string]::IsNullOrWhiteSpace($CompatReportPath) -and (Test-Path -LiteralPath $CompatReportPath) -and $SessionStartTime -ne [datetime]::MinValue) {
+    try {
+      $compatInfo = Get-Item -LiteralPath $CompatReportPath -ErrorAction Stop
+      if ($compatInfo.LastWriteTime -lt $SessionStartTime.AddSeconds(-5)) {
+        $compatReportFresh = $false
+      }
+    } catch {
+      $compatReportFresh = $false
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($CompatReportPath) -and (Test-Path -LiteralPath $CompatReportPath) -and $compatReportFresh) {
+    try {
+      $compatRaw = Get-Content -LiteralPath $CompatReportPath -Raw -ErrorAction Stop
+      if (-not [string]::IsNullOrWhiteSpace($compatRaw)) {
+        $compatObj = $compatRaw | ConvertFrom-Json -ErrorAction Stop
+        $priorityApplied = $false
+        if ($compatObj | Get-Member -Name "dependencyPriorityApplied" -MemberType NoteProperty, Property) {
+          $priorityApplied = [bool]$compatObj.dependencyPriorityApplied
+        }
+        if ($priorityApplied -and ($compatObj | Get-Member -Name "items" -MemberType NoteProperty, Property)) {
+          foreach ($item in @($compatObj.items)) {
+            if ($null -eq $item) { continue }
+            $status = if ($item | Get-Member -Name "status" -MemberType NoteProperty, Property) { [string]$item.status } else { "" }
+            if ($status -ne "handled" -and $status -ne "unresolved_in_game_mods") { continue }
+            $modId = if ($item | Get-Member -Name "modId" -MemberType NoteProperty, Property) { [string]$item.modId } else { "" }
+            if ([string]::IsNullOrWhiteSpace($modId)) { continue }
+            $decision = if ($item | Get-Member -Name "priorityDecision" -MemberType NoteProperty, Property) { [string]$item.priorityDecision } else { "" }
+            $tier = if ($item | Get-Member -Name "dependencyTier" -MemberType NoteProperty, Property) { [int]$item.dependencyTier } else { 0 }
+            $dependents = if ($item | Get-Member -Name "dependentMods" -MemberType NoteProperty, Property) { [int]$item.dependentMods } else { -1 }
+            $known = if ($item | Get-Member -Name "dependentModsKnown" -MemberType NoteProperty, Property) { [bool]$item.dependentModsKnown } else { $false }
+            $compatPriorityChoices += @([pscustomobject]@{
+                ModId = $modId
+                Tier = $tier
+                DependentCount = $dependents
+                Known = $known
+                Status = $status
+                Decision = $decision
+              })
+          }
+        }
+      }
+    } catch {
+      Write-Host ("Warning: failed to read compatibility priority details: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+  } elseif (-not [string]::IsNullOrWhiteSpace($CompatReportPath) -and (Test-Path -LiteralPath $CompatReportPath) -and (-not $compatReportFresh)) {
+    Write-Host "Compatibility report for this session is unavailable; priority details skipped." -ForegroundColor Gray
   }
 
   $historyMoves = @($CulpritHistoryByJar.Values | Where-Object { $null -ne $_ })
@@ -86,8 +149,40 @@ function Write-SessionReport {
         if (-not [string]::IsNullOrWhiteSpace($storagePath)) { $locations.Add(("storage: {0}" -f $storagePath)) }
         if (-not [string]::IsNullOrWhiteSpace($gamePath)) { $locations.Add(("game: {0}" -f $gamePath)) }
         $locationLabel = if ($locations.Count -gt 0) { $locations -join "; " } else { "location unknown" }
-        Write-Host ("    - {0} ({1})" -f $jarName, $locationLabel) -ForegroundColor Gray
+        $priorityParts = New-Object System.Collections.Generic.List[string]
+        if ($move | Get-Member -Name "DependencyTier" -MemberType NoteProperty, Property) {
+          $tier = [int]$move.DependencyTier
+          if ($tier -gt 0) {
+            $priorityParts.Add(("tier={0}" -f $tier)) | Out-Null
+          }
+        }
+        if ($move | Get-Member -Name "DependentModCount" -MemberType NoteProperty, Property) {
+          $depCount = [int]$move.DependentModCount
+          if ($depCount -ge 0) {
+            $priorityParts.Add(("dependents={0}" -f $depCount)) | Out-Null
+          }
+        }
+        $line = ("    - {0} ({1})" -f $jarName, $locationLabel)
+        if ($priorityParts.Count -gt 0) {
+          $line = "{0}; {1}" -f $line, ($priorityParts -join ", ")
+        }
+        Write-Host $line -ForegroundColor Gray
+        if ($move | Get-Member -Name "PriorityDecision" -MemberType NoteProperty, Property) {
+          $reason = [string]$move.PriorityDecision
+          if (-not [string]::IsNullOrWhiteSpace($reason)) {
+            Write-Host ("      reason: {0}" -f $reason) -ForegroundColor Gray
+          }
+        }
       }
+    }
+  }
+
+  if ($compatPriorityChoices -and $compatPriorityChoices.Count -gt 0) {
+    Write-Host ("Compatibility cleanup priority decisions: {0}" -f $compatPriorityChoices.Count) -ForegroundColor Gray
+    foreach ($item in ($compatPriorityChoices | Sort-Object -Property Tier, DependentCount, ModId)) {
+      $countLabel = if ($item.Known -and $item.DependentCount -ge 0) { [string]$item.DependentCount } else { "unknown" }
+      $decisionLabel = if ([string]::IsNullOrWhiteSpace([string]$item.Decision)) { "selected by dependency priority" } else { [string]$item.Decision }
+      Write-Host ("  - {0} [{1}] tier={2}, dependents={3}; {4}" -f $item.ModId, $item.Status, $item.Tier, $countLabel, $decisionLabel) -ForegroundColor Gray
     }
   }
 

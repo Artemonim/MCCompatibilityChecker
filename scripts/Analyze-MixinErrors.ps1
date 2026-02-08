@@ -626,6 +626,7 @@ function Resolve-MixinCandidateJarName {
 # * Read crash log.
 # ────────────────────────────────────────────────────────────────────────────
 
+$mcVersionForLegacy = "unknown"
 $logSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $LogSinceTimestamp -SinceTimestampSkewSeconds $LogSinceSkewSeconds
 if ($null -eq $logSnapshot -or $logSnapshot.Lines.Count -eq 0) {
   Write-Host "Mixin analysis: no crash log available." -ForegroundColor Gray
@@ -709,6 +710,33 @@ Write-Host ("Mixin analysis: found {0} Mixin apply failure(s), {1} @Mixin target
 # ────────────────────────────────────────────────────────────────────────────
 
 $dependencyMap = Get-DependencyMapFromSource -ScanPath $GameModsDir
+
+# * Build jar priority metadata (tier/dependents) for final report annotations.
+$mixinPriorityByJarName = @{}
+$mixinTier2MaxDependents = 3
+$mixinTier3MaxDependents = 10
+if ($null -ne $dependencyMap) {
+  $depCounts = Get-DependentModCountsFromDependencyMap -DependencyMap $dependencyMap -CountMode "RequiredOnly"
+  foreach ($jarKey in $depCounts.Keys) {
+    $depCount = [int]$depCounts[$jarKey].DependentCount
+    $known = [bool]$depCounts[$jarKey].Known
+    $tier = 4
+    if ($known) {
+      if ($depCount -le 0) {
+        $tier = 1
+      } elseif ($depCount -le $mixinTier2MaxDependents) {
+        $tier = 2
+      } elseif ($depCount -le $mixinTier3MaxDependents) {
+        $tier = 3
+      }
+    }
+    $mixinPriorityByJarName[$jarKey] = [pscustomobject]@{
+      Tier = [int]$tier
+      DependentCount = [int]$depCount
+      Known = [bool]$known
+    }
+  }
+}
 
 # * Build mod ID → JAR name lookup and known mod IDs set.
 $modIdToJar = @{}
@@ -971,6 +999,24 @@ foreach ($mxErr in $mixinErrors) {
       $culpritStorageLegacy = $moveResult.StorageLegacyPath
       $culpritGameLegacy = $moveResult.GameLegacyPath
 
+      $priorityTier = 4
+      $priorityDependentCount = -1
+      $priorityKnown = $false
+      $candKey = $candJar.ToLowerInvariant()
+      if ($mixinPriorityByJarName.ContainsKey($candKey)) {
+        $priorityMeta = $mixinPriorityByJarName[$candKey]
+        if ($null -ne $priorityMeta) {
+          $priorityTier = [int]$priorityMeta.Tier
+          $priorityDependentCount = [int]$priorityMeta.DependentCount
+          $priorityKnown = [bool]$priorityMeta.Known
+        }
+      }
+      $priorityDecision = if ($priorityKnown) {
+        "dependency-priority metadata: tier={0}, dependents={1}" -f $priorityTier, $priorityDependentCount
+      } else {
+        "dependency-priority metadata unavailable for this jar"
+      }
+
       # * Clean up temp storage copy.
       if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp)) {
         Remove-Item -LiteralPath $storageTemp -Force -ErrorAction SilentlyContinue
@@ -990,6 +1036,10 @@ foreach ($mxErr in $mixinErrors) {
           Minecraft          = $mcVersionForLegacy
           KeepCulpritInGameLegacy = [bool]$KeepCulpritInGameLegacy
           CrashEvidenceKey   = $mxErr.ErrorLine
+          DependencyTier     = [int]$priorityTier
+          DependentModCount  = [int]$priorityDependentCount
+          DependentModCountKnown = [bool]$priorityKnown
+          PriorityDecision   = $priorityDecision
           Stage              = "mixin-analysis"
         })
       Write-Host ("Culprit identified: {0}" -f $candJar) -ForegroundColor Green

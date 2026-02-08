@@ -99,8 +99,20 @@ function Move-CulpritToLegacyAndAppendLog {
     }
   } elseif ($RemoveGameIfNotKeeping) {
     $canRemove = (-not $useStorage) -or (-not $RequireStorageMoveForGameRemoval) -or $storageMoved
-    if ($canRemove -and -not [string]::IsNullOrWhiteSpace($GameSourcePath) -and (Test-Path -LiteralPath $GameSourcePath)) {
+    $preferFallbackToGameLegacy = $useStorage -and (-not $storageMoved)
+    if ((-not $preferFallbackToGameLegacy) -and $canRemove -and -not [string]::IsNullOrWhiteSpace($GameSourcePath) -and (Test-Path -LiteralPath $GameSourcePath)) {
       Remove-Item -LiteralPath $GameSourcePath -Force -ErrorAction Stop
+      $gameMoved = $true
+    } elseif (-not [string]::IsNullOrWhiteSpace($GameSourcePath) -and (Test-Path -LiteralPath $GameSourcePath)) {
+      # * Safety fallback: if storage legacy copy is unavailable, keep an auditable game-legacy copy
+      # * instead of deleting the only remaining culprit artifact.
+      $gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
+      $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot -ChildPath $MinecraftVersion
+      New-DirectoryIfMissing -DirPath $gameLegacyVersionDir
+      $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $JarName
+      Move-Item -LiteralPath $GameSourcePath -Destination $destPath -Force -ErrorAction Stop
+      Write-Host ("Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath) -ForegroundColor Yellow
+      $gameLegacyPath = $destPath
       $gameMoved = $true
     }
   }

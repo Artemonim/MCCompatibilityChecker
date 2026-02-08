@@ -42,6 +42,13 @@ $sessionIsolationFastForwardEvidenceKey = ""
 $sessionIsolationCulpritByJar = @{}
 $sessionIsolationCulpritHistoryByJar = @{}
 
+# * Log snapshot defaults for Fabric dialog auto-handling.
+$autoFabricLogMaxAgeMinutes = 30
+$autoFabricLogReadRetryCount = 5
+$autoFabricLogReadRetryDelayMs = 500
+$autoFabricLogSinceSkewSeconds = 120
+$autoFabricSkipGameLogs = $false
+
 $attempt = 0
 while ($true) {
   $attempt++
@@ -79,6 +86,14 @@ while ($true) {
   } else {
     $lastCrashDialogHandleId = 0
   }
+  $preExistingOutcomeHandles = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns))
+  $ignoreHandleSet = [System.Collections.Generic.HashSet[long]]::new()
+  foreach ($id in @($ignoreCrashIds + $preExistingOutcomeHandles)) {
+    if ($null -eq $id -or [long]$id -eq 0) { continue }
+    $null = $ignoreHandleSet.Add([long]$id)
+  }
+  $ignoreOutcomeHandleIds = @($ignoreHandleSet | Sort-Object -Unique)
+
   $outcome = Wait-ForOutcome -CrashPatterns $CrashWindowTitlePatterns `
     -FabricPatterns $FabricWindowTitlePatterns `
     -TimeoutSeconds $OutcomeTimeoutSeconds `
@@ -88,26 +103,135 @@ while ($true) {
     -LauncherHandleId ([long]$launcherWindow.Handle.ToInt64()) `
     -LaunchStartTimeoutSeconds $SuccessGraceSeconds `
     -RequireGameStartForTimeout ([bool]($SuccessGraceSeconds -gt 0)) `
-    -IgnoreHandleIds $ignoreCrashIds
+    -IgnoreHandleIds $ignoreOutcomeHandleIds
 
   # * Race guard: a crash/fabric dialog can appear right after Wait-ForOutcome returns.
   # * Re-check for a short grace window before branching into outcome handling.
   if ($outcome.Type -eq "Timeout") {
     $lateDeadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $lateDeadline -and $outcome.Type -eq "Timeout") {
-      $lateCrashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns -ExcludeHandleIds $ignoreCrashIds
+      $lateCrashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns -ExcludeHandleIds $ignoreOutcomeHandleIds
       if ($null -ne $lateCrashNow) {
         Write-Host ("Late crash dialog detected after probe window: {0}" -f $lateCrashNow.Title) -ForegroundColor Yellow
         $outcome = [pscustomobject]@{ Type = "CrashDialog"; Window = $lateCrashNow }
         break
       }
-      $lateFabricNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+      $lateFabricNow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns -ExcludeHandleIds $ignoreOutcomeHandleIds
       if ($null -ne $lateFabricNow) {
         Write-Host ("Late Fabric dialog detected after probe window: {0}" -f $lateFabricNow.Title) -ForegroundColor Yellow
         $outcome = [pscustomobject]@{ Type = "FabricDialog"; Window = $lateFabricNow }
         break
       }
       Start-Sleep -Milliseconds 300
+    }
+  }
+
+  $launchWasSuccessful = ($outcome.Type -eq "Timeout" -or $outcome.Type -eq "ProcessExit")
+  if ((-not $launchWasSuccessful) -and (-not [bool]$script:sessionDependencyMapPrepared) -and (-not $DryRun)) {
+    $depReason = "attempt {0}: {1}" -f $attempt, $outcome.Type
+    [void](Initialize-SessionDependencyMap -Reason $depReason)
+  }
+
+  $fabricMissingDepsDetected = $false
+  $fabricRoutedToCleanup = $false
+
+  # * Route Fabric "remove/replace" outcomes into the same debug pipeline as crash dialogs.
+  if ($outcome.Type -eq "FabricDialog" -and $AutoHandleFabricDialog -and -not $DryRun) {
+    $fabricShouldRunCleanup = $false
+    $logSnapshot = $null
+    try {
+      $gameModsDirForLogs = ""
+      if ($null -ne $runtimeConfig -and $null -ne $runtimeConfig.Paths) {
+        $gameModsDirForLogs = [string]$runtimeConfig.Paths.GameModsDir
+      }
+      $logSnapshot = Get-LogSnapshot -PrimaryLogPath $LogPath `
+        -GameModsDir $gameModsDirForLogs `
+        -SkipGameLogs $autoFabricSkipGameLogs `
+        -LogMaxAgeMinutes $autoFabricLogMaxAgeMinutes `
+        -LogReadRetryCount $autoFabricLogReadRetryCount `
+        -LogReadRetryDelayMs $autoFabricLogReadRetryDelayMs `
+        -SinceTimestamp $launchStart `
+        -SinceTimestampSkewSeconds $autoFabricLogSinceSkewSeconds
+    } catch {
+      Write-Host ("Warning: failed to read logs for Fabric pre-routing: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    if ($null -ne $logSnapshot -and $logSnapshot.Lines.Count -gt 0) {
+      $depInfo = Get-FabricDependencyDialogInfo -Lines $logSnapshot.Lines
+      if ($depInfo.HasMissingDeps) {
+        $fabricMissingDepsDetected = $true
+        $missLabel = if ($depInfo.MissingDepIds.Count -gt 0) { $depInfo.MissingDepIds -join ", " } else { "<none>" }
+        $reqLabel = if ($depInfo.RequiringModIds.Count -gt 0) { $depInfo.RequiringModIds -join ", " } else { "<none>" }
+        Write-Host ("Fabric диалог показывает отсутствующие зависимости: {0}. Требуется действие пользователя." -f $missLabel) -ForegroundColor Yellow
+        Write-Host ("Требующие моды: {0}" -f $reqLabel) -ForegroundColor Gray
+
+        # * Mirror key Fabric dialog lines in console so the user can review details without switching windows.
+        $fabricDependencyDetailLines = @(
+          $logSnapshot.Lines |
+            ForEach-Object { [string]$_ } |
+            Where-Object {
+              $_ -match "(?i)^\s*-\s+(Remove|Replace)\s+mod\b" -or
+              $_ -match "(?i)requires\s+.+\s+which\s+is\s+missing" -or
+              $_ -match "(?i)Could\s+not\s+find\s+required\s+mod:" -or
+              $_ -match "(?i)is\s+required\s+to\s+run\s+the\s+following\s+mods?\b" -or
+              $_ -match "(?i)^\s*Some\s+of\s+your\s+mods\s+are\s+incompatible\b" -or
+              $_ -match "(?i)^\s*A\s+potential\s+solution\s+has\s+been\s+determined\b" -or
+              $_ -match "(?i)^\s*More\s+details:\s*$"
+            } |
+            ForEach-Object { ConvertTo-NormalizedLogLine -Line $_ } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            Select-Object -Unique |
+            Select-Object -First 40
+        )
+        if ($fabricDependencyDetailLines.Count -gt 0) {
+          Write-Host "Ключевые строки Fabric-диалога (из логов):" -ForegroundColor Gray
+          foreach ($detailLine in $fabricDependencyDetailLines) {
+            Write-Host ("  - {0}" -f $detailLine) -ForegroundColor Gray
+          }
+        }
+      } else {
+        $incompatibleIds = @(Get-IncompatibleModIdsFromLog -Lines $logSnapshot.Lines -IncludeWarnMixins $false) |
+          ForEach-Object { [string]$_ } |
+          Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+          Sort-Object -Unique
+        $incompatibleIds = @($incompatibleIds)
+
+        $filteredIds = $incompatibleIds
+        if ($IgnoreModIds -and $IgnoreModIds.Count -gt 0 -and $incompatibleIds.Count -gt 0) {
+          $ignoreSet = @{}
+          foreach ($id in $IgnoreModIds) {
+            $key = [string]$id
+            if ([string]::IsNullOrWhiteSpace($key)) { continue }
+            $ignoreSet[$key.ToLowerInvariant()] = $true
+          }
+          if ($ignoreSet.Count -gt 0) {
+            $filteredIds = @($incompatibleIds | Where-Object { -not $ignoreSet.ContainsKey($_.ToLowerInvariant()) })
+            $ignoredIds = @($incompatibleIds | Where-Object { $ignoreSet.ContainsKey($_.ToLowerInvariant()) })
+            if ($ignoredIds.Count -gt 0) {
+              Write-Host ("Игнорирую mod id из списка исключений: {0}" -f ($ignoredIds -join ", ")) -ForegroundColor Gray
+            }
+          }
+        }
+
+        if ($filteredIds.Count -gt 0) {
+          Write-Host ("Fabric диалог без отсутствующих зависимостей. Перенаправляю в debug pipeline (моды: {0})." -f ($filteredIds -join ", ")) -ForegroundColor Cyan
+          $fabricShouldRunCleanup = $true
+        } elseif ($incompatibleIds.Count -gt 0) {
+          Write-Host "Все несовместимые mod id находятся в списке исключений. Требуется действие пользователя." -ForegroundColor Yellow
+        } else {
+          Write-Host "Fabric диалог без отсутствующих зависимостей, но mod id в логах не найдены. Перенаправляю в debug pipeline." -ForegroundColor Yellow
+          $fabricShouldRunCleanup = $true
+        }
+      }
+    } else {
+      Write-Host "Fabric диалог обнаружен, но срез логов пуст. Перенаправляю в debug pipeline." -ForegroundColor Yellow
+      $fabricShouldRunCleanup = $true
+    }
+
+    if ($fabricShouldRunCleanup) {
+      Write-Host "Routing Fabric dialog to compatibility cleanup pipeline." -ForegroundColor Cyan
+      $fabricRoutedToCleanup = $true
+      $outcome = [pscustomobject]@{ Type = "CrashDialog"; Window = $outcome.Window }
     }
   }
 
@@ -120,6 +244,14 @@ while ($true) {
       $closedBeforeCleanup = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
       if ($closedBeforeCleanup -gt 0) {
         Write-Host ("Closed {0} running game process(es) before cleanup." -f $closedBeforeCleanup) -ForegroundColor Gray
+      }
+      $allExitedBeforeCleanup = Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "Compatibility cleanup"
+      if (-not $allExitedBeforeCleanup) {
+        $closedLateBeforeCleanup = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+        if ($closedLateBeforeCleanup -gt 0) {
+          Write-Host ("Closed {0} late game process(es) before cleanup." -f $closedLateBeforeCleanup) -ForegroundColor Gray
+        }
+        [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "Compatibility cleanup")
       }
     }
 
@@ -144,7 +276,50 @@ while ($true) {
       $compatExitCode = $LASTEXITCODE
       if ($compatExitCode -ne 0) {
         if ($compatExitCode -eq 3) {
-          if ($effectiveIsolateOnNoChanges) {
+          $skipDeepPipelineForFabric = $false
+          if ($fabricRoutedToCleanup) {
+            $skipDeepPipelineForFabric = $true
+            $fabricHandledModIds = @()
+            $fabricUnresolvedModIds = @()
+            try {
+              $latestCompatReportPath = Get-LatestCompatReportPath `
+                -ReportDir $PSScriptRoot `
+                -SinceTimestamp $launchStart `
+                -SinceSkewSeconds 10
+              if (-not [string]::IsNullOrWhiteSpace($latestCompatReportPath) -and (Test-Path -LiteralPath $latestCompatReportPath)) {
+                $compatRaw = Get-Content -LiteralPath $latestCompatReportPath -Raw -ErrorAction Stop
+                if (-not [string]::IsNullOrWhiteSpace($compatRaw)) {
+                  $compatObj = $compatRaw | ConvertFrom-Json -ErrorAction Stop
+                  if ($compatObj | Get-Member -Name "items" -MemberType NoteProperty, Property) {
+                    foreach ($item in @($compatObj.items)) {
+                      if ($null -eq $item) { continue }
+                      $status = if ($item | Get-Member -Name "status" -MemberType NoteProperty, Property) { [string]$item.status } else { "" }
+                      $modId = if ($item | Get-Member -Name "modId" -MemberType NoteProperty, Property) { [string]$item.modId } else { "" }
+                      if ([string]::IsNullOrWhiteSpace($modId)) { continue }
+                      if ($status -eq "handled") {
+                        $fabricHandledModIds += @($modId)
+                      } elseif ($status -eq "unresolved_in_game_mods") {
+                        $fabricUnresolvedModIds += @($modId)
+                      }
+                    }
+                  }
+                }
+              }
+            } catch {
+              Write-Host ("Warning: failed to read compatibility report for Fabric routing: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+            }
+
+            $fabricHandledModIds = @($fabricHandledModIds | Sort-Object -Unique)
+            $fabricUnresolvedModIds = @($fabricUnresolvedModIds | Sort-Object -Unique)
+            if ($fabricHandledModIds.Count -gt 0) {
+              Write-Host ("Fabric-guided cleanup handled mods: {0}" -f ($fabricHandledModIds -join ", ")) -ForegroundColor Gray
+            }
+            if ($fabricUnresolvedModIds.Count -gt 0) {
+              Write-Host ("Fabric-guided cleanup unresolved mod ids: {0}" -f ($fabricUnresolvedModIds -join ", ")) -ForegroundColor Yellow
+            }
+          }
+
+          if ($effectiveIsolateOnNoChanges -and (-not $skipDeepPipelineForFabric)) {
             # * Step 1: Try targeted Mixin analysis before heavy isolation.
             $ranMixinAnalysis = $false
             $mixinResolved = $false
@@ -337,6 +512,48 @@ while ($true) {
             }
 
             if ($stageLayeringEnabled -and (-not $ranLayering -or $layerExitCode -ne 0)) {
+              if ($ranLayering -and $layerExitCode -ne 0) {
+                $script:suppressTranscriptCulpritInference = $true
+              }
+              if ($ranLayering -and $layerExitCode -ne 0 -and $null -ne $layeringResultObj -and ($layeringResultObj | Get-Member -Name "Stage" -MemberType NoteProperty, Property) -and $layeringResultObj.Stage -eq "Layering") {
+                $tentativeLayerMoves = @($layeringResultObj.CulpritMoves | Where-Object { $null -ne $_ })
+                if ($tentativeLayerMoves.Count -gt 0) {
+                  $script:suppressTranscriptCulpritInference = $true
+                  Write-Host "Layering did not complete successfully. Restoring tentative layering culprits before fallback isolation." -ForegroundColor Yellow
+                  $tentativeLayerNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                  foreach ($tentativeMove in $tentativeLayerMoves) {
+                    if ($null -eq $tentativeMove) { continue }
+                    $tentativeJarName = [string]$tentativeMove.JarName
+                    if ([string]::IsNullOrWhiteSpace($tentativeJarName)) { continue }
+                    $null = $tentativeLayerNameSet.Add($tentativeJarName)
+                  }
+                  $restoreLayeringInfo = Restore-IsolationCulpritMod -CulpritMoves $tentativeLayerMoves -ReturnDetails
+                  $restoredTentativeNames = @($restoreLayeringInfo.RestoredJarNames)
+                  $failedTentativeNames = @($restoreLayeringInfo.FailedJarNames)
+
+                  foreach ($name in @($tentativeLayerNameSet)) {
+                    $jarName = [string]$name
+                    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+                    $nameKey = $jarName.ToLowerInvariant()
+                    $null = $sessionIsolationCulpritByJar.Remove($nameKey)
+                    $null = $sessionIsolationCulpritHistoryByJar.Remove($nameKey)
+                  }
+
+                  if ($restoredTentativeNames.Count -gt 0) {
+                    Write-Host ("Restored {0} tentative layering culprit(s) before fallback isolation." -f $restoredTentativeNames.Count) -ForegroundColor Gray
+                  }
+                  if ($failedTentativeNames.Count -gt 0) {
+                    $failedPreview = @($failedTentativeNames | Select-Object -First 10)
+                    $failedSuffix = if ($failedTentativeNames.Count -gt $failedPreview.Count) { " (+{0} more)" -f ($failedTentativeNames.Count - $failedPreview.Count) } else { "" }
+                    Write-Host ("Warning: failed to restore tentative layering culprits: {0}{1}" -f ($failedPreview -join ", "), $failedSuffix) -ForegroundColor Yellow
+                    Write-Host "Tentative layering culprits were removed from session report despite restore failures." -ForegroundColor Yellow
+                  }
+
+                  if (-not [bool]$restoreLayeringInfo.Success) {
+                    Write-Host "Warning: failed to restore one or more tentative layering culprits before fallback isolation." -ForegroundColor Yellow
+                  }
+                }
+              }
               Write-Host "Running subtractive isolation." -ForegroundColor Cyan
               $isolateParams = Get-IsolationParam -IncludeEmitResultObject $true -IncludeFastForward $true -IncludeKeepCulpritInGameLegacy $true
               $usedHashCacheNow = $false
@@ -432,8 +649,13 @@ while ($true) {
               continue
             }
           }
-          Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop." -ForegroundColor Yellow
-          exit 3
+          if ($skipDeepPipelineForFabric) {
+            Write-Host "Compatibility cleanup made no changes in Fabric-guided mode. Skipping Mixin/Layering for this attempt." -ForegroundColor Yellow
+            $compatExitCode = 0
+          } else {
+            Write-Host "Compatibility cleanup made no changes. Stopping to avoid a loop." -ForegroundColor Yellow
+            exit 3
+          }
         }
         Write-Host ("Compatibility cleanup failed with exit code {0}. Stopping." -f $compatExitCode) -ForegroundColor Red
         exit $compatExitCode
@@ -486,6 +708,8 @@ while ($true) {
     if ($null -ne $outcome.Window) {
       if ($DryRun) {
         Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
+      } elseif ($fabricMissingDepsDetected) {
+        Write-Host "Окно Fabric оставлено открытым для ручного просмотра отсутствующих зависимостей." -ForegroundColor Yellow
       } else {
         [void](Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
             -DelaySeconds 0 `
@@ -500,6 +724,10 @@ while ($true) {
     Write-Host "Outcome: game process exited without crash/fabric dialog." -ForegroundColor Green
   } else {
     Write-Host ("Outcome: no crash/fabric dialog detected within {0} seconds." -f $OutcomeTimeoutSeconds) -ForegroundColor Green
+  }
+
+  if ($outcome.Type -eq "FabricDialog" -and $AutoHandleFabricDialog -and $DryRun) {
+    Write-Host "DRYRUN попытался бы авто-обработать Fabric диалог." -ForegroundColor Gray
   }
   if (-not $DryRun) {
     $closedAfterNonCrashOutcome = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime

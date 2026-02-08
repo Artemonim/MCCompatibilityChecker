@@ -1,3 +1,130 @@
+function Add-SessionDependencyMapParam {
+  param(
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Params,
+    [Parameter(Mandatory = $false)]
+    [bool]$RequireFile = $false
+  )
+
+  if ($null -eq $Params) { return }
+
+  if ([bool]$script:sessionDependencyMapAvailable -and (-not [string]::IsNullOrWhiteSpace([string]$script:sessionDependencyMapJsonPath))) {
+    $Params["DependencyMapSource"] = "File"
+    $Params["DependencyMapJsonPath"] = [string]$script:sessionDependencyMapJsonPath
+    return
+  }
+
+  if ($RequireFile) { return }
+
+  if (-not [string]::IsNullOrWhiteSpace([string]$script:sessionDependencyMapToolPath)) {
+    $Params["DependencyMapToolPath"] = [string]$script:sessionDependencyMapToolPath
+  }
+  if (-not [string]::IsNullOrWhiteSpace([string]$script:sessionDependencyMapOutDir)) {
+    $Params["DependencyMapOutDir"] = [string]$script:sessionDependencyMapOutDir
+  }
+}
+
+function Test-ExtraArgsContainNamedParam {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$Args = @(),
+    [Parameter(Mandatory = $true)]
+    [string]$ParamName
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ParamName)) { return $false }
+  if (-not $Args -or $Args.Count -eq 0) { return $false }
+
+  $escaped = [regex]::Escape($ParamName)
+  $pattern = "^-{1,2}{0}(?:$|:|=)" -f $escaped
+  foreach ($arg in $Args) {
+    $value = [string]$arg
+    if ([string]::IsNullOrWhiteSpace($value)) { continue }
+    if ($value -match $pattern) { return $true }
+  }
+  return $false
+}
+
+function Initialize-SessionDependencyMap {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$Reason = ""
+  )
+
+  if ([bool]$script:sessionDependencyMapPrepared) {
+    return [bool]$script:sessionDependencyMapAvailable
+  }
+
+  $script:sessionDependencyMapPrepared = $true
+  $script:sessionDependencyMapPreparedReason = $Reason
+  $script:sessionDependencyMapAvailable = $false
+  $script:sessionDependencyMapJsonPath = ""
+
+  if ([bool]$DryRun) { return $false }
+
+  $gameModsDir = ""
+  if ($null -ne $runtimeConfig -and $null -ne $runtimeConfig.Paths) {
+    $gameModsDir = [string]$runtimeConfig.Paths.GameModsDir
+  }
+  if ([string]::IsNullOrWhiteSpace($gameModsDir) -or (-not (Test-Path -LiteralPath $gameModsDir))) {
+    Write-Host ("Warning: cannot build dependency map; GameModsDir is unavailable: {0}" -f $gameModsDir) -ForegroundColor Yellow
+    return $false
+  }
+
+  $toolPath = [string]$script:sessionDependencyMapToolPath
+  if ([string]::IsNullOrWhiteSpace($toolPath)) {
+    $toolPath = Join-Path -Path $PSScriptRoot -ChildPath "..\tools\Analyze-JarDependencyMap.ps1"
+  }
+  if (-not (Test-Path -LiteralPath $toolPath)) {
+    Write-Host ("Warning: dependency map tool not found: {0}" -f $toolPath) -ForegroundColor Yellow
+    return $false
+  }
+
+  $outDir = [string]$script:sessionDependencyMapOutDir
+  if ([string]::IsNullOrWhiteSpace($outDir)) {
+    $outDir = Join-Path -Path $PSScriptRoot -ChildPath "..\reports"
+  }
+  if (-not (Test-Path -LiteralPath $outDir)) {
+    try {
+      [void](New-Item -Path $outDir -ItemType Directory -Force -ErrorAction Stop)
+    } catch {
+      Write-Host ("Warning: failed to create dependency map output directory: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+      return $false
+    }
+  }
+
+  try {
+    & $toolPath -ScanPath $gameModsDir -NoRecurse -WriteFiles:$true -OutDir $outDir -TopDependencies 0 | Out-Null
+  } catch {
+    Write-Host ("Warning: dependency map build failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    return $false
+  }
+
+  $jsonPath = Join-Path -Path $outDir -ChildPath "jar-dependency-map.json"
+  if (-not (Test-Path -LiteralPath $jsonPath)) {
+    Write-Host ("Warning: dependency map JSON was not generated: {0}" -f $jsonPath) -ForegroundColor Yellow
+    return $false
+  }
+
+  try {
+    $raw = Get-Content -LiteralPath $jsonPath -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw "dependency map json is empty" }
+    [void]($raw | ConvertFrom-Json -ErrorAction Stop)
+  } catch {
+    Write-Host ("Warning: dependency map JSON is invalid: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    return $false
+  }
+
+  $script:sessionDependencyMapJsonPath = (Resolve-Path -LiteralPath $jsonPath).Path
+  $script:sessionDependencyMapToolPath = $toolPath
+  $script:sessionDependencyMapOutDir = $outDir
+  $script:sessionDependencyMapAvailable = $true
+  $reasonSuffix = if ([string]::IsNullOrWhiteSpace($Reason)) { "" } else { " ({0})" -f $Reason }
+  Write-Host ("Dependency map prepared once{0} and will be reused: {1}" -f $reasonSuffix, $script:sessionDependencyMapJsonPath) -ForegroundColor Gray
+  return $true
+}
+
 function Get-CompatibilityParam {
   param(
     [Parameter(Mandatory = $false)]
@@ -17,8 +144,18 @@ function Get-CompatibilityParam {
   if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
     $compatParams["LogPath"] = $LogPath
   }
+  if ($IgnoreModIds -and $IgnoreModIds.Count -gt 0) {
+    $compatParams["IgnoreModIds"] = $IgnoreModIds
+  }
   if ($script:checkScriptSupportsSince -and $LogSinceTimestamp -ne [datetime]::MinValue) {
     $compatParams["LogSinceTimestamp"] = $LogSinceTimestamp
+  }
+  $compatHasDepMapOverride = (Test-ExtraArgsContainNamedParam -Args $CheckScriptArguments -ParamName "DependencyMapSource") -or
+    (Test-ExtraArgsContainNamedParam -Args $CheckScriptArguments -ParamName "DependencyMapJsonPath") -or
+    (Test-ExtraArgsContainNamedParam -Args $CheckScriptArguments -ParamName "DependencyMapToolPath") -or
+    (Test-ExtraArgsContainNamedParam -Args $CheckScriptArguments -ParamName "DependencyMapOutDir")
+  if (-not $compatHasDepMapOverride) {
+    Add-SessionDependencyMapParam -Params $compatParams -RequireFile $false
   }
   return $compatParams
 }
@@ -168,6 +305,13 @@ function Get-IsolationParam {
   if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $isolateParams["HashCacheFileName"] = $HashCacheFileName }
   if ($HashCacheHashRetryCount -gt 0) { $isolateParams["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
   if ($HashCacheHashRetryDelayMs -ge 0) { $isolateParams["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
+  $isolateHasDepMapOverride = (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapSource") -or
+    (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapJsonPath") -or
+    (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapToolPath") -or
+    (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapOutDir")
+  if (-not $isolateHasDepMapOverride) {
+    Add-SessionDependencyMapParam -Params $isolateParams -RequireFile $false
+  }
   return $isolateParams
 }
 
@@ -193,6 +337,7 @@ function Get-LayeringParam {
   if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $layerParams["HashCacheFileName"] = $HashCacheFileName }
   if ($HashCacheHashRetryCount -gt 0) { $layerParams["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
   if ($HashCacheHashRetryDelayMs -ge 0) { $layerParams["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
+  Add-SessionDependencyMapParam -Params $layerParams -RequireFile $false
 
   return $layerParams
 }
@@ -209,6 +354,7 @@ function Get-MixinAnalysisParam {
   if ($PSBoundParameters.ContainsKey("Verbose")) { $p["Verbose"] = $true }
   if ($GameLegacy) { $p["KeepCulpritInGameLegacy"] = $true }
   $p["EmitResultObject"] = $true
+  Add-SessionDependencyMapParam -Params $p -RequireFile $false
   return $p
 }
 
@@ -218,6 +364,7 @@ function Get-RecoveryParam {
   if ($PSBoundParameters.ContainsKey("Verbose")) { $p["Verbose"] = $true }
   if ($GameLegacy) { $p["KeepCulpritInGameLegacy"] = $true }
   $p["DependencyMapSource"] = "File"
+  Add-SessionDependencyMapParam -Params $p -RequireFile $true
   $p["EmitResultObject"] = $true
   return $p
 }

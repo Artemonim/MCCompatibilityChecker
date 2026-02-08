@@ -38,6 +38,32 @@ function Resolve-IsolationLauncherContext {
 
   if ($null -ne $Context) { return $Context }
 
+  $runtimeConfig = $null
+  $runtimeConfigVar = Get-Variable -Name "runtimeConfig" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $runtimeConfigVar) { $runtimeConfig = $runtimeConfigVar.Value }
+
+  $gameModsDir = ""
+  $gameModsVar = Get-Variable -Name "GameModsDir" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $gameModsVar) { $gameModsDir = [string]$gameModsVar.Value }
+  if ([string]::IsNullOrWhiteSpace($gameModsDir) -and $null -ne $runtimeConfig -and $null -ne $runtimeConfig.Paths) {
+    $gameModsDir = [string]$runtimeConfig.Paths.GameModsDir
+  }
+
+  $launcherExePath = ""
+  $launcherExeVar = Get-Variable -Name "LauncherExePath" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $launcherExeVar) { $launcherExePath = [string]$launcherExeVar.Value }
+  if ([string]::IsNullOrWhiteSpace($launcherExePath) -and $null -ne $runtimeConfig -and $null -ne $runtimeConfig.Paths) {
+    $launcherExePath = [string]$runtimeConfig.Paths.LauncherExePath
+  }
+
+  $waitForGameExitSeconds = 30
+  $waitForGameExitVar = Get-Variable -Name "WaitForGameExitSeconds" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $waitForGameExitVar) { $waitForGameExitSeconds = [int]$waitForGameExitVar.Value }
+
+  $gameExitPollSeconds = 2
+  $gameExitPollVar = Get-Variable -Name "GameExitPollSeconds" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $gameExitPollVar) { $gameExitPollSeconds = [int]$gameExitPollVar.Value }
+
   $cacheEnabled = $false
   $cacheEnabledVar = Get-Variable -Name "EnableSessionLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
   if ($null -ne $cacheEnabledVar) {
@@ -52,8 +78,8 @@ function Resolve-IsolationLauncherContext {
 
   return [pscustomobject]@{
     Paths = [pscustomobject]@{
-      GameModsDir = $GameModsDir
-      LauncherExePath = $LauncherExePath
+      GameModsDir = $gameModsDir
+      LauncherExePath = $launcherExePath
     }
     Launcher = [pscustomobject]@{
       Arguments = $LauncherArguments
@@ -75,8 +101,8 @@ function Resolve-IsolationLauncherContext {
       LauncherWindowTimeoutSeconds = $LauncherWindowTimeoutSeconds
       OutcomeTimeoutSeconds = $OutcomeTimeoutSeconds
       PollIntervalSeconds = $PollIntervalSeconds
-      WaitForGameExitSeconds = $WaitForGameExitSeconds
-      GameExitPollSeconds = $GameExitPollSeconds
+      WaitForGameExitSeconds = $waitForGameExitSeconds
+      GameExitPollSeconds = $gameExitPollSeconds
       CrashCloseDelaySeconds = $CrashCloseDelaySeconds
     }
     Process = [pscustomobject]@{
@@ -474,7 +500,7 @@ function Wait-ForOutcome {
   $gameExited = $false
 
   while ((Get-Date) -lt $deadline) {
-    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns
+    $fabricWindow = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
     if ($null -ne $fabricWindow) {
       return [pscustomobject]@{
         Type = "FabricDialog"
@@ -537,7 +563,7 @@ function Wait-ForOutcome {
         # * Crash/Fabric dialogs may appear with delay after process exit.
         $postExitDeadline = (Get-Date).AddSeconds(5)
         while ((Get-Date) -lt $postExitDeadline) {
-          $fabricAfterExit = Select-WindowByTitlePattern -Patterns $FabricPatterns
+          $fabricAfterExit = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
           if ($null -ne $fabricAfterExit) {
             return [pscustomobject]@{
               Type = "FabricDialog"
@@ -593,7 +619,7 @@ function Wait-ForOutcome {
   }
 
   # * Late outcome check: dialogs/process exit can occur at the timeout boundary.
-  $fabricWindowLate = Select-WindowByTitlePattern -Patterns $FabricPatterns
+  $fabricWindowLate = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
   if ($null -ne $fabricWindowLate) {
     return [pscustomobject]@{
       Type = "FabricDialog"
@@ -604,7 +630,7 @@ function Wait-ForOutcome {
     }
   }
 
-  $crashWindowLate = Select-WindowByTitlePattern -Patterns $CrashPatterns
+  $crashWindowLate = Select-WindowByTitlePattern -Patterns $CrashPatterns -ExcludeHandleIds $IgnoreHandleIds
   if ($null -ne $crashWindowLate) {
     return [pscustomobject]@{
       Type = "CrashDialog"
@@ -639,7 +665,7 @@ function Wait-ForOutcome {
     # * Final boundary check: delayed dialogs can appear after game exit.
     $postExitLateDeadline = (Get-Date).AddSeconds(5)
     while ((Get-Date) -lt $postExitLateDeadline) {
-      $fabricAfterExitLate = Select-WindowByTitlePattern -Patterns $FabricPatterns
+      $fabricAfterExitLate = Select-WindowByTitlePattern -Patterns $FabricPatterns -ExcludeHandleIds $IgnoreHandleIds
       if ($null -ne $fabricAfterExitLate) {
         return [pscustomobject]@{
           Type = "FabricDialog"

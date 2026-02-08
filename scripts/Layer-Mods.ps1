@@ -545,6 +545,8 @@ $candidateMods = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File
     Sort-Object -Property LastWriteTime)
 
 $script:dependencyAwareTierByJarName = @{}
+$script:dependencyAwareStatsByJarName = @{}
+$script:dependencyPriorityDecisionByJarName = @{}
 $script:currentDependencyTier = 0
 $script:dependencyMapByModId = @{}
 $script:dependencyMapProvidedIdsByJar = @{}
@@ -606,6 +608,10 @@ if ($depMap -and $depMap.Count -gt 0) {
       $known = $true
     }
     $script:dependencyAwareTierByJarName[$jarKey] = Get-DependencyAwareTier -DependentCount $depCount -Known $known
+    $script:dependencyAwareStatsByJarName[$jarKey] = [pscustomobject]@{
+      DependentCount = [int]$depCount
+      Known = [bool]$known
+    }
   }
 
   foreach ($mod in $candidateMods) {
@@ -624,6 +630,12 @@ if ($depMap -and $depMap.Count -gt 0) {
     Add-Member -InputObject $mod -NotePropertyName DependentModCount -NotePropertyValue $depCount -Force
     Add-Member -InputObject $mod -NotePropertyName DependentModTier -NotePropertyValue $tier -Force
     Add-Member -InputObject $mod -NotePropertyName DependentModCountKnown -NotePropertyValue $known -Force
+    if (-not $script:dependencyAwareStatsByJarName.ContainsKey($jarKey)) {
+      $script:dependencyAwareStatsByJarName[$jarKey] = [pscustomobject]@{
+        DependentCount = [int]$depCount
+        Known = [bool]$known
+      }
+    }
   }
 } else {
   Write-Host "Warning: dependency map is empty. Классификация по уровням недоступна; все моды считаются уровнем 1." -ForegroundColor Yellow
@@ -832,7 +844,9 @@ function Move-CulpritToLegacy {
     [string]$EvidenceKey = ""
   )
 
-  $culpritJarNames.Add($JarName)
+  if (-not $culpritJarNames.Contains($JarName)) {
+    $culpritJarNames.Add($JarName)
+  }
   if (-not [string]::IsNullOrWhiteSpace($EvidenceKey)) {
     $culpritEvidenceKeys[$JarName] = $EvidenceKey
   }
@@ -1199,15 +1213,27 @@ function Restore-MissingDependency {
   param(
     [Parameter(Mandatory = $true)]
     [AllowEmptyCollection()]
-    [string[]]$MissingDepIds
+    [string[]]$MissingDepIds,
+    [Parameter(Mandatory = $false)]
+    [switch]$ReturnDetails
   )
+
+  $emptyDetails = [pscustomobject]@{
+    RestoredCount = 0
+    RestoredJarNames = @()
+    MissingDepIds = @()
+    UnresolvedMissingDepIds = @()
+  }
 
   $missingArr = @($MissingDepIds |
       ForEach-Object { [string]$_ } |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
       ForEach-Object { $_.ToLowerInvariant() } |
       Sort-Object -Unique)
-  if (-not $missingArr -or $missingArr.Count -eq 0) { return 0 }
+  if (-not $missingArr -or $missingArr.Count -eq 0) {
+    if ($ReturnDetails) { return $emptyDetails }
+    return 0
+  }
 
   # * Print a compact summary to make dependency recovery visible and debuggable.
   $preview = @($missingArr | Select-Object -First 10)
@@ -1304,6 +1330,7 @@ function Restore-MissingDependency {
   }
 
   $restored = 0
+  $restoredJarNames = New-Object System.Collections.Generic.List[string]
   foreach ($jarName in ($jarNamesToRestore | Sort-Object -Unique)) {
     if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
     $key = $jarName.ToLowerInvariant()
@@ -1332,9 +1359,223 @@ function Restore-MissingDependency {
       $null = $movedJarNameSet.Remove($jarName)
     }
     $restored++
+    $restoredJarNames.Add($jarName) | Out-Null
+  }
+
+  if ($ReturnDetails) {
+    return [pscustomobject]@{
+      RestoredCount = [int]$restored
+      RestoredJarNames = @($restoredJarNames.ToArray() | Sort-Object -Unique)
+      MissingDepIds = @($missingArr)
+      UnresolvedMissingDepIds = @($unresolved | Sort-Object -Unique)
+    }
   }
 
   return $restored
+}
+
+function Resolve-BatchJarByModIdSet {
+  <#
+  .SYNOPSIS
+  Resolves requiring mod IDs to jar names limited to the current batch.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [object[]]$BatchMods,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$ModIds
+  )
+
+  $batchNameSet = @{}
+  foreach ($mod in @($BatchMods)) {
+    if ($null -eq $mod) { continue }
+    $name = [string]$mod.Name
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    $batchNameSet[$name.ToLowerInvariant()] = $name
+  }
+  if ($batchNameSet.Count -eq 0) { return @() }
+
+  $idArr = @($ModIds |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      ForEach-Object { $_.ToLowerInvariant() } |
+      Sort-Object -Unique)
+  if ($idArr.Count -eq 0) { return @() }
+
+  $resolved = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($idKey in $idArr) {
+    if (-not $script:dependencyMapByModId -or $script:dependencyMapByModId.Count -eq 0) { break }
+    if (-not $script:dependencyMapByModId.ContainsKey($idKey)) { continue }
+    foreach ($jarName in @($script:dependencyMapByModId[$idKey])) {
+      $name = [string]$jarName
+      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+      $jarKey = $name.ToLowerInvariant()
+      if ($batchNameSet.ContainsKey($jarKey)) {
+        $null = $resolved.Add($batchNameSet[$jarKey])
+      }
+    }
+  }
+
+  if ($resolved.Count -gt 0) {
+    return @($resolved | Sort-Object)
+  }
+
+  $searchDirs = @($GameModsDir)
+  if ($gameQuarantineDir -and (Test-Path -LiteralPath $gameQuarantineDir)) { $searchDirs += $gameQuarantineDir }
+  if ($useStorage -and $storageQuarantineDir -and (Test-Path -LiteralPath $storageQuarantineDir)) { $searchDirs += $storageQuarantineDir }
+
+  $resolvedJars = Find-ModJarByIdBestEffort -Dirs $searchDirs -ModIds $idArr -AllowTokenFallback:$false
+  foreach ($jar in @($resolvedJars)) {
+    if ($null -eq $jar) { continue }
+    $jarName = [string]$jar.Name
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $jarKey = $jarName.ToLowerInvariant()
+    if ($batchNameSet.ContainsKey($jarKey)) {
+      $null = $resolved.Add($batchNameSet[$jarKey])
+    }
+  }
+
+  if ($resolved.Count -eq 0) { return @() }
+  return @($resolved | Sort-Object)
+}
+
+function Invoke-FabricRetryCrashIsolation {
+  <#
+  .SYNOPSIS
+  Isolates a dependency crash scope when Fabric retry (after dep restore) turns into Crash.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [object[]]$BatchMods,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$RequiringModIds,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$RestoredDependencyJarNames,
+    [Parameter(Mandatory = $false)]
+    [string]$EvidenceKey = ""
+  )
+
+  $restoredDeps = @($RestoredDependencyJarNames |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Sort-Object -Unique)
+  if ($restoredDeps.Count -eq 0) {
+    return [pscustomobject]@{
+      Handled = $false
+      IsolatedJarNames = @()
+      RequiringJarNames = @()
+    }
+  }
+
+  $batchArr = @($BatchMods | Where-Object { $null -ne $_ })
+  if ($batchArr.Count -eq 0) {
+    return [pscustomobject]@{
+      Handled = $false
+      IsolatedJarNames = @()
+      RequiringJarNames = @()
+    }
+  }
+
+  $batchByKey = @{}
+  foreach ($mod in $batchArr) {
+    $jarName = [string]$mod.Name
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $batchByKey[$jarName.ToLowerInvariant()] = $mod
+  }
+  if ($batchByKey.Count -eq 0) {
+    return [pscustomobject]@{
+      Handled = $false
+      IsolatedJarNames = @()
+      RequiringJarNames = @()
+    }
+  }
+
+  $requiringIds = @($RequiringModIds |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      ForEach-Object { $_.ToLowerInvariant() } |
+      Sort-Object -Unique)
+  $requiringJarNames = @(Resolve-BatchJarByModIdSet -BatchMods $batchArr -ModIds $requiringIds)
+  $requiringCandidates = New-Object System.Collections.Generic.List[object]
+  foreach ($reqJarName in $requiringJarNames) {
+    $reqKey = $reqJarName.ToLowerInvariant()
+    if ($batchByKey.ContainsKey($reqKey)) {
+      $requiringCandidates.Add($batchByKey[$reqKey]) | Out-Null
+    }
+  }
+
+  if ($requiringCandidates.Count -eq 0) {
+    Write-Host "  Fabric retry crashed after dependency restore; requiring mod ids were not resolved inside current batch. Using tier-priority fallback for this batch." -ForegroundColor Yellow
+    foreach ($batchMod in $batchArr) {
+      if ($null -eq $batchMod) { continue }
+      $requiringCandidates.Add($batchMod) | Out-Null
+    }
+  } else {
+    Write-Host ("  Fabric retry crashed after dependency restore. Requiring batch candidate(s): {0}" -f (($requiringJarNames | Sort-Object) -join ", ")) -ForegroundColor Yellow
+  }
+
+  $selectedRequiring = @(Select-QuickIsolateJarsByTier -Jars @($requiringCandidates.ToArray()) -Context "layer fabric retry crash" -MaxResults 1)
+  if ($selectedRequiring.Count -eq 0 -and $requiringCandidates.Count -gt 0) {
+    $selectedRequiring = @($requiringCandidates.ToArray() | Sort-Object -Property `
+        @{ Expression = { (Get-DependencyAwareJarPriorityInfo -JarName ([string]$_.Name)).Tier }; Ascending = $true }, `
+        @{ Expression = { (Get-DependencyAwareJarPriorityInfo -JarName ([string]$_.Name)).DependentCountSort }; Ascending = $true }, `
+        @{ Expression = { if ($null -ne $_.PSObject.Properties["LastWriteTime"]) { [datetime]$_.LastWriteTime } else { [datetime]::MinValue } }; Descending = $true }, `
+        @{ Expression = { [string]$_.Name }; Ascending = $true } | Select-Object -First 1)
+  }
+  if ($selectedRequiring.Count -eq 0) {
+    return [pscustomobject]@{
+      Handled = $false
+      IsolatedJarNames = @()
+      RequiringJarNames = @()
+    }
+  }
+
+  $selectedRequiringJarNames = @($selectedRequiring | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+  $targetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($depJarName in $restoredDeps) { $null = $targetSet.Add([string]$depJarName) }
+  foreach ($reqJarName in $selectedRequiringJarNames) { $null = $targetSet.Add([string]$reqJarName) }
+  $targetJarNames = @($targetSet | Sort-Object)
+  if ($targetJarNames.Count -eq 0) {
+    return [pscustomobject]@{
+      Handled = $false
+      IsolatedJarNames = @()
+      RequiringJarNames = @()
+    }
+  }
+
+  $reason = "fabric-retry crash: isolated restored dependency plus requester inside current batch"
+  $decisionVar = Get-Variable -Name "dependencyPriorityDecisionByJarName" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $decisionVar -and $decisionVar.Value -is [hashtable]) {
+    $decisionMap = [hashtable]$decisionVar.Value
+    foreach ($targetName in $targetJarNames) {
+      if ([string]::IsNullOrWhiteSpace($targetName)) { continue }
+      $priority = Get-DependencyAwareJarPriorityInfo -JarName $targetName
+      $decisionMap[$targetName.ToLowerInvariant()] = [pscustomobject]@{
+        Context = "layer fabric retry crash"
+        Tier = [int]$priority.Tier
+        DependentCount = [int]$priority.DependentCount
+        Known = [bool]$priority.Known
+        DeferredJars = @()
+        Reason = $reason
+      }
+    }
+  }
+
+  Write-Host ("  Fabric retry crash fallback. Isolating: {0}" -f ($targetJarNames -join ", ")) -ForegroundColor Yellow
+  foreach ($targetJarName in $targetJarNames) {
+    Move-CulpritToLegacy -JarName $targetJarName -EvidenceKey $EvidenceKey
+  }
+
+  return [pscustomobject]@{
+    Handled = $true
+    IsolatedJarNames = @($targetJarNames)
+    RequiringJarNames = @($selectedRequiringJarNames)
+  }
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1386,7 +1627,12 @@ try {
 # ────────────────────────────────────────────────────────────────────────────
 
 if ($culpritJarNames.Count -gt 0) {
-  Write-Host ("Layering complete. Culprit(s): {0}" -f (($culpritJarNames | Sort-Object -Unique) -join ", ")) -ForegroundColor Green
+  $culpritLabel = (($culpritJarNames | Sort-Object -Unique) -join ", ")
+  if (-not $hadError -and $exitCode -eq 0) {
+    Write-Host ("Layering complete. Culprit(s): {0}" -f $culpritLabel) -ForegroundColor Green
+  } else {
+    Write-Host ("Layering found tentative culprit(s): {0}" -f $culpritLabel) -ForegroundColor Yellow
+  }
   if (-not $hadError -and $exitCode -eq 4) {
     Write-Host "Layering aborted early: crash persisted after single-mod re-probe; falling back to isolation is recommended." -ForegroundColor Yellow
   }

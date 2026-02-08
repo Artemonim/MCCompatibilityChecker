@@ -38,6 +38,9 @@ If set, deletes from GameModsDir instead of moving to GameLegacyFolderName.
 .PARAMETER TreatNonFabricAsIncompatible
 If set, treats "Found N non-fabric mods" list as incompatible (moves/deletes by jar filename).
 
+.PARAMETER IgnoreModIds
+If set, ignores these mod IDs when selecting incompatible mods from logs.
+
 .PARAMETER DryRun
 If set, performs no file operations (prints what would happen).
 
@@ -62,6 +65,30 @@ Allowed clock skew (seconds) when filtering by LogSinceTimestamp.
 
 .PARAMETER SkipGameLogs
 If set, skips scanning game logs when LogPath is empty.
+
+.PARAMETER DependencyAwareOrderingCountMode
+Dependency graph counting mode for prioritizing conflicting mods.
+
+.PARAMETER DependencyAwareTier2MaxDependents
+Tier 2 threshold (inclusive).
+
+.PARAMETER DependencyAwareTier3MaxDependents
+Tier 3 threshold (inclusive).
+
+.PARAMETER DependencyAwareTreatUnknownAsCore
+If true, jars with unknown dependency metadata are treated as tier 4 (core/high-priority).
+
+.PARAMETER DependencyMapSource
+Dependency map source: Tool, File, or Internal fallback parser.
+
+.PARAMETER DependencyMapJsonPath
+Dependency map JSON path when DependencyMapSource=File.
+
+.PARAMETER DependencyMapToolPath
+Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool.
+
+.PARAMETER DependencyMapOutDir
+Output directory for dependency map tool reports.
 
 .PARAMETER Help
 Show detailed help for this script and exit.
@@ -117,6 +144,10 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$TreatNonFabricAsIncompatible,
 
+  # * If set, ignores these mod IDs when selecting incompatible mods from logs.
+  [Parameter(Mandatory = $false)]
+  [string[]]$IgnoreModIds = @(),
+
   # * If set, performs no file operations (prints what would happen).
   [Parameter(Mandatory = $false)]
   [switch]$DryRun,
@@ -148,6 +179,40 @@ param(
   # * If set, skips scanning game logs (latest.log, crash reports).
   [Parameter(Mandatory = $false)]
   [switch]$SkipGameLogs,
+
+  # * Dependency graph counting mode for priority ordering.
+  [Parameter(Mandatory = $false)]
+  [ValidateSet("RequiredOnly", "All")]
+  [string]$DependencyAwareOrderingCountMode = "RequiredOnly",
+
+  # * Tier 2 threshold (inclusive).
+  [Parameter(Mandatory = $false)]
+  [int]$DependencyAwareTier2MaxDependents = 3,
+
+  # * Tier 3 threshold (inclusive).
+  [Parameter(Mandatory = $false)]
+  [int]$DependencyAwareTier3MaxDependents = 10,
+
+  # * If true, unknown metadata is treated as core/high-priority.
+  [Parameter(Mandatory = $false)]
+  [bool]$DependencyAwareTreatUnknownAsCore = $true,
+
+  # * Dependency map source for priority-aware ordering.
+  [Parameter(Mandatory = $false)]
+  [ValidateSet("Tool", "File", "Internal")]
+  [string]$DependencyMapSource = "Tool",
+
+  # * Dependency map JSON path when DependencyMapSource=File.
+  [Parameter(Mandatory = $false)]
+  [string]$DependencyMapJsonPath = "",
+
+  # * Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool.
+  [Parameter(Mandatory = $false)]
+  [string]$DependencyMapToolPath = "",
+
+  # * Output directory for dependency map tool reports.
+  [Parameter(Mandatory = $false)]
+  [string]$DependencyMapOutDir = "",
 
   # * Show detailed help and exit.
   [Parameter(Mandatory = $false)]
@@ -203,6 +268,13 @@ if (-not (Test-Path -LiteralPath $sharedIsolationLegacyPath)) {
   throw ("Shared isolation legacy helpers not found: {0}" -f $sharedIsolationLegacyPath)
 }
 . $sharedIsolationLegacyPath
+
+# * Load shared dependency helpers (priority ordering and map reuse).
+$sharedIsolationJarDepPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-JarDependencies.ps1"
+if (-not (Test-Path -LiteralPath $sharedIsolationJarDepPath)) {
+  throw ("Shared isolation jar dependency helpers not found: {0}" -f $sharedIsolationJarDepPath)
+}
+. $sharedIsolationJarDepPath
 
 function Get-SeverityFromEvidence {
   param(
@@ -366,6 +438,26 @@ if ($nonFabricJarNames.Count -gt 0) {
   $nonFabricJarNames = @($nonFabricJarNames | Select-Object -Unique)
 }
 
+$ignoreSet = @{}
+foreach ($id in $IgnoreModIds) {
+  $key = [string]$id
+  if ([string]::IsNullOrWhiteSpace($key)) { continue }
+  $ignoreSet[$key.ToLowerInvariant()] = $true
+}
+if ($ignoreSet.Count -gt 0) {
+  $ignored = New-Object System.Collections.Generic.List[string]
+  foreach ($id in @($evidenceByModId.Keys)) {
+    if ($ignoreSet.ContainsKey($id)) {
+      $null = $ignored.Add($id)
+      $evidenceByModId.Remove($id)
+    }
+  }
+  if ($ignored.Count -gt 0) {
+    $ignoredLabel = @($ignored | Sort-Object -Unique)
+    Write-Host ("Ignoring incompatible mod IDs: {0}" -f ($ignoredLabel -join ", ")) -ForegroundColor Gray
+  }
+}
+
 # * Legacy.log is now maintained as a persistent culprit-move log by Auto-Run-LegacyLauncher.
 # * Evidence logging removed; culprit entries are appended by Layer-Mods / Isolate scripts.
 
@@ -408,21 +500,147 @@ foreach ($p in $storageRootJars) {
 }
 $storageIdToJars = Build-ModIdToJarMap -DirPath $StorageModsDir
 
+$dependencyPriorityApplied = $false
+$dependencyPrioritySourceUsed = "none"
+$dependencyPriorityMapJsonPath = ""
+$dependencyPriorityByJarName = @{}
+$dependencyPriorityByModId = @{}
+
+if ($DependencyAwareTier2MaxDependents -lt 0) { $DependencyAwareTier2MaxDependents = 0 }
+if ($DependencyAwareTier3MaxDependents -lt $DependencyAwareTier2MaxDependents) {
+  $DependencyAwareTier3MaxDependents = $DependencyAwareTier2MaxDependents
+}
+
+$countMode = $DependencyAwareOrderingCountMode
+if ([string]::IsNullOrWhiteSpace($countMode)) { $countMode = "RequiredOnly" }
+
+$dependencyMap = $null
+if ($DependencyMapSource -ne "Internal") {
+  $dependencyMap = Get-DependencyMapFromSource -ScanPath $GameModsDir
+}
+
+$depCountMap = @{}
+if ($dependencyMap) {
+  Initialize-DependencyMapCache -DependencyMap $dependencyMap
+  $depCountMap = Get-DependentModCountsFromDependencyMap -DependencyMap $dependencyMap -CountMode $countMode
+  $dependencyPrioritySourceUsed = $DependencyMapSource
+} else {
+  if ($DependencyMapSource -ne "Internal") {
+    Write-Host ("Warning: dependency map unavailable from source '{0}'. Falling back to internal parser." -f $DependencyMapSource) -ForegroundColor Yellow
+  }
+  $depCountMap = Get-DependentModCountsByJarName -ModsDir $GameModsDir -CountMode $countMode
+  $dependencyPrioritySourceUsed = "Internal"
+}
+
+if ($DependencyMapSource -eq "File") {
+  $dependencyPriorityMapJsonPath = $DependencyMapJsonPath
+  if ([string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath)) {
+    $dependencyPriorityMapJsonPath = Join-Path -Path $PSScriptRoot -ChildPath "..\reports\jar-dependency-map.json"
+  }
+} elseif ($DependencyMapSource -eq "Tool") {
+  $mapOutDir = $DependencyMapOutDir
+  if ([string]::IsNullOrWhiteSpace($mapOutDir)) {
+    $mapOutDir = Join-Path -Path $PSScriptRoot -ChildPath "..\reports"
+  }
+  $dependencyPriorityMapJsonPath = Join-Path -Path $mapOutDir -ChildPath "jar-dependency-map.json"
+}
+if (-not [string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath) -and (Test-Path -LiteralPath $dependencyPriorityMapJsonPath)) {
+  $dependencyPriorityMapJsonPath = (Resolve-Path -LiteralPath $dependencyPriorityMapJsonPath).Path
+}
+
+$gameRootJars = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File -ErrorAction Stop)
+foreach ($jar in $gameRootJars) {
+  $jarKey = $jar.Name.ToLowerInvariant()
+  $depCount = -1
+  $known = $false
+  if ($depCountMap.ContainsKey($jarKey)) {
+    $depCount = [int]$depCountMap[$jarKey].DependentCount
+    $known = [bool]$depCountMap[$jarKey].Known
+  }
+  if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
+    $depCount = 0
+    $known = $true
+  }
+  $tier = Get-DependencyAwareTier -DependentCount $depCount -Known $known
+  $dependencyPriorityByJarName[$jarKey] = [pscustomobject]@{
+    Tier = [int]$tier
+    DependentCount = [int]$depCount
+    Known = [bool]$known
+    DependentCountSort = if ($depCount -ge 0) { [int]$depCount } else { [int]::MaxValue }
+  }
+}
+
+if ($dependencyPriorityByJarName.Count -gt 0) {
+  $dependencyPriorityApplied = $true
+  $sourceLabel = if ([string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath)) { $dependencyPrioritySourceUsed } else { "{0} ({1})" -f $dependencyPrioritySourceUsed, $dependencyPriorityMapJsonPath }
+  Write-Host ("Dependency-priority ordering enabled. Source: {0}" -f $sourceLabel) -ForegroundColor Gray
+}
+
 $modIdOrder = New-Object System.Collections.Generic.List[object]
 foreach ($modId in $evidenceByModId.Keys) {
   $latestWrite = [datetime]::MinValue
+  $bestTier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
+  $bestDependentCount = -1
+  $bestDependentSort = [int]::MaxValue
+  $bestKnown = $false
+  $bestFound = $false
+  $bestMtime = [datetime]::MinValue
+
   if ($gameIdToJars.ContainsKey($modId)) {
     foreach ($jarPath in @($gameIdToJars[$modId])) {
       $mtime = Get-LastWriteTimeSafe -Path $jarPath
       if ($mtime -gt $latestWrite) { $latestWrite = $mtime }
+
+      $jarName = [System.IO.Path]::GetFileName($jarPath).ToLowerInvariant()
+      $tier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
+      $depCount = -1
+      $known = $false
+      $depSort = [int]::MaxValue
+      if ($dependencyPriorityByJarName.ContainsKey($jarName)) {
+        $jarPriority = $dependencyPriorityByJarName[$jarName]
+        $tier = [int]$jarPriority.Tier
+        $depCount = [int]$jarPriority.DependentCount
+        $known = [bool]$jarPriority.Known
+        $depSort = [int]$jarPriority.DependentCountSort
+      }
+
+      if ((-not $bestFound) -or $tier -lt $bestTier -or ($tier -eq $bestTier -and $depSort -lt $bestDependentSort) -or ($tier -eq $bestTier -and $depSort -eq $bestDependentSort -and $mtime -gt $bestMtime)) {
+        $bestTier = $tier
+        $bestDependentCount = $depCount
+        $bestDependentSort = $depSort
+        $bestKnown = $known
+        $bestFound = $true
+        $bestMtime = $mtime
+      }
     }
   }
+  $priorityDecision = if ($bestKnown) {
+    "selected by dependency priority: tier={0}, dependents={1}" -f $bestTier, $bestDependentCount
+  } else {
+    "selected by fallback order: dependency metadata unavailable"
+  }
+
+  $dependencyPriorityByModId[$modId] = [pscustomobject]@{
+    Tier = [int]$bestTier
+    DependentCount = [int]$bestDependentCount
+    Known = [bool]$bestKnown
+    DependentCountSort = [int]$bestDependentSort
+    PriorityDecision = $priorityDecision
+  }
+
   $null = $modIdOrder.Add([pscustomobject]@{
       ModId = $modId
       LastWriteTime = $latestWrite
+      PriorityTier = [int]$bestTier
+      PriorityDependentCount = [int]$bestDependentCount
+      PriorityDependentCountSort = [int]$bestDependentSort
+      PriorityKnown = [bool]$bestKnown
+      PriorityDecision = $priorityDecision
     })
 }
 $modIdSortProps = @(
+  @{ Expression = { $_.PriorityTier }; Ascending = $true }
+  @{ Expression = { $_.PriorityDependentCountSort }; Ascending = $true }
   @{ Expression = { $_.LastWriteTime }; Descending = $true }
   @{ Expression = { $_.ModId }; Ascending = $true }
 )
@@ -431,6 +649,15 @@ $orderedModIds = @($modIdOrder | Sort-Object -Property $modIdSortProps | ForEach
 $actions = New-Object System.Collections.Generic.List[object]
 
 foreach ($modId in $orderedModIds) {
+  $modPriority = $null
+  if ($dependencyPriorityByModId.ContainsKey($modId)) {
+    $modPriority = $dependencyPriorityByModId[$modId]
+  }
+  $priorityTier = if ($null -ne $modPriority) { [int]$modPriority.Tier } else { 0 }
+  $priorityDependents = if ($null -ne $modPriority) { [int]$modPriority.DependentCount } else { -1 }
+  $priorityKnown = if ($null -ne $modPriority) { [bool]$modPriority.Known } else { $false }
+  $priorityDecision = if ($null -ne $modPriority) { [string]$modPriority.PriorityDecision } else { "" }
+
   $gameJarPaths = @()
   if ($gameIdToJars.ContainsKey($modId)) { $gameJarPaths = @($gameIdToJars[$modId]) }
   if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
@@ -448,6 +675,10 @@ foreach ($modId in $orderedModIds) {
         evidence = @($evidenceByModId[$modId])
         game = @()
         storage = @()
+        dependencyTier = $priorityTier
+        dependentMods = $priorityDependents
+        dependentModsKnown = $priorityKnown
+        priorityDecision = $priorityDecision
       })
     continue
   }
@@ -510,6 +741,10 @@ foreach ($modId in $orderedModIds) {
         evidence = @($evidenceByModId[$modId])
         game = @($gameResult)
         storage = @($storageResult)
+        dependencyTier = $priorityTier
+        dependentMods = $priorityDependents
+        dependentModsKnown = $priorityKnown
+        priorityDecision = $priorityDecision
       })
   }
 }
@@ -599,6 +834,16 @@ if ($TreatNonFabricAsIncompatible -and $nonFabricJarNames -and $nonFabricJarName
   }
 }
 
+if ($dependencyPriorityApplied -and $modIdOrder.Count -gt 0) {
+  $preview = @($modIdOrder | Sort-Object -Property $modIdSortProps | Select-Object -First 8)
+  if ($preview.Count -gt 0) {
+    $previewLabel = $preview | ForEach-Object {
+      "{0}(tier={1},dependents={2})" -f $_.ModId, $_.PriorityTier, $_.PriorityDependentCount
+    }
+    Write-Host ("Dependency-priority order (top): {0}" -f ($previewLabel -join " -> ")) -ForegroundColor Gray
+  }
+}
+
 $report = [pscustomobject]@{
   minecraft = $mcVersion
   log = $primaryLogPath
@@ -611,6 +856,12 @@ $report = [pscustomobject]@{
   effectiveDeleteFromStorageMods = [bool]$deleteFromStorage
   treatNonFabricAsIncompatible = [bool]$TreatNonFabricAsIncompatible
   includeWarnMixinsAsIncompatible = [bool]$IncludeWarnMixinsAsIncompatible
+  dependencyPriorityApplied = [bool]$dependencyPriorityApplied
+  dependencyPrioritySource = $dependencyPrioritySourceUsed
+  dependencyPriorityMapJsonPath = $dependencyPriorityMapJsonPath
+  dependencyOrderingMode = $countMode
+  dependencyTier2MaxDependents = [int]$DependencyAwareTier2MaxDependents
+  dependencyTier3MaxDependents = [int]$DependencyAwareTier3MaxDependents
   count = $actions.Count
   items = $actions
 }

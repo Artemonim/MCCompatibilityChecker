@@ -218,6 +218,31 @@ function Select-WindowByTitlePattern {
   return $null
 }
 
+function Get-WindowHandleMatch {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Patterns
+  )
+
+  if (-not $Patterns -or $Patterns.Count -eq 0) { return @() }
+
+  $handles = [System.Collections.Generic.HashSet[long]]::new()
+  $windows = Get-WindowList
+  foreach ($window in $windows) {
+    if ($null -eq $window -or $null -eq $window.Handle) { continue }
+    foreach ($pattern in $Patterns) {
+      if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+      if (Test-TitleMatch -Title $window.Title -Pattern $pattern) {
+        $null = $handles.Add([long]$window.Handle.ToInt64())
+        break
+      }
+    }
+  }
+
+  if ($handles.Count -eq 0) { return @() }
+  return @($handles | Sort-Object -Unique)
+}
+
 function Wait-ForLauncherWindow {
   param(
     [Parameter(Mandatory = $true)]

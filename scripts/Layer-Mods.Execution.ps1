@@ -88,15 +88,69 @@
         if ($layerResult.Type -eq "FabricDialog") {
           # * Missing dependencies — restore them and retry same batch.
           $fabricRetry = 0
+          $fabricRequiringIdSet = @{}
+          $fabricRestoredDepSet = @{}
           while ($layerResult.Type -eq "FabricDialog" -and $fabricRetry -lt $maxFabricRetries) {
             $fabricRetry++
-            $restoredCount = Restore-MissingDependency -MissingDepIds $layerResult.MissingDepIds
+            $requiringIds = @()
+            if ($layerResult.PSObject.Properties.Name -contains "RequiringModIds") {
+              $requiringIds = @($layerResult.RequiringModIds |
+                  ForEach-Object { [string]$_ } |
+                  Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                  ForEach-Object { $_.ToLowerInvariant() } |
+                  Sort-Object -Unique)
+              foreach ($reqId in $requiringIds) {
+                $fabricRequiringIdSet[$reqId] = $true
+              }
+            }
+
+            $restoreInfo = Restore-MissingDependency -MissingDepIds $layerResult.MissingDepIds -ReturnDetails
+            $restoredCount = [int]$restoreInfo.RestoredCount
+            foreach ($restoredJarName in @($restoreInfo.RestoredJarNames)) {
+              $name = [string]$restoredJarName
+              if ([string]::IsNullOrWhiteSpace($name)) { continue }
+              $fabricRestoredDepSet[$name.ToLowerInvariant()] = $name
+            }
             if ($restoredCount -eq 0) {
               Write-Host "  Fabric dialog but no restorable dependencies. Treating as crash." -ForegroundColor Yellow
               break
             }
             Write-Host ("  Restored {0} dep(s). Retrying batch..." -f $restoredCount) -ForegroundColor Cyan
             $layerResult = Invoke-LayeringLaunchAndCheck -PhasePrefix ("tier{0}_fabric_retry" -f $tier) -LeaveGameRunning:$isFinalBatch
+          }
+
+          if ($layerResult.Type -eq "Crash" -and $fabricRestoredDepSet.Count -gt 0) {
+            $recoveryRequiringIds = @($fabricRequiringIdSet.Keys | Sort-Object)
+            $recoveryRestoredDeps = @($fabricRestoredDepSet.Values | Sort-Object -Unique)
+            $recoveryEvidenceKey = if ($null -ne $layerResult.LogSnapshot) { Get-ErrorEvidenceKey -Lines $layerResult.LogSnapshot.Lines -MaxLines $ErrorSignatureLineLimit } else { "" }
+
+            $recovery = Invoke-FabricRetryCrashIsolation `
+              -BatchMods $batch `
+              -RequiringModIds $recoveryRequiringIds `
+              -RestoredDependencyJarNames $recoveryRestoredDeps `
+              -EvidenceKey $recoveryEvidenceKey
+            if ($null -ne $recovery -and [bool]$recovery.Handled) {
+              $isolatedSet = @{}
+              foreach ($isolatedJarName in @($recovery.IsolatedJarNames)) {
+                $name = [string]$isolatedJarName
+                if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                $isolatedSet[$name.ToLowerInvariant()] = $true
+              }
+              if ($isolatedSet.Count -gt 0) {
+                $newRemaining = [System.Collections.Generic.List[object]]::new()
+                foreach ($remMod in $remaining) {
+                  if ($null -eq $remMod) { continue }
+                  $remName = [string]$remMod.Name
+                  if ([string]::IsNullOrWhiteSpace($remName)) { continue }
+                  if ($isolatedSet.ContainsKey($remName.ToLowerInvariant())) { continue }
+                  $newRemaining.Add($remMod)
+                }
+                $remaining = $newRemaining
+              }
+              $batchSize = 1
+              $consecutiveFabricFails = 0
+              continue
+            }
           }
 
           if ($layerResult.Type -eq "Success") {
