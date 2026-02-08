@@ -426,7 +426,7 @@ $profileTypeMap = @{
   SuccessGraceSeconds = "int"
   GameProcessNames = "string[]"
 }
-$profileOverrides = Get-ProfileOverrides `
+$profileOverrides = Get-ProfileOverride `
   -Ini $configIni `
   -BoundParameters $PSBoundParameters `
   -ProfileName $ProfileName `

@@ -159,8 +159,9 @@ function Get-IniBool {
   }
 }
 
-function Get-ProfileOverrides {
+function Get-ProfileOverride {
   [CmdletBinding()]
+  [OutputType([hashtable])]
   param(
     [Parameter(Mandatory = $true)]
     [hashtable]$Ini,

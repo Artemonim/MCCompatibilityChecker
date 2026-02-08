@@ -1,5 +1,6 @@
 function Get-PreIsolateSelection {
   [CmdletBinding()]
+  [OutputType([pscustomobject])]
   param(
     [Parameter(Mandatory = $false)]
     [string[]]$PreIsolateJarNames = @(),
@@ -37,6 +38,7 @@ function Get-PreIsolateSelection {
 
 function Get-LayeringTierPlan {
   [CmdletBinding()]
+  [OutputType([object[]])]
   param(
     [Parameter(Mandatory = $false)]
     [object[]]$Tier3Mods = @(),

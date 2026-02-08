@@ -84,7 +84,8 @@ function Get-LogSnapshot {
     [int]$SinceTimestampSkewSeconds = 120
   )
 
-  $resolvedPrimary = Get-LatestTLauncherLogPath -PreferredPath $PrimaryLogPath -AllowMissing $true
+  $resolvedPrimary = Get-LatestTLauncherLogPath -PreferredPath $PrimaryLogPath -AllowMissing $true `
+    -SinceTimestamp $SinceTimestamp -SinceSkewSeconds $SinceTimestampSkewSeconds
   $primaryLastWrite = [datetime]::MinValue
   if (-not [string]::IsNullOrWhiteSpace($resolvedPrimary) -and (Test-Path -LiteralPath $resolvedPrimary)) {
     $primaryItem = Get-Item -LiteralPath $resolvedPrimary -ErrorAction SilentlyContinue

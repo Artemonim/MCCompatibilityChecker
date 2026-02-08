@@ -822,6 +822,7 @@ $culpritJarNames = New-Object System.Collections.Generic.List[string]
 $culpritMoves = New-Object System.Collections.Generic.List[pscustomobject]
 $mixinConflicts = New-Object System.Collections.Generic.List[pscustomobject]
 $resolved = $false
+$candidateTestStatusByJar = @{}
 
 foreach ($mxErr in $mixinErrors) {
   # * Resolve source mod JAR.
@@ -880,9 +881,26 @@ foreach ($mxErr in $mixinErrors) {
   if ($allowTargetCandidate) { $candidates += $targetJar }
 
   foreach ($candJar in $candidates) {
+    $candidateKey = $candJar.ToLowerInvariant()
+    if ($candidateTestStatusByJar.ContainsKey($candidateKey)) {
+      $previousStatus = [string]$candidateTestStatusByJar[$candidateKey]
+      $statusLabel = switch ($previousStatus) {
+        "success" { "already confirmed as culprit"; break }
+        "missing" { "not found in game mods"; break }
+        default { "already tested and did not fix the crash" }
+      }
+      Write-Host ("    Skipping {0}: {1}." -f $candJar, $statusLabel) -ForegroundColor Gray
+      if ($previousStatus -eq "success") {
+        $resolved = $true
+        break
+      }
+      continue
+    }
+
     $gamePath = Join-Path -Path $GameModsDir -ChildPath $candJar
     if (-not (Test-Path -LiteralPath $gamePath)) {
       Write-Host ("    Skipping {0}: not found in game mods." -f $candJar) -ForegroundColor Gray
+      $candidateTestStatusByJar[$candidateKey] = "missing"
       continue
     }
 
@@ -1042,6 +1060,7 @@ foreach ($mxErr in $mixinErrors) {
           PriorityDecision   = $priorityDecision
           Stage              = "mixin-analysis"
         })
+      $candidateTestStatusByJar[$candidateKey] = "success"
       Write-Host ("Culprit identified: {0}" -f $candJar) -ForegroundColor Green
       $resolved = $true
       break
@@ -1052,6 +1071,7 @@ foreach ($mxErr in $mixinErrors) {
       if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp)) {
         Move-Item -LiteralPath $storageTemp -Destination $storagePath -Force
       }
+      $candidateTestStatusByJar[$candidateKey] = "failed"
     }
   }
 

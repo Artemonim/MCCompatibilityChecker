@@ -1,5 +1,8 @@
 @{
     ExcludeRules = @(
-        'PSAvoidUsingWriteHost'
+        'PSAvoidUsingWriteHost',
+        'PSUseBOMForUnicodeEncodedFile',
+        'PSUseShouldProcessForStateChangingFunctions',
+        'PSUseDeclaredVarsMoreThanAssignments'
     )
 }

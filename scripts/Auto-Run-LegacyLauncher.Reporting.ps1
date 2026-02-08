@@ -22,6 +22,210 @@ function Get-LatestCompatReportPath {
   return [string]$freshReports[0].FullName
 }
 
+function ConvertTo-CompatActionPath {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$PathValue = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($PathValue)) { return "" }
+  $normalized = [string]$PathValue
+  $normalized = $normalized.Trim()
+  while ($normalized.Length -ge 2 -and (
+      ($normalized.StartsWith("'") -and $normalized.EndsWith("'")) -or
+      ($normalized.StartsWith('"') -and $normalized.EndsWith('"'))
+    )) {
+    $normalized = $normalized.Substring(1, $normalized.Length - 2).Trim()
+  }
+  return $normalized
+}
+
+function Get-CompatActionSourcePath {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$ActionText = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ActionText)) { return "" }
+  $match = [regex]::Match(
+    [string]$ActionText,
+    '^\s*(?:DRYRUN\s+)?(?:moved|deleted):\s+(?<source>.+?)(?:\s+->\s+.+)?\s*$',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  )
+  if (-not $match.Success) { return "" }
+  return ConvertTo-CompatActionPath -PathValue ([string]$match.Groups["source"].Value)
+}
+
+function Get-CompatActionLegacyPath {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$ActionText = "",
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$JarName = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ActionText)) { return "" }
+  $match = [regex]::Match(
+    [string]$ActionText,
+    '^\s*(?:DRYRUN\s+)?moved:\s+(?<source>.+?)\s+->\s+(?<dest>.+?)\s*$',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  )
+  if (-not $match.Success) { return "" }
+
+  $destination = ConvertTo-CompatActionPath -PathValue ([string]$match.Groups["dest"].Value)
+  if ([string]::IsNullOrWhiteSpace($destination)) { return "" }
+  if ($destination -match '(?i)\.jar$') { return $destination }
+
+  $effectiveJarName = $JarName
+  if ([string]::IsNullOrWhiteSpace($effectiveJarName)) {
+    $sourcePath = ConvertTo-CompatActionPath -PathValue ([string]$match.Groups["source"].Value)
+    if (-not [string]::IsNullOrWhiteSpace($sourcePath)) {
+      $effectiveJarName = [System.IO.Path]::GetFileName($sourcePath)
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($effectiveJarName)) { return "" }
+
+  return Join-Path -Path $destination -ChildPath $effectiveJarName
+}
+
+function Get-CompatHandledCulpritMove {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$CompatReportPath,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$GameModsDir = "",
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$StorageModsDir = "",
+    [Parameter(Mandatory = $false)]
+    [string]$DefaultStage = "compatibility-cleanup"
+  )
+
+  if ([string]::IsNullOrWhiteSpace($CompatReportPath) -or (-not (Test-Path -LiteralPath $CompatReportPath))) {
+    return @()
+  }
+
+  $report = $null
+  try {
+    $raw = Get-Content -LiteralPath $CompatReportPath -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+    $report = $raw | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    return @()
+  }
+  if ($null -eq $report) { return @() }
+
+  $minecraft = if ($report | Get-Member -Name "minecraft" -MemberType NoteProperty, Property) { [string]$report.minecraft } else { "" }
+  if ([string]::IsNullOrWhiteSpace($minecraft)) { $minecraft = "unknown" }
+
+  $keepInGameLegacy = $false
+  if ($report | Get-Member -Name "effectiveDeleteFromGameMods" -MemberType NoteProperty, Property) {
+    $keepInGameLegacy = -not [bool]$report.effectiveDeleteFromGameMods
+  } elseif ($report | Get-Member -Name "gameLegacy" -MemberType NoteProperty, Property) {
+    $keepInGameLegacy = [bool]$report.gameLegacy
+  }
+
+  if (-not ($report | Get-Member -Name "items" -MemberType NoteProperty, Property)) {
+    return @()
+  }
+
+  $moves = New-Object System.Collections.Generic.List[pscustomobject]
+  $seenJarKeys = @{}
+  foreach ($item in @($report.items)) {
+    if ($null -eq $item) { continue }
+
+    $status = if ($item | Get-Member -Name "status" -MemberType NoteProperty, Property) { [string]$item.status } else { "" }
+    if ($status -notin @("handled", "handled_non_fabric_by_filename")) { continue }
+
+    $jarName = ""
+    if ($item | Get-Member -Name "jar" -MemberType NoteProperty, Property) {
+      $jarName = [string]$item.jar
+    }
+    if ([string]::IsNullOrWhiteSpace($jarName)) {
+      foreach ($actionProp in @("game", "storage")) {
+        if (-not ($item | Get-Member -Name $actionProp -MemberType NoteProperty, Property)) { continue }
+        foreach ($actionText in @($item.$actionProp)) {
+          $sourcePath = Get-CompatActionSourcePath -ActionText ([string]$actionText)
+          if ([string]::IsNullOrWhiteSpace($sourcePath)) { continue }
+          $jarName = [System.IO.Path]::GetFileName($sourcePath)
+          if (-not [string]::IsNullOrWhiteSpace($jarName)) { break }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($jarName)) { break }
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $jarName = [System.IO.Path]::GetFileName($jarName)
+    if ([string]::IsNullOrWhiteSpace($jarName) -or (-not $jarName.EndsWith(".jar", [System.StringComparison]::OrdinalIgnoreCase))) {
+      continue
+    }
+
+    $jarKey = $jarName.ToLowerInvariant()
+    if ($seenJarKeys.ContainsKey($jarKey)) { continue }
+    $seenJarKeys[$jarKey] = $true
+
+    $gameLegacyPath = ""
+    if ($item | Get-Member -Name "game" -MemberType NoteProperty, Property) {
+      foreach ($actionText in @($item.game)) {
+        $candidatePath = Get-CompatActionLegacyPath -ActionText ([string]$actionText) -JarName $jarName
+        if (-not [string]::IsNullOrWhiteSpace($candidatePath)) {
+          $gameLegacyPath = $candidatePath
+          break
+        }
+      }
+    }
+
+    $storageLegacyPath = ""
+    if ($item | Get-Member -Name "storage" -MemberType NoteProperty, Property) {
+      foreach ($actionText in @($item.storage)) {
+        $candidatePath = Get-CompatActionLegacyPath -ActionText ([string]$actionText) -JarName $jarName
+        if (-not [string]::IsNullOrWhiteSpace($candidatePath)) {
+          $storageLegacyPath = $candidatePath
+          break
+        }
+      }
+    }
+
+    $evidenceKey = ""
+    if ($item | Get-Member -Name "evidence" -MemberType NoteProperty, Property) {
+      foreach ($line in @($item.evidence)) {
+        $lineValue = [string]$line
+        if (-not [string]::IsNullOrWhiteSpace($lineValue)) {
+          $evidenceKey = $lineValue
+          break
+        }
+      }
+    }
+
+    $tier = if ($item | Get-Member -Name "dependencyTier" -MemberType NoteProperty, Property) { [int]$item.dependencyTier } else { 0 }
+    $dependentMods = if ($item | Get-Member -Name "dependentMods" -MemberType NoteProperty, Property) { [int]$item.dependentMods } else { -1 }
+    $dependentKnown = if ($item | Get-Member -Name "dependentModsKnown" -MemberType NoteProperty, Property) { [bool]$item.dependentModsKnown } else { $false }
+    $priorityDecision = if ($item | Get-Member -Name "priorityDecision" -MemberType NoteProperty, Property) { [string]$item.priorityDecision } else { "" }
+
+    $moves.Add([pscustomobject]@{
+        JarName                = $jarName
+        GameModsDir            = $GameModsDir
+        StorageModsDir         = $StorageModsDir
+        StorageLegacyPath      = $storageLegacyPath
+        GameLegacyPath         = $gameLegacyPath
+        Minecraft              = $minecraft
+        KeepCulpritInGameLegacy = [bool]$keepInGameLegacy
+        CrashEvidenceKey       = $evidenceKey
+        DependencyTier         = [int]$tier
+        DependentModCount      = [int]$dependentMods
+        DependentModCountKnown = [bool]$dependentKnown
+        PriorityDecision       = $priorityDecision
+        Stage                  = $DefaultStage
+      }) | Out-Null
+  }
+
+  return @($moves.ToArray())
+}
+
 function Write-SessionReport {
   param(
     [Parameter(Mandatory = $true)]
@@ -130,13 +334,14 @@ function Write-SessionReport {
 
     # * Display by stage.
     $stageLabels = @{
+      "compatibility-cleanup" = "Compatibility cleanup"
       "mixin-analysis" = "Mixin analysis"
       "layering"       = "Layering"
       "isolation"      = "Subtractive isolation"
       "recovery"       = "Recovery (root cause)"
       "unknown"        = "Other"
     }
-    foreach ($stage in @("mixin-analysis", "layering", "isolation", "recovery", "unknown")) {
+    foreach ($stage in @("compatibility-cleanup", "mixin-analysis", "layering", "isolation", "recovery", "unknown")) {
       if (-not $byStage.ContainsKey($stage)) { continue }
       $stageLabel = if ($stageLabels.ContainsKey($stage)) { $stageLabels[$stage] } else { $stage }
       $stageMoves = @($byStage[$stage])

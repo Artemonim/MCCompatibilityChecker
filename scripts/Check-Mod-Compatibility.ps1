@@ -373,7 +373,8 @@ function Move-OrDelete {
 }
 
 # * Resolve log paths (supports "latest tl-logger*.txt" fallback).
-$primaryLogPath = Get-LatestTLauncherLogPath -PreferredPath $LogPath
+$primaryLogPath = Get-LatestTLauncherLogPath -PreferredPath $LogPath `
+  -SinceTimestamp $LogSinceTimestamp -SinceSkewSeconds $LogSinceSkewSeconds
 $primaryLastWrite = [datetime]::MinValue
 if (-not [string]::IsNullOrWhiteSpace($primaryLogPath) -and (Test-Path -LiteralPath $primaryLogPath)) {
   $primaryItem = Get-Item -LiteralPath $primaryLogPath -ErrorAction SilentlyContinue

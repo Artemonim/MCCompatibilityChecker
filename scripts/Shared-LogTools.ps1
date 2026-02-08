@@ -5,18 +5,40 @@ function Get-LatestTLauncherLogPath {
     [Parameter(Mandatory = $false)]
     [string]$PreferredPath,
     [Parameter(Mandatory = $false)]
-    [bool]$AllowMissing = $false
+    [bool]$AllowMissing = $false,
+    # * If provided, ignores stale preferred logs and selects only logs written after this timestamp.
+    [Parameter(Mandatory = $false)]
+    [datetime]$SinceTimestamp = [datetime]::MinValue,
+    # * Allowed clock skew (seconds) when applying SinceTimestamp.
+    [Parameter(Mandatory = $false)]
+    [int]$SinceSkewSeconds = 120
   )
 
+  $applySince = ($SinceTimestamp -ne [datetime]::MinValue)
+  $sinceCutoff = if ($applySince) { $SinceTimestamp.AddSeconds(-$SinceSkewSeconds) } else { [datetime]::MinValue }
+
   if (-not [string]::IsNullOrWhiteSpace($PreferredPath) -and (Test-Path -LiteralPath $PreferredPath)) {
-    return $PreferredPath
+    if (-not $applySince) {
+      return $PreferredPath
+    }
+
+    $prefItem = Get-Item -LiteralPath $PreferredPath -ErrorAction SilentlyContinue
+    if ($null -ne $prefItem -and $prefItem.LastWriteTime -ge $sinceCutoff) {
+      return $PreferredPath
+    }
   }
 
   $tempDir = [System.IO.Path]::GetTempPath()
   $candidates = Get-ChildItem -LiteralPath $tempDir -Filter "tl-logger*.txt" -File -ErrorAction SilentlyContinue |
     Sort-Object -Property LastWriteTime -Descending
+  if ($applySince) {
+    $candidates = @($candidates | Where-Object { $_.LastWriteTime -ge $sinceCutoff })
+  }
   if (-not $candidates -or $candidates.Count -eq 0) {
     if ($AllowMissing) { return $null }
+    if ($applySince) {
+      throw ("Could not find tl-logger*.txt in temp dir newer than {0}: {1}" -f $sinceCutoff, $tempDir)
+    }
     throw ("Could not find tl-logger*.txt in temp dir: {0}" -f $tempDir)
   }
   return $candidates[0].FullName

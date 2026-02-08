@@ -9,7 +9,10 @@ param(
     [string]$ScanPath = ".",
 
     [Parameter(Mandatory = $false)]
-    [switch]$Recurse = $true
+    [switch]$Recurse,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$NoRecurse
 )
 
 # * Подключаем библиотеку для работы с архивами
@@ -17,16 +20,23 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $results = @()
 $searchPattern = "*{0}*" -f $SearchTerm
+$scanRecursively = $true
+if ($PSBoundParameters.ContainsKey("Recurse")) {
+    $scanRecursively = [bool]$Recurse
+}
+if ($NoRecurse) {
+    $scanRecursively = $false
+}
 
 Write-Host ("[*] Сканирование: {0}" -f $ScanPath) -ForegroundColor Cyan
 Write-Host ("[*] Поиск зависимости: '{0}'" -f $SearchTerm) -ForegroundColor Cyan
 
-$jarFiles = Get-ChildItem -Path $ScanPath -Filter "*.jar" -Recurse:$Recurse
+$jarFiles = Get-ChildItem -Path $ScanPath -Filter "*.jar" -Recurse:$scanRecursively
 
 foreach ($jarFile in $jarFiles) {
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($jarFile.FullName)
-        
+
         # ? 1. Проверка Fabric (fabric.mod.json)
         $fabricEntry = $zip.Entries | Where-Object { $_.FullName -eq "fabric.mod.json" }
         if ($fabricEntry) {
@@ -38,7 +48,7 @@ foreach ($jarFile in $jarFiles) {
 
             $modJson = $content | ConvertFrom-Json
             $foundDeps = @()
-            
+
             # ! Проверяем все возможные блоки зависимостей в Fabric
             $depBlocks = @("depends", "suggests", "recommends", "breaks", "conflicts")
             foreach ($block in $depBlocks) {
@@ -62,7 +72,7 @@ foreach ($jarFile in $jarFiles) {
                 }
             }
         }
-        
+
         # ? 2. Проверка Forge (META-INF/mods.toml)
         if (-not $fabricEntry) {
             $tomlEntry = $zip.Entries | Where-Object { $_.FullName -eq "META-INF/mods.toml" }

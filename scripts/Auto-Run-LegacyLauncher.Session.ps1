@@ -41,6 +41,12 @@ $sessionIsolationFastForwardJarNames = @()
 $sessionIsolationFastForwardEvidenceKey = ""
 $sessionIsolationCulpritByJar = @{}
 $sessionIsolationCulpritHistoryByJar = @{}
+$sessionGameModsDir = ""
+$sessionStorageModsDir = ""
+if ($null -ne $runtimeConfig -and $null -ne $runtimeConfig.Paths) {
+  $sessionGameModsDir = [string]$runtimeConfig.Paths.GameModsDir
+  $sessionStorageModsDir = [string]$runtimeConfig.Paths.StorageModsDir
+}
 
 # * Log snapshot defaults for Fabric dialog auto-handling.
 $autoFabricLogMaxAgeMinutes = 30
@@ -274,6 +280,41 @@ while ($true) {
         & $CheckScriptPath @compatParams @compatExtraArgs -Verbose:$forwardVerbose
       }
       $compatExitCode = $LASTEXITCODE
+
+      $latestCompatReportPathForAttempt = ""
+      $compatReportMoves = @()
+      try {
+        $latestCompatReportPathForAttempt = Get-LatestCompatReportPath `
+          -ReportDir $PSScriptRoot `
+          -SinceTimestamp $launchStart `
+          -SinceSkewSeconds 10
+        if (-not [string]::IsNullOrWhiteSpace($latestCompatReportPathForAttempt) -and (Test-Path -LiteralPath $latestCompatReportPathForAttempt)) {
+          $compatReportMoves = @(Get-CompatHandledCulpritMove `
+              -CompatReportPath $latestCompatReportPathForAttempt `
+              -GameModsDir $sessionGameModsDir `
+              -StorageModsDir $sessionStorageModsDir)
+        }
+      } catch {
+        Write-Host ("Warning: failed to parse compatibility report for session history: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+      }
+      if ($compatReportMoves.Count -gt 0) {
+        $compatAddedCount = 0
+        foreach ($move in $compatReportMoves) {
+          if ($null -eq $move) { continue }
+          $name = [string]$move.JarName
+          if ([string]::IsNullOrWhiteSpace($name)) { continue }
+          $nameKey = $name.ToLowerInvariant()
+          if (-not $sessionIsolationCulpritHistoryByJar.ContainsKey($nameKey)) {
+            $compatAddedCount++
+          }
+          $sessionIsolationCulpritByJar[$nameKey] = $move
+          $sessionIsolationCulpritHistoryByJar[$nameKey] = $move
+        }
+        if ($compatAddedCount -gt 0) {
+          Write-Host ("Compatibility cleanup isolated {0} mod(s) in this attempt." -f $compatAddedCount) -ForegroundColor Gray
+        }
+      }
+
       if ($compatExitCode -ne 0) {
         if ($compatExitCode -eq 3) {
           $skipDeepPipelineForFabric = $false
