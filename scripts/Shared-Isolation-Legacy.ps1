@@ -62,7 +62,8 @@ function Move-CulpritToLegacyAndAppendLog {
   $useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
   $legacyLog = $LegacyLogPath
   if ([string]::IsNullOrWhiteSpace($legacyLog)) {
-    $legacyLog = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
+    $projectRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
+    $legacyLog = Join-Path -Path $projectRoot -ChildPath "legacy.log"
   }
 
   if ($useStorage -and -not [string]::IsNullOrWhiteSpace($StorageSourcePath) -and (Test-Path -LiteralPath $StorageSourcePath)) {

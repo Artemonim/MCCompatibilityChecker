@@ -344,7 +344,13 @@ Enable-McccConsoleLocalization
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$transcriptLogPath = Join-Path -Path $PSScriptRoot -ChildPath "MCCC.log"
+$projectRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
+$transcriptLogPath = Join-Path -Path $projectRoot -ChildPath "MCCC.log"
+$legacyLogPath = Join-Path -Path $projectRoot -ChildPath "legacy.log"
+$script:compatReportDir = Join-Path -Path $projectRoot -ChildPath "logs"
+if (-not (Test-Path -LiteralPath $script:compatReportDir)) {
+  New-Item -ItemType Directory -Path $script:compatReportDir -Force | Out-Null
+}
 $enableTranscript = $PSBoundParameters.ContainsKey("Verbose")
 $transcriptStarted = $false
 $script:OutcomeTimeoutSecondsBound = $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
@@ -376,7 +382,6 @@ try {
   }
 
   # * Write session header to legacy.log (append-only, session-divided).
-  $legacyLogPath = Join-Path -Path $PSScriptRoot -ChildPath "legacy.log"
   Add-Content -LiteralPath $legacyLogPath -Value ("" + [Environment]::NewLine + (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
 
   $effectiveAutoLaunch = ([bool]$UseAutoLaunch) -and (-not [bool]$DisableAutoLaunch)
@@ -648,7 +653,7 @@ try {
     }
 
     $latestCompatReportPath = Get-LatestCompatReportPath `
-      -ReportDir $PSScriptRoot `
+      -ReportDir $script:compatReportDir `
       -SinceTimestamp $sessionStartTime `
       -SinceSkewSeconds 5
     $reportParams = @{

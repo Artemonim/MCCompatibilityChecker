@@ -2,7 +2,7 @@
 .temporary/
 .venv/
 *.log
-scripts/*.json
+logs/compat-report-*.json
 config.local.ini
 reports/
 *.pyc

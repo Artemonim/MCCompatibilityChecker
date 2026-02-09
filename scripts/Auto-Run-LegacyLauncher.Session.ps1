@@ -407,7 +407,7 @@ while ($true) {
       $compatReportMoves = @()
       try {
         $latestCompatReportPathForAttempt = Get-LatestCompatReportPath `
-          -ReportDir $PSScriptRoot `
+          -ReportDir $script:compatReportDir `
           -SinceTimestamp $launchStart `
           -SinceSkewSeconds 10
         if (-not [string]::IsNullOrWhiteSpace($latestCompatReportPathForAttempt) -and (Test-Path -LiteralPath $latestCompatReportPathForAttempt)) {
@@ -446,7 +446,7 @@ while ($true) {
             $fabricUnresolvedModIds = @()
             try {
               $latestCompatReportPath = Get-LatestCompatReportPath `
-                -ReportDir $PSScriptRoot `
+                -ReportDir $script:compatReportDir `
                 -SinceTimestamp $launchStart `
                 -SinceSkewSeconds 10
               if (-not [string]::IsNullOrWhiteSpace($latestCompatReportPath) -and (Test-Path -LiteralPath $latestCompatReportPath)) {

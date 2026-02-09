@@ -1093,7 +1093,10 @@ $report = [pscustomobject]@{
 
 if ($compatLogsEnabled) {
   $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-  $outPath = Join-Path -Path $PSScriptRoot -ChildPath ("compat-report-{0}.json" -f $timestamp)
+  $projectRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
+  $compatReportDir = Join-Path -Path $projectRoot -ChildPath "logs"
+  New-DirectoryIfMissing -DirPath $compatReportDir
+  $outPath = Join-Path -Path $compatReportDir -ChildPath ("compat-report-{0}.json" -f $timestamp)
   $report | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $outPath -Encoding UTF8
 
   Write-Host ""

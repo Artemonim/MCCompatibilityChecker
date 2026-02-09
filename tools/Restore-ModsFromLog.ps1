@@ -48,7 +48,7 @@ $config = Import-ProjectConfig -StartDir $PSScriptRoot
 $ini = $config.Ini
 
 # * Reads from legacy.log (persistent append-only culprit log).
-$logPath = Join-Path $config.Root "scripts\legacy.log"
+$logPath = Join-Path $config.Root "legacy.log"
 $target1 = Get-IniValue -Ini $ini -Section "Paths" -Key "StorageModsDir" -Default "D:\Установщики игр\MineCraft 1.21\Mods"
 $target2 = Get-IniValue -Ini $ini -Section "Paths" -Key "GameModsDir" -Default "$env:APPDATA\.tlauncher\legacy\Minecraft\game\mods"
 
