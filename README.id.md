@@ -169,7 +169,3 @@ Setelah selesai, script akan menampilkan laporan: waktu eksekusi, daftar penyeba
 - Diagnosis memerlukan berkalikali menjalankan game — pada susunan mod yang besar, hal ini dapat memakan waktu yang cukup lama
 - Pada klaster ketidakcocokan yang besar, kemungkinan terjadi sesi berjalan yang tidak stabil dan penghentian diagnosis lebih awal
 - Tahap Pemulihan saat ini masih eksperimental dan dimatikan secara default
-
-## Lisensi
-
-MIT

@@ -169,7 +169,3 @@ Upon completion, the script outputs a report: execution time, list of culprits b
 - Diagnostics require multiple game launches — on large modpacks, this can take significant time
 - With large clusters of incompatibilities, unstable runs and early fallback/stop of diagnostics are possible
 - The Recovery stage is currently experimental and disabled by default
-
-## License
-
-MIT

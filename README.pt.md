@@ -169,7 +169,3 @@ Após a conclusão, o script exibe um relatório: tempo de execução, lista de 
 - O diagnóstico requer múltiplas inicializações do jogo — em grandes coleções de mods, isso pode levar um tempo considerável
 - Com grandes grupos de incompatibilidades, são possíveis execuções instáveis e interrupções precoces do diagnóstico
 - A etapa de Recuperação é experimental no momento e está desativada por padrão
-
-## Licença
-
-MIT

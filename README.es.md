@@ -169,7 +169,3 @@ Al finalizar, el script muestra un informe: tiempo de ejecución, lista de culpa
 - El diagnóstico requiere múltiples inicios del juego; en colecciones grandes esto puede llevar mucho tiempo
 - Con grandes grupos de incompatibilidades, es posible que haya ejecuciones inestables o paradas prematuras del diagnóstico
 - La etapa de Recuperación es experimental y está desactivada por defecto
-
-## Licencia
-
-MIT

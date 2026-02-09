@@ -169,7 +169,3 @@ Sau khi hoàn tất, script sẽ xuất báo cáo: thời gian chạy, danh sác
 - Chẩn đoán yêu cầu khởi động game nhiều lần — với các bộ mod lớn, việc này có thể mất nhiều thời gian
 - Với các cụm xung đột lớn, có thể xảy ra tình trạng chạy không ổn định hoặc dừng chẩn đoán sớm
 - Giai đoạn Recovery hiện vẫn đang là thử nghiệm và bị tắt theo mặc định
-
-## Giấy phép
-
-MIT
