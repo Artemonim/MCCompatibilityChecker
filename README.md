@@ -1,5 +1,7 @@
 # MCCompatibilityChecker
 
+[Русский](README.md) | [English](README.en.md) | [Español](README.es.md) | [Tiếng Việt](README.vi.md) | [Português](README.pt.md) | [Türkçe](README.tr.md) | [Indonesia](README.id.md) | [中文](README.zh.md)
+
 Автоматическая диагностика конфликтов модов Minecraft. Скрипт сам запускает игру, ловит вылеты, читает краш-логи, находит виновный мод и изолирует его — в цикле, пока сборка не заработает.
 
 > Работает через [Legacy Launcher](https://llaun.ch/) (наследник TLauncher). Запуск игры и обнаружение вылетов — через GUI лаунчера; анализ ошибок — по стандартным логам Fabric/Forge/Minecraft.
