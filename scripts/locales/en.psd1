@@ -25,6 +25,10 @@
     # 5. SPECIAL CHARACTERS:
     #    - `n  : Literal newline (PowerShell format).
     #    - \" : Escaped double quote inside the string.
+    #
+    # 6. DEBUG/VERBOSE STRINGS:
+    #    - Write-Verbose / debug-only messages stay in English intentionally.
+    #    - They are excluded from translation coverage in tools/Check-Localization.py.
     # =========================================================================
 
     # * Source code is now English. Add overrides here if needed.
@@ -46,11 +50,7 @@
   }
   Ui = @{
     CrashWindowTitlePatterns = @(
-      "Something broke"
-      "Something went wrong"
-      "An error occurred"
-      "Launcher error"
-      "Oops!"
+      "Something broke..."
     )
   }
 }

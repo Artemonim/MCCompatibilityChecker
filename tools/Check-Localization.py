@@ -15,9 +15,14 @@ OUTPUT_COMMANDS_PATTERN = (
     r"(?:Write-Host|Write-Warning|Write-Error|Read-Host|"
     r"Write-McccHost|Write-McccWarning|Write-McccError|Read-McccHost)"
 )
+DEBUG_ONLY_COMMANDS_PATTERN = r"(?:Write-Verbose|Write-Debug|Write-Information|Write-Progress)"
 STRING_PATTERNS = [
     re.compile(rf"{OUTPUT_COMMANDS_PATTERN}\s+([\"'])(.*?)\1", re.IGNORECASE | re.DOTALL),
     re.compile(rf"{OUTPUT_COMMANDS_PATTERN}\s*\(\s*([\"'])(.*?)\1", re.IGNORECASE | re.DOTALL),
+]
+DEBUG_STRING_PATTERNS = [
+    re.compile(rf"{DEBUG_ONLY_COMMANDS_PATTERN}\s+([\"'])(.*?)\1", re.IGNORECASE | re.DOTALL),
+    re.compile(rf"{DEBUG_ONLY_COMMANDS_PATTERN}\s*\(\s*([\"'])(.*?)\1", re.IGNORECASE | re.DOTALL),
 ]
 PLACEHOLDER_RE = re.compile(r"\{(\d+)\}")
 KEY_TAG_RE = re.compile(r"<KEY_[A-Z0-9_]+>")
@@ -53,6 +58,18 @@ def extract_localizable_strings(file_path: Path) -> set[str]:
     return found_strings
 
 
+def extract_debug_only_strings(file_path: Path) -> set[str]:
+    content = file_path.read_text(encoding="utf-8")
+    found_strings: set[str] = set()
+
+    for pattern in DEBUG_STRING_PATTERNS:
+        for _, message in pattern.findall(content):
+            if message and message.strip():
+                found_strings.add(message)
+
+    return found_strings
+
+
 def decode_powershell_backtick_escapes(value: str) -> str:
     escapes = {
         "0": "\0",
@@ -75,8 +92,9 @@ def decode_powershell_backtick_escapes(value: str) -> str:
     return re.sub(r"`(.)", repl, value)
 
 
-def discover_source_strings(root_dir: Path) -> dict[str, set[str]]:
+def discover_source_strings(root_dir: Path) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     source_map: dict[str, set[str]] = {}
+    debug_only_map: dict[str, set[str]] = {}
 
     for path in root_dir.rglob("*.ps1"):
         rel_parts = {part.lower() for part in path.relative_to(root_dir).parts}
@@ -87,8 +105,11 @@ def discover_source_strings(root_dir: Path) -> dict[str, set[str]]:
         for item in extract_localizable_strings(path):
             normalized = decode_powershell_backtick_escapes(item)
             source_map.setdefault(normalized, set()).add(rel_path)
+        for item in extract_debug_only_strings(path):
+            normalized = decode_powershell_backtick_escapes(item)
+            debug_only_map.setdefault(normalized, set()).add(rel_path)
 
-    return source_map
+    return source_map, debug_only_map
 
 
 def find_powershell_executable() -> str:
@@ -312,9 +333,11 @@ def main() -> int:
         print(f"[ERROR] Locale directory not found: {locale_dir}")
         return 2
 
-    source_map = discover_source_strings(root_dir)
+    source_map, debug_only_map = discover_source_strings(root_dir)
     source_strings = set(source_map.keys())
+    debug_only_strings = set(debug_only_map.keys())
     print(f"[INFO] Source strings discovered: {len(source_strings)}")
+    print(f"[INFO] Debug-only strings ignored from coverage: {len(debug_only_strings)}")
 
     locale_files = sorted(locale_dir.glob("*.psd1"))
     if not locale_files:

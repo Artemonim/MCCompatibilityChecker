@@ -1,6 +1,7 @@
-- archive/ - Код Legacy Launcher
-- doc/Алгоритм.md - UX-описание алгоритма
-- scripts/ - основной код
-- tools/ - дополнительные скрипты
+- archive/ - Legacy Launcher code
+- doc/Algorithm.md - description of the algorithm
+- scripts/ - main code
+- tools/ - additional scripts
 
-При изменениях скриптов проверяй себя через `./checker.ps1`
+When changing scripts, check with `./checker.ps1 -NoLocales`
+New console output lines should be added to the localization files; check with `./checker.ps1`.

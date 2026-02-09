@@ -117,6 +117,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 `checker.ps1` проверяет:
 - PowerShell-скрипты через `PSScriptAnalyzer`
 - ассеты локализации через `tools/Check-Localization.py`
+- `Write-Verbose`/debug-only строки считаются служебными, остаются на английском и не входят в coverage локализации
 
 Примеры:
 ```powershell
