@@ -169,3 +169,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 - 诊断需要多次启动游戏 —— 对于大型整合包，这可能需要相当长的时间
 - 遇到大规模不兼容冲突簇时，可能会出现运行不稳定或诊断过早停止的情况
 - 恢复阶段目前处于实验阶段，默认情况下是禁用的
+
+## 支持
+
+如果您喜欢这个项目，可以在 [Sponsr](https://sponsr.ru/artemonim/) 上支持作者。

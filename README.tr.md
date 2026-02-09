@@ -169,3 +169,7 @@ Tamamlandıktan sonra script bir rapor sunar: çalışma süresi, aşamalara gö
 - Teşhis, oyunun defalarca başlatılmasını gerektirir — büyük mod paketlerinde bu önemli bir zaman alabilir
 - Büyük uyumsuzluk kümelerinde kararsız çalışmalar ve teşhisin erken durması mümkündür
 - Kurtarma aşaması şu an için deneyseldir ve varsayılan olarak kapalıdır
+
+## Destek
+
+Bu projeyi beğendiyseniz, yazarı [Sponsr](https://sponsr.ru/artemonim/) üzerinden destekleyebilirsiniz.
