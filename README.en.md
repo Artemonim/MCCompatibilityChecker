@@ -52,9 +52,9 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 
 ## Quick Start
 
-1. Clone the repository:
+1. Clone the repository or download the archive from the [latest release](https://github.com/Artemonim/MCCompatibilityChecker/releases/latest):
    ```bash
-   git clone https://github.com/<your-username>/MCCompatibilityChecker.git
+   git clone https://github.com/Artemonim/MCCompatibilityChecker.git
    ```
 
 2. Copy `config.ini` to `config.local.ini` and specify the path to your mods folder:
@@ -63,14 +63,13 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
    GameModsDir=%APPDATA%\.tlauncher\legacy\Minecraft\game\mods
    ```
 
-3. Open Legacy Launcher and select the desired version.
+3. Open Minecraft Launcher.
 
-4. Run the script:
-   ```powershell
-   .\run.ps1
-   ```
+4. Type `./run.ps1` or `./run.ps1 -verbose` in the PowerShell console.
 
-5. When the script asks, hover your cursor over the "Play" button in the launcher and press Enter. Everything after that is automatic.
+5. Hover your mouse over the client launch button in the launcher.
+
+6. Press `Enter` to send the console command and let the Checker get the button coordinates.
 
 ## Configuration
 

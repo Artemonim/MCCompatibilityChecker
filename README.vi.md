@@ -52,9 +52,9 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 
 ## Bắt đầu nhanh
 
-1. Clone kho lưu trữ:
+1. Clone kho lưu trữ hoặc tải xuống tệp lưu trữ từ [phiên bản mới nhất](https://github.com/Artemonim/MCCompatibilityChecker/releases/latest):
    ```bash
-   git clone https://github.com/<tên-người-dùng-của-bạn>/MCCompatibilityChecker.git
+   git clone https://github.com/Artemonim/MCCompatibilityChecker.git
    ```
 
 2. Sao chép `config.ini` thành `config.local.ini` và chỉ định đường dẫn đến thư mục mod của bạn:
@@ -63,14 +63,13 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
    GameModsDir=%APPDATA%\.tlauncher\legacy\Minecraft\game\mods
    ```
 
-3. Mở Legacy Launcher và chọn phiên bản mong muốn.
+3. Mở Minecraft Launcher.
 
-4. Chạy script:
-   ```powershell
-   .\run.ps1
-   ```
+4. Gõ `./run.ps1` hoặc `./run.ps1 -verbose` vào bảng điều khiển PowerShell.
 
-5. Khi script yêu cầu — hãy di chuột lên nút "Chơi" (Play) trong launcher và nhấn Enter. Mọi việc sau đó sẽ hoàn toàn tự động.
+5. Di chuột lên nút khởi chạy máy khách trong launcher.
+
+6. Nhấn `Enter` để gửi lệnh bảng điều khiển và để Checker lấy tọa độ nút.
 
 ## Cấu hình
 

@@ -52,9 +52,9 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 
 ## Memulai Cepat
 
-1. Clone repositori:
+1. Clone repositori atau unduh arsip dari [rilis terbaru](https://github.com/Artemonim/MCCompatibilityChecker/releases/latest):
    ```bash
-   git clone https://github.com/<username-anda>/MCCompatibilityChecker.git
+   git clone https://github.com/Artemonim/MCCompatibilityChecker.git
    ```
 
 2. Salin `config.ini` ke `config.local.ini` dan tentukan jalur ke folder mod Anda:
@@ -63,14 +63,13 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
    GameModsDir=%APPDATA%\.tlauncher\legacy\Minecraft\game\mods
    ```
 
-3. Buka Legacy Launcher dan pilih versi yang diinginkan.
+3. Buka Minecraft Launcher.
 
-4. Jalankan script:
-   ```powershell
-   .\run.ps1
-   ```
+4. Ketik `./run.ps1` atau `./run.ps1 -verbose` ke dalam konsol PowerShell.
 
-5. Saat script meminta — arahkan kursor ke tombol "Main" (Play) di launcher dan tekan Enter. Setelah itu semuanya berjalan otomatis.
+5. Arahkan mouse ke tombol peluncuran klien di launcher.
+
+6. Tekan `Enter` untuk mengirim perintah konsol dan biarkan Checker mendapatkan koordinat tombol.
 
 ## Konfigurasi
 

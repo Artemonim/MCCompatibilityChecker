@@ -52,9 +52,9 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 
 ## Hızlı Başlangıç
 
-1. Depoyu klonlayın:
+1. Depoyu klonlayın veya [en son sürümden](https://github.com/Artemonim/MCCompatibilityChecker/releases/latest) arşivi indirin:
    ```bash
-   git clone https://github.com/<kullanici-adiniz>/MCCompatibilityChecker.git
+   git clone https://github.com/Artemonim/MCCompatibilityChecker.git
    ```
 
 2. `config.ini` dosyasını `config.local.ini` olarak kopyalayın ve mod klasörünüzün yolunu belirtin:
@@ -63,14 +63,13 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
    GameModsDir=%APPDATA%\.tlauncher\legacy\Minecraft\game\mods
    ```
 
-3. Legacy Launcher'ı açın ve istediğiniz sürümü seçin.
+3. Minecraft Launcher'ı açın.
 
-4. Scripti çalıştırın:
-   ```powershell
-   .\run.ps1
-   ```
+4. PowerShell konsolu'na `./run.ps1` veya `./run.ps1 -verbose` yazın.
 
-5. Script istediğinde — imleci başlatıcıdaki "Oyna" (Play) düğmesinin üzerine getirin ve Enter'a basın. Bundan sonrası otomatiktir.
+5. Fareyi başlatıcıdaki istemci başlatma düğmesinin üzerine getirin.
+
+6. Konsol komutunu göndermek ve Checker'ın düğme koordinatlarını almasına izin vermek için `Enter` tuşuna basın.
 
 ## Yapılandırma
 

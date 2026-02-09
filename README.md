@@ -52,9 +52,9 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 
 ## Быстрый старт
 
-1. Клонируйте репозиторий:
+1. Клонируйте репозиторий или скачайте архив из [последнего релиза](https://github.com/Artemonim/MCCompatibilityChecker/releases/latest):
    ```
-   git clone https://github.com/<your-username>/MCCompatibilityChecker.git
+   git clone https://github.com/Artemonim/MCCompatibilityChecker.git
    ```
 
 2. Скопируйте `config.ini` в `config.local.ini` и укажите путь к папке с модами:
@@ -63,14 +63,13 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
    GameModsDir=%APPDATA%\.tlauncher\legacy\Minecraft\game\mods
    ```
 
-3. Откройте Legacy Launcher и выберите нужную версию.
+3. Откройте Minecraft Launcher.
 
-4. Запустите скрипт:
-   ```powershell
-   .\run.ps1
-   ```
+4. Напишите `./run.ps1` или `./run.ps1 -verbose` в PowerShell-консоль.
 
-5. Когда скрипт попросит — наведите курсор на кнопку «Играть» в лаунчере и нажмите Enter. Дальше всё автоматически.
+5. Наведите мышку на кнопку запуска клиента в лаунчере.
+
+6. Нажмите `Enter` чтобы отправить консольную команду и Чекер получил бы координаты кнопки.
 
 ## Конфигурация
 

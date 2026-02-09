@@ -52,9 +52,9 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 
 ## 快速开始
 
-1. 克隆仓库：
+1. 克隆仓库或从[最新版本](https://github.com/Artemonim/MCCompatibilityChecker/releases/latest)下载压缩包：
    ```bash
-   git clone https://github.com/<你的用户名>/MCCompatibilityChecker.git
+   git clone https://github.com/Artemonim/MCCompatibilityChecker.git
    ```
 
 2. 将 `config.ini` 复制为 `config.local.ini` 并指定模组文件夹路径：
@@ -63,14 +63,13 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
    GameModsDir=%APPDATA%\.tlauncher\legacy\Minecraft\game\mods
    ```
 
-3. 打开 Legacy Launcher 并选择所需版本。
+3. 打开 Minecraft Launcher。
 
-4. 运行脚本：
-   ```powershell
-   .\run.ps1
-   ```
+4. 在 PowerShell 控制台中键入 `./run.ps1` 或 `./run.ps1 -verbose`。
 
-5. 当脚本提示时 —— 将鼠标悬停在启动器的“开始游戏”(Play) 按钮上并按回车键。之后的一切都是自动的。
+5. 将鼠标悬停在启动器中的客户端启动按钮上。
+
+6. 按 Enter 发送控制台命令，让 Checker 获取按钮坐标。
 
 ## 配置
 
