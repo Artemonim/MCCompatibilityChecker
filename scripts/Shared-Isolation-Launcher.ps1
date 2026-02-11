@@ -679,7 +679,10 @@ function Wait-ForOutcome {
   }
 
   $launchTriggered = $gameStarted -or $launcherClosed -or $logUpdated
-  if ($RequireGameStartForTimeout -and (-not $gameStarted)) {
+  $launchEvidenceForTimeout = $gameStarted -or $logUpdated
+  # * Keep NoLaunch strict to "no launch evidence at all", but do not use launcher closure alone as success.
+  # * Launcher close can be a manual cancel, while log activity is a safer fallback when game process heuristics miss.
+  if ($RequireGameStartForTimeout -and (-not $gameStarted) -and (-not $launchEvidenceForTimeout)) {
     return [pscustomobject]@{
       Type = "NoLaunch"
       Window = $null

@@ -199,6 +199,17 @@ while ($true) {
     $preLaunchIgnoredOutcomeIds = @(Invoke-PreLaunchOutcomeDialogCleanup -ProcessIds $launcherProcessIds)
   }
 
+  # * Capture pre-existing crash/fabric windows BEFORE clicking Play.
+  # * Keep both launcher-scoped and global handles to avoid treating stale dialogs as a new outcome.
+  $preExistingOutcomeHandleSet = [System.Collections.Generic.HashSet[long]]::new()
+  $preExistingOutcomeHandlesScoped = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns) -ProcessIds $launcherProcessIds)
+  $preExistingOutcomeHandlesGlobal = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns))
+  foreach ($id in @($preExistingOutcomeHandlesScoped + $preExistingOutcomeHandlesGlobal)) {
+    if ($null -eq $id -or [long]$id -eq 0) { continue }
+    $null = $preExistingOutcomeHandleSet.Add([long]$id)
+  }
+  $preExistingOutcomeHandles = @($preExistingOutcomeHandleSet | Sort-Object -Unique)
+
   Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
     -ButtonNames $PlayButtonNames `
     -ClickOffsetX $PlayClickOffsetX `
@@ -214,7 +225,6 @@ while ($true) {
   } else {
     $lastCrashDialogHandleId = 0
   }
-  $preExistingOutcomeHandles = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns) -ProcessIds $launcherProcessIds)
   $ignoreHandleSet = [System.Collections.Generic.HashSet[long]]::new()
   foreach ($id in @($ignoreCrashIds + $preLaunchIgnoredOutcomeIds + $preExistingOutcomeHandles)) {
     if ($null -eq $id -or [long]$id -eq 0) { continue }
