@@ -271,6 +271,18 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$HashCacheHashRetryDelayMs = 200,
 
+  # * If true, persists launch-config dedup cache across runs.
+  [Parameter(Mandatory = $false)]
+  [bool]$UsePersistentLaunchConfigCache = $true,
+
+  # * Persistent launch-config cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$SessionLaunchConfigCacheFileName = "MCCC.launch-config-cache.json",
+
+  # * Max number of launch-config entries to keep in the persistent cache.
+  [Parameter(Mandatory = $false)]
+  [int]$SessionLaunchConfigCacheMaxEntries = 5000,
+
   # * If set, disables launch-config dedup cache in Layer-Mods.ps1 / Isolate-Incompatible-Mod.ps1.
   [Parameter(Mandatory = $false)]
   [switch]$NoCache,
@@ -436,6 +448,13 @@ $profileTypeMap = @{
   LauncherWindowTimeoutSeconds = "int"
   OutcomeTimeoutSeconds = "int"
   PollIntervalSeconds = "int"
+  UseHashCache = "bool"
+  HashCacheFileName = "string"
+  HashCacheHashRetryCount = "int"
+  HashCacheHashRetryDelayMs = "int"
+  UsePersistentLaunchConfigCache = "bool"
+  SessionLaunchConfigCacheFileName = "string"
+  SessionLaunchConfigCacheMaxEntries = "int"
   SuccessGraceSeconds = "int"
   GameProcessNames = "string[]"
 }

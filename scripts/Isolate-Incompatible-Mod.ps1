@@ -452,6 +452,18 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$HashCacheHashRetryDelayMs = 200,
 
+  # * If true, persists launch-config dedup cache across runs.
+  [Parameter(Mandatory = $false)]
+  [bool]$UsePersistentLaunchConfigCache = $true,
+
+  # * Persistent launch-config cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$SessionLaunchConfigCacheFileName = "MCCC.launch-config-cache.json",
+
+  # * Max number of launch-config entries to keep in the persistent cache.
+  [Parameter(Mandatory = $false)]
+  [int]$SessionLaunchConfigCacheMaxEntries = 5000,
+
   # * If set, disables the session launch-config cache and forces repeated checks.
   [Parameter(Mandatory = $false)]
   [switch]$NoCache,
@@ -673,6 +685,11 @@ if ($useStorage -and (-not (Test-Path -LiteralPath $StorageModsDir))) {
 
 $script:EnableSessionLaunchConfigCache = (-not $NoCache)
 $script:sessionSuccessfulLaunchConfigCache = @{}
+$script:UsePersistentLaunchConfigCache = ([bool]$UsePersistentLaunchConfigCache) -and $script:EnableSessionLaunchConfigCache -and (-not $DryRun)
+$script:SessionLaunchConfigCacheFileName = if (-not [string]::IsNullOrWhiteSpace($SessionLaunchConfigCacheFileName)) { [string]$SessionLaunchConfigCacheFileName } else { "MCCC.launch-config-cache.json" }
+$script:SessionLaunchConfigCachePath = Join-Path -Path $GameModsDir -ChildPath $script:SessionLaunchConfigCacheFileName
+$script:SessionLaunchConfigCacheMaxEntries = if ($SessionLaunchConfigCacheMaxEntries -gt 0) { [int]$SessionLaunchConfigCacheMaxEntries } else { 5000 }
+$script:sessionSuccessfulLaunchConfigCacheInitialized = $false
 if ($script:EnableSessionLaunchConfigCache) {
   Write-Host "Session launch-config cache: enabled." -ForegroundColor Gray
 } else {

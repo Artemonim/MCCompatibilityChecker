@@ -125,6 +125,21 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$PollIntervalSeconds = 2,
 
+  # * If true, uses MCCC.json in GameModsDir to prioritize unknown candidates.
+  [Parameter(Mandatory = $false)]
+  [bool]$UseHashCache = $true,
+
+  # * Cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$HashCacheFileName = "MCCC.json",
+
+  # * File hash retry settings (handles transient locks).
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryCount = 3,
+
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryDelayMs = 200,
+
   [Parameter(Mandatory = $false)]
   [ValidateSet("Tool", "File", "Internal")]
   [string]$DependencyMapSource = "Tool",
@@ -196,6 +211,9 @@ if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy hel
 $sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
 if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
 . $sharedStageResultPath
+$sharedHashCachePath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-HashCache.ps1"
+if (-not (Test-Path -LiteralPath $sharedHashCachePath)) { throw ("Shared hash cache helpers not found: {0}" -f $sharedHashCachePath) }
+. $sharedHashCachePath
 $runtimeConfig = Initialize-McccRuntimeConfig `
   -StartDir $PSScriptRoot `
   -BoundParameters $PSBoundParameters `
@@ -835,6 +853,49 @@ $mixinConflicts = New-Object System.Collections.Generic.List[pscustomobject]
 $resolved = $false
 $candidateTestStatusByJar = @{}
 
+$script:mixinHashCacheEnabled = $false
+$script:mixinHashCache = $null
+$script:mixinHashKnownGoodByJar = @{}
+if ((-not $DryRun) -and $UseHashCache) {
+  $mixinCachePath = Get-McccHashCachePath -GameModsDir $GameModsDir -FileName $HashCacheFileName
+  $script:mixinHashCache = Read-McccHashCache -Path $mixinCachePath
+  if ($null -ne $script:mixinHashCache -and $script:mixinHashCache.ContainsKey("passed") -and ($script:mixinHashCache["passed"] -is [hashtable])) {
+    $script:mixinHashCacheEnabled = ($script:mixinHashCache["passed"].Count -gt 0)
+  }
+}
+
+function Test-MixinCandidateKnownGoodByHash {
+  [OutputType([bool])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarName
+  )
+
+  if (-not $script:mixinHashCacheEnabled) { return $false }
+  if ([string]::IsNullOrWhiteSpace($JarName)) { return $false }
+
+  $key = $JarName.Trim().ToLowerInvariant()
+  if ($script:mixinHashKnownGoodByJar.ContainsKey($key)) {
+    return [bool]$script:mixinHashKnownGoodByJar[$key]
+  }
+
+  $jarPath = Join-Path -Path $GameModsDir -ChildPath $JarName
+  if (-not (Test-Path -LiteralPath $jarPath)) {
+    $script:mixinHashKnownGoodByJar[$key] = $false
+    return $false
+  }
+
+  $hash = Get-Sha256LowerHex -Path $jarPath -Retries $HashCacheHashRetryCount -DelayMs $HashCacheHashRetryDelayMs
+  if ([string]::IsNullOrWhiteSpace($hash)) {
+    $script:mixinHashKnownGoodByJar[$key] = $false
+    return $false
+  }
+
+  $isKnownGood = Test-McccHashPassed -Cache $script:mixinHashCache -Sha256LowerHex $hash
+  $script:mixinHashKnownGoodByJar[$key] = [bool]$isKnownGood
+  return [bool]$isKnownGood
+}
+
 foreach ($mxErr in $mixinErrors) {
   # * Resolve source mod JAR.
   $sourceJar = Resolve-MixinCandidateJarName `
@@ -880,16 +941,34 @@ foreach ($mxErr in $mixinErrors) {
   if ($null -ne $sourceJar) { Write-Host ("    Source JAR: {0}" -f $sourceJar) -ForegroundColor Gray }
   if ($null -ne $targetJar) { Write-Host ("    Target JAR: {0} (mod: {1})" -f $targetJar, $targetModId) -ForegroundColor Gray }
 
-  # * Try candidates: source first, then target.
-  $candidates = @()
-  if ($null -ne $sourceJar) { $candidates += $sourceJar }
+  # * Try candidates with priority: unknown-by-hash first, then known-good-by-hash.
+  $candidateObjects = New-Object System.Collections.Generic.List[object]
+  if ($null -ne $sourceJar) {
+    $candidateObjects.Add([pscustomobject]@{
+        JarName = $sourceJar
+        BaseOrder = 0
+      })
+  }
   $allowTargetCandidate = ($null -ne $targetJar -and $targetJar -ne $sourceJar)
   if ($allowTargetCandidate -and $mxErr.ErrorKind -eq "apply_failed") {
     if ($isMinecraftTargetClass -or $targetModId -in @("minecraft", "java", "fabricloader")) {
       $allowTargetCandidate = $false
     }
   }
-  if ($allowTargetCandidate) { $candidates += $targetJar }
+  if ($allowTargetCandidate) {
+    $candidateObjects.Add([pscustomobject]@{
+        JarName = $targetJar
+        BaseOrder = 1
+      })
+  }
+
+  $candidates = @(
+    $candidateObjects |
+      Sort-Object -Property `
+        @{ Expression = { if (Test-MixinCandidateKnownGoodByHash -JarName ([string]$_.JarName) ) { 1 } else { 0 } }; Ascending = $true }, `
+        @{ Expression = { [int]$_.BaseOrder }; Ascending = $true } |
+      ForEach-Object { [string]$_.JarName }
+  )
 
   foreach ($candJar in $candidates) {
     $candidateKey = $candJar.ToLowerInvariant()
