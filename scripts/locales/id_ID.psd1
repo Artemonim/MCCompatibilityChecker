@@ -202,18 +202,11 @@
     "`n[+] Matches found: {0}" = "`n[+] Kecocokan ditemukan: {0}"
     "`n[-] No matches found." = "`n[-] Tidak ada kecocokan ditemukan."
     "      reason: {0}" = "      alasan: {0}"
-    "    Closing stray crash dialog: {0}" = "    Menutup dialog crash yang tersesat: {0}"
-    "    Confirmed: removing {0} fixes the Mixin crash." = "    Terkonfirmasi: menghapus {0} memperbaiki crash Mixin."
     "    Confirming stability ({0}s)..." = "    Mengonfirmasi stabilitas ({0} detik)..."
-    "    DRYRUN: would remove and test." = "    DRYRUN: akan menghapus dan menguji."
-    "    Error during Mixin test: {0}. Rolling back." = "    Kesalahan saat pengujian Mixin: {0}. Mengembalikan."
     "    Outcome: {0}" = "    Hasil: {0}"
     "    Skipping {0}: not found in game mods." = "    Melewati {0}: tidak ditemukan dalam mod game."
-    "    Skipping {0}: {1}." = "    Melewati {0}: {1}."
     "    Source JAR: {0}" = "    JAR sumber: {0}"
     "    Target JAR: {0} (mod: {1})" = "    JAR target: {0} (mod: {1})"
-    "    Testing removal of: {0}" = "    Menguji penghapusan: {0}"
-    "    {0} did not fix the crash. Restoring." = "    {0} tidak memperbaiki crash. Memulihkan."
     "  + {0}" = "  + {0}"
     "  - {0}" = "  - {0}"
     "  - {0} [{1}] tier={2}, dependents={3}; {4}" = "  - {0} [{1}] tingkat={2}, dependen={3}; {4}"
@@ -514,6 +507,18 @@
     "{0} baseline outcome: {1}" = "{0} — hasil baseline: {1}"
     "{0} baseline signature is empty. Error change detection may be limited." = "{0} — tanda tangan baseline kosong. Deteksi perubahan kesalahan mungkin terbatas."
 
+    "    Closing stray crash dialog before probe: {0}" = "    Closing stray crash dialog before probe: {0}"
+    "    Outcome ({0}): {1}" = "    Outcome ({0}): {1}"
+    "Mixin analysis: no candidate jars resolved from Mixin errors." = "Mixin analysis: no candidate jars resolved from Mixin errors."
+    "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." = "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back."
+    "Mixin analysis: no candidate jars are available for staged probing." = "Mixin analysis: no candidate jars are available for staged probing."
+    "Batch probe: disabled all {0} resolved Mixin candidate mod(s)." = "Batch probe: disabled all {0} resolved Mixin candidate mod(s)."
+    "Batch probe failed after removing all Mixin candidates. Handing off to next stage." = "Batch probe failed after removing all Mixin candidates. Handing off to next stage."
+    "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back." = "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back."
+    "    Layering probe: add back {0}" = "    Layering probe: add back {0}"
+    "    {0} does not reintroduce the crash." = "    {0} does not reintroduce the crash."
+    "    {0} reintroduces the crash. Moving to Legacy." = "    {0} reintroduces the crash. Moving to Legacy."
+    "Warning: failed to locate candidate for legacy move: {0}" = "Warning: failed to locate candidate for legacy move: {0}"
   }
   Substrings = @{
     # =========================================================================
@@ -538,4 +543,7 @@
     )
   }
 }
+
+
+
 

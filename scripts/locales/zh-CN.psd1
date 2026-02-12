@@ -202,18 +202,11 @@
     "`n[+] Matches found: {0}" = "`n[+] 找到匹配项：{0}"
     "`n[-] No matches found." = "`n[-] 未找到匹配项。"
     "      reason: {0}" = "      原因: {0}"
-    "    Closing stray crash dialog: {0}" = "    正在关闭意外的崩溃对话框：{0}"
-    "    Confirmed: removing {0} fixes the Mixin crash." = "    已确认：移除 {0} 解决了 Mixin 崩溃。"
     "    Confirming stability ({0}s)..." = "    正在确认稳定性 ({0}秒)..."
-    "    DRYRUN: would remove and test." = "    空运行 (DRYRUN)：本应移除并测试。"
-    "    Error during Mixin test: {0}. Rolling back." = "    Mixin 测试期间出错：{0}。正在回滚。"
     "    Outcome: {0}" = "    结果：{0}"
     "    Skipping {0}: not found in game mods." = "    跳过 {0}：未在游戏模组中找到。"
-    "    Skipping {0}: {1}." = "    跳过 {0}：{1}。"
     "    Source JAR: {0}" = "    源 JAR：{0}"
     "    Target JAR: {0} (mod: {1})" = "    目标 JAR：{0} (模组：{1})"
-    "    Testing removal of: {0}" = "    正在测试移除：{0}"
-    "    {0} did not fix the crash. Restoring." = "    {0} 未能解决崩溃。正在恢复。"
     "  + {0}" = "  + {0}"
     "  - {0}" = "  - {0}"
     "  - {0} [{1}] tier={2}, dependents={3}; {4}" = "  - {0} [{1}] 阶层={2}, 依赖项={3}; {4}"
@@ -514,6 +507,18 @@
     "{0} baseline outcome: {1}" = "{0} 基准结果：{1}"
     "{0} baseline signature is empty. Error change detection may be limited." = "{0} 基准特征码为空。错误变化检测可能受限。"
 
+    "    Closing stray crash dialog before probe: {0}" = "    Closing stray crash dialog before probe: {0}"
+    "    Outcome ({0}): {1}" = "    Outcome ({0}): {1}"
+    "Mixin analysis: no candidate jars resolved from Mixin errors." = "Mixin analysis: no candidate jars resolved from Mixin errors."
+    "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." = "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back."
+    "Mixin analysis: no candidate jars are available for staged probing." = "Mixin analysis: no candidate jars are available for staged probing."
+    "Batch probe: disabled all {0} resolved Mixin candidate mod(s)." = "Batch probe: disabled all {0} resolved Mixin candidate mod(s)."
+    "Batch probe failed after removing all Mixin candidates. Handing off to next stage." = "Batch probe failed after removing all Mixin candidates. Handing off to next stage."
+    "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back." = "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back."
+    "    Layering probe: add back {0}" = "    Layering probe: add back {0}"
+    "    {0} does not reintroduce the crash." = "    {0} does not reintroduce the crash."
+    "    {0} reintroduces the crash. Moving to Legacy." = "    {0} reintroduces the crash. Moving to Legacy."
+    "Warning: failed to locate candidate for legacy move: {0}" = "Warning: failed to locate candidate for legacy move: {0}"
   }
   Substrings = @{
     # =========================================================================
@@ -539,4 +544,7 @@
     )
   }
 }
+
+
+
 

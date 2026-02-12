@@ -202,18 +202,11 @@
     "`n[+] Matches found: {0}" = "`n[+] Найдено совпадений: {0}"
     "`n[-] No matches found." = "`n[-] Совпадений не найдено."
     "      reason: {0}" = "      причина: {0}"
-    "    Closing stray crash dialog: {0}" = "    Закрываю случайный диалог краша: {0}"
-    "    Confirmed: removing {0} fixes the Mixin crash." = "    Подтверждено: удаление {0} исправляет Mixin-краш."
     "    Confirming stability ({0}s)..." = "    Подтверждаю стабильность ({0}с)..."
-    "    DRYRUN: would remove and test." = "    DRYRUN: удалил бы и протестировал."
-    "    Error during Mixin test: {0}. Rolling back." = "    Ошибка при тестировании Mixin: {0}. Откатываю."
     "    Outcome: {0}" = "    Результат: {0}"
     "    Skipping {0}: not found in game mods." = "    Пропускаю {0}: не найден среди игровых модов."
-    "    Skipping {0}: {1}." = "    Пропускаю {0}: {1}."
     "    Source JAR: {0}" = "    Исходный JAR: {0}"
     "    Target JAR: {0} (mod: {1})" = "    Целевой JAR: {0} (мод: {1})"
-    "    Testing removal of: {0}" = "    Тестирую удаление: {0}"
-    "    {0} did not fix the crash. Restoring." = "    {0} не исправил краш. Восстанавливаю."
     "  + {0}" = "  + {0}"
     "  - {0}" = "  - {0}"
     "  - {0} [{1}] tier={2}, dependents={3}; {4}" = "  - {0} [{1}] уровень={2}, зависимых={3}; {4}"
@@ -514,6 +507,18 @@
     "{0} baseline outcome: {1}" = "{0} — результат базового запуска: {1}"
     "{0} baseline signature is empty. Error change detection may be limited." = "{0} — базовая сигнатура пуста. Обнаружение изменений ошибок может быть ограничено."
 
+    "    Closing stray crash dialog before probe: {0}" = "    Closing stray crash dialog before probe: {0}"
+    "    Outcome ({0}): {1}" = "    Outcome ({0}): {1}"
+    "Mixin analysis: no candidate jars resolved from Mixin errors." = "Mixin analysis: no candidate jars resolved from Mixin errors."
+    "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." = "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back."
+    "Mixin analysis: no candidate jars are available for staged probing." = "Mixin analysis: no candidate jars are available for staged probing."
+    "Batch probe: disabled all {0} resolved Mixin candidate mod(s)." = "Batch probe: disabled all {0} resolved Mixin candidate mod(s)."
+    "Batch probe failed after removing all Mixin candidates. Handing off to next stage." = "Batch probe failed after removing all Mixin candidates. Handing off to next stage."
+    "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back." = "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back."
+    "    Layering probe: add back {0}" = "    Layering probe: add back {0}"
+    "    {0} does not reintroduce the crash." = "    {0} does not reintroduce the crash."
+    "    {0} reintroduces the crash. Moving to Legacy." = "    {0} reintroduces the crash. Moving to Legacy."
+    "Warning: failed to locate candidate for legacy move: {0}" = "Warning: failed to locate candidate for legacy move: {0}"
   }
   Substrings = @{
     # =========================================================================
@@ -537,4 +542,7 @@
     )
   }
 }
+
+
+
 

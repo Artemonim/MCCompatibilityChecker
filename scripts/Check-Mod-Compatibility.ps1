@@ -324,13 +324,52 @@ function Get-ModIdSetFromLine {
 
   if ([string]::IsNullOrWhiteSpace($Line)) { return @() }
   $result = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  $idMatches = [regex]::Matches($Line, "\((?<id>[a-z0-9_\-\.]+)\)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  foreach ($m in $idMatches) {
-    if (-not $m.Success) { continue }
-    $id = [string]$m.Groups["id"].Value
-    if ([string]::IsNullOrWhiteSpace($id)) { continue }
-    $null = $result.Add($id.ToLowerInvariant())
+  $addCandidate = {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string]$Candidate
+    )
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return }
+    $normalized = $Candidate.Trim().ToLowerInvariant()
+    if ($normalized -notmatch "[a-z]") { return }
+    $null = $result.Add($normalized)
   }
+
+  $parenMatches = [regex]::Matches($Line, "\((?<id>[a-z0-9_\-\.]+)\)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  foreach ($m in @($parenMatches)) {
+    if (-not $m.Success) { continue }
+    & $addCandidate ([string]$m.Groups["id"].Value)
+  }
+
+  $fixLinePatterns = @(
+    "(?i)\bremove\s+\[(?<id>[a-z0-9_\-\.]+)\b",
+    "(?i)\[\[(?<id>[a-z0-9_\-\.]+)\b",
+    "(?i)\badd:(?<id>[a-z0-9_\-\.]+)\b"
+  )
+  foreach ($pattern in $fixLinePatterns) {
+    $patternMatches = [regex]::Matches($Line, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    foreach ($m in @($patternMatches)) {
+      if (-not $m.Success) { continue }
+      & $addCandidate ([string]$m.Groups["id"].Value)
+    }
+  }
+
+  foreach ($reasonId in @(Get-FabricReasonCandidateModIdList -Line $Line)) {
+    & $addCandidate ([string]$reasonId)
+  }
+
+  $reasonTargetPatterns = @(
+    "(?i)\bbreaks\s+(?<id>[a-z0-9_\-\.]+)\b",
+    "(?i)\bdepends\s+(?<id>[a-z0-9_\-\.]+)\b"
+  )
+  foreach ($pattern in $reasonTargetPatterns) {
+    $targetMatches = [regex]::Matches($Line, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    foreach ($m in @($targetMatches)) {
+      if (-not $m.Success) { continue }
+      & $addCandidate ([string]$m.Groups["id"].Value)
+    }
+  }
+
   if ($result.Count -eq 0) { return @() }
   return @($result)
 }
@@ -345,10 +384,12 @@ function Test-HasFabricDialogSignal {
     $text = [string]$line
     if ([string]::IsNullOrWhiteSpace($text)) { continue }
     if (
-      $text -match "(?i)^\s*Some\s+of\s+your\s+mods\s+are\s+incompatible\b" -or
-      $text -match "(?i)^\s*A\s+potential\s+solution\s+has\s+been\s+determined\b" -or
+      $text -match "(?i)\bSome\s+of\s+your\s+mods\s+are\s+incompatible\b" -or
+      $text -match "(?i)\bA\s+potential\s+solution\s+has\s+been\s+determined\b" -or
       $text -match "(?i)^\s*More\s+details:\s*$" -or
-      $text -match "(?i)^\s*(?:[-*•]\s+)?(?:Remove|Replace)\s+mod\b"
+      $text -match "(?i)^\s*(?:[-*•]\s+)?(?:Remove|Replace)\s+mod\b" -or
+      $text -match "(?i)\bFix:\s+add\s+\[" -or
+      $text -match "(?i)\b(?:Immediate\s+reason|Reason):\s+\["
     ) {
       return $true
     }
