@@ -66,9 +66,11 @@ function Test-JarNameMatchesAnyId {
         "fabric"    = $true
         "forge"     = $true
         "loader"    = $true
+        "mixin"     = $true
         "mc"        = $true
         "minecraft" = $true
         "mod"       = $true
+        "modloader" = $true
         "mods"      = $true
         "neoforge"  = $true
         "quilt"     = $true

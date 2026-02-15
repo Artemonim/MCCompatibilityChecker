@@ -83,7 +83,7 @@ As configurações são definidas em `config.ini` (padrão) e `config.local.ini`
 | `LauncherExePath` | Caminho para o executável do launcher (vazio para conectar a um já iniciado) |
 | `EnableMixinAnalysis` | Ativar etapa de análise de Mixin (padrão: `true`) |
 | `EnableLayering` | Ativar camadas e isolamento subtrativo (padrão: `true`) |
-| `EnableRecovery` | Ativar recuperação de culpados fantasmas (padrão: `false`) |
+| `EnableRecovery` | Ativar recuperação de culpados fantasmas (padrão: `true`) |
 | `Language` | Idioma das mensagens do console (`[Localization].Language`). Se vazio: automático pelo idioma do SO, padrão `en` |
 
 Locais disponíveis no momento: `en`, `ru`.

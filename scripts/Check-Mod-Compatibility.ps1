@@ -374,6 +374,42 @@ function Get-ModIdSetFromLine {
   return @($result)
 }
 
+function Get-ModIdLookupVariantList {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModId
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModId)) { return @() }
+  $id = $ModId.Trim().ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($id)) { return @() }
+
+  $variants = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $null = $variants.Add($id)
+  $null = $variants.Add($id.Replace("-", "_"))
+  $null = $variants.Add($id.Replace("_", "-"))
+
+  if ($id -match '[_\-]mixin$') {
+    $base = [regex]::Replace($id, '[_\-]mixin$', '')
+    if (-not [string]::IsNullOrWhiteSpace($base)) {
+      $null = $variants.Add($base)
+      $null = $variants.Add(("{0}_modloader" -f $base))
+      $null = $variants.Add(("{0}-modloader" -f $base))
+    }
+  }
+
+  if ($id -match '[_\-]modloader$') {
+    $base = [regex]::Replace($id, '[_\-]modloader$', '')
+    if (-not [string]::IsNullOrWhiteSpace($base)) {
+      $null = $variants.Add($base)
+      $null = $variants.Add(("{0}_mixin" -f $base))
+      $null = $variants.Add(("{0}-mixin" -f $base))
+    }
+  }
+
+  return @($variants | Sort-Object)
+}
+
 function Test-HasFabricDialogSignal {
   param(
     [Parameter(Mandatory = $true)]
@@ -402,7 +438,11 @@ function Build-ModIdToJarMap {
     [Parameter(Mandatory = $true)]
     [string]$DirPath,
     [Parameter(Mandatory = $false)]
-    [string[]]$ExcludeDirNames = @()
+    [string[]]$ExcludeDirNames = @(),
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeNestedJarIds = $false,
+    [Parameter(Mandatory = $false)]
+    [int]$NestedJarScanDepth = 2
   )
 
   $excludeSet = @{}
@@ -412,7 +452,7 @@ function Build-ModIdToJarMap {
   $files = Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction Stop |
     Sort-Object -Property LastWriteTime -Descending
   foreach ($f in $files) {
-    $ids = Get-FabricModIdsFromJar -JarPath $f.FullName
+    $ids = Get-FabricModIdsFromJar -JarPath $f.FullName -IncludeNestedJarIds $IncludeNestedJarIds -MaxNestedJarDepth $NestedJarScanDepth
     if (-not $ids -or $ids.Count -eq 0) { continue }
     foreach ($id in $ids) {
       if (-not $map.ContainsKey($id)) { $map[$id] = New-Object System.Collections.Generic.List[string] }
@@ -420,6 +460,287 @@ function Build-ModIdToJarMap {
     }
   }
   return $map
+}
+
+function Resolve-ModJarPathsByNestedFallback {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$DirPath,
+    [Parameter(Mandatory = $true)]
+    [string]$ModId,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$ResolvedByModIdCache,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$JarIdsByPathCache,
+    [Parameter(Mandatory = $false)]
+    [int]$MaxNestedJarDepth = 1
+  )
+
+  if ([string]::IsNullOrWhiteSpace($DirPath) -or -not (Test-Path -LiteralPath $DirPath)) { return @() }
+  if ([string]::IsNullOrWhiteSpace($ModId)) { return @() }
+  if ($MaxNestedJarDepth -lt 0) { $MaxNestedJarDepth = 0 }
+
+  $modKey = $ModId.ToLowerInvariant()
+  if ($ResolvedByModIdCache.ContainsKey($modKey)) {
+    return @($ResolvedByModIdCache[$modKey])
+  }
+
+  $result = New-Object System.Collections.Generic.List[string]
+  $jarFiles = @(Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction SilentlyContinue |
+      Sort-Object -Property @{ Expression = { $_.LastWriteTime }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true })
+  foreach ($jarFile in @($jarFiles)) {
+    if ($null -eq $jarFile) { continue }
+    $jarPath = [string]$jarFile.FullName
+    if ([string]::IsNullOrWhiteSpace($jarPath)) { continue }
+
+    $jarIds = @()
+    $nestedJarEntryPaths = @()
+    if ($JarIdsByPathCache.ContainsKey($jarPath)) {
+      $cached = $JarIdsByPathCache[$jarPath]
+      if ($cached -is [pscustomobject]) {
+        if ($cached.PSObject.Properties.Match("Ids").Count -gt 0) {
+          $jarIds = @($cached.Ids)
+        }
+        if ($cached.PSObject.Properties.Match("NestedJarEntryPaths").Count -gt 0) {
+          $nestedJarEntryPaths = @($cached.NestedJarEntryPaths)
+        }
+      } else {
+        $jarIds = @($cached)
+      }
+    } else {
+      # * Keep fallback lightweight: read direct IDs and nested entry names only.
+      # * Parsing full nested jars here can be memory-heavy on large packs.
+      $jarIds = @(Get-FabricModIdsFromJar -JarPath $jarPath)
+      $nestedJarEntryPaths = @(Get-FabricNestedJarEntryPathsFromJar -JarPath $jarPath)
+      $JarIdsByPathCache[$jarPath] = [pscustomobject]@{
+        Ids = @($jarIds)
+        NestedJarEntryPaths = @($nestedJarEntryPaths)
+      }
+    }
+    if ((-not $jarIds -or $jarIds.Count -eq 0) -and (-not $nestedJarEntryPaths -or $nestedJarEntryPaths.Count -eq 0)) { continue }
+
+    $isMatch = $false
+    foreach ($jarId in @($jarIds)) {
+      $id = [string]$jarId
+      if ([string]::IsNullOrWhiteSpace($id)) { continue }
+      if ($id.ToLowerInvariant() -ne $modKey) { continue }
+      $isMatch = $true
+      break
+    }
+
+    if (-not $isMatch -and $nestedJarEntryPaths -and $nestedJarEntryPaths.Count -gt 0) {
+      foreach ($nestedEntryPath in @($nestedJarEntryPaths)) {
+        $nestedPath = [string]$nestedEntryPath
+        if ([string]::IsNullOrWhiteSpace($nestedPath)) { continue }
+        $nestedName = [System.IO.Path]::GetFileName($nestedPath)
+        if (Test-JarNameMatchesAnyId -JarName $nestedName -Ids @($modKey) -AllowTokenMatch $false) {
+          $isMatch = $true
+          break
+        }
+      }
+    }
+
+    if ($isMatch) {
+      $result.Add($jarPath) | Out-Null
+    }
+  }
+
+  $resolved = @($result.ToArray() | Sort-Object -Unique)
+  $ResolvedByModIdCache[$modKey] = @($resolved)
+  return @($resolved)
+}
+
+function Get-MixinConfigNameHintsFromEvidence {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$EvidenceLines = @()
+  )
+
+  if (-not $EvidenceLines -or $EvidenceLines.Count -eq 0) { return @() }
+  $hints = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $patterns = @(
+    "Mixin apply for mod\s+[a-z0-9_\-\.]+\s+failed\s+(?<ref>\S+)",
+    "@Mixin target\s+\S+\s+was not found\s+(?<ref>\S+)"
+  )
+
+  foreach ($line in @($EvidenceLines)) {
+    $text = [string]$line
+    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+    foreach ($pattern in @($patterns)) {
+      $m = [regex]::Match($text, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      if (-not $m.Success) { continue }
+      $mixinRef = [string]$m.Groups["ref"].Value
+      if ([string]::IsNullOrWhiteSpace($mixinRef)) { continue }
+
+      $mixinConfig = $mixinRef.Trim()
+      $splitIndex = $mixinConfig.IndexOf(":")
+      if ($splitIndex -ge 0) {
+        $mixinConfig = $mixinConfig.Substring(0, $splitIndex)
+      }
+      $mixinConfig = $mixinConfig.Trim().Trim([char[]]@('"', "'")).Replace("\", "/")
+      if ([string]::IsNullOrWhiteSpace($mixinConfig)) { continue }
+
+      $null = $hints.Add($mixinConfig.ToLowerInvariant())
+      $fileName = [System.IO.Path]::GetFileName($mixinConfig)
+      if (-not [string]::IsNullOrWhiteSpace($fileName)) {
+        $null = $hints.Add($fileName.ToLowerInvariant())
+      }
+      break
+    }
+  }
+
+  if ($hints.Count -eq 0) { return @() }
+  return @($hints | Sort-Object)
+}
+
+function Get-MixinConfigEntryLookupForJar {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarPath,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$JarMixinConfigEntryCache
+  )
+
+  if ($JarMixinConfigEntryCache.ContainsKey($JarPath)) {
+    return $JarMixinConfigEntryCache[$JarPath]
+  }
+
+  $entries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  if ([string]::IsNullOrWhiteSpace($JarPath) -or -not (Test-Path -LiteralPath $JarPath)) {
+    $JarMixinConfigEntryCache[$JarPath] = $entries
+    return $entries
+  }
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = $null
+  try {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+    foreach ($zipEntry in @($zip.Entries)) {
+      if ($null -eq $zipEntry) { continue }
+      $entryName = [string]$zipEntry.FullName
+      if ([string]::IsNullOrWhiteSpace($entryName)) { continue }
+      $entryKey = $entryName.Trim().Replace("\", "/").ToLowerInvariant()
+      if (-not $entryKey.EndsWith(".json", [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+      if ($entryKey -notmatch "mixin") { continue }
+      $null = $entries.Add($entryKey)
+      $fileName = [System.IO.Path]::GetFileName($entryKey)
+      if (-not [string]::IsNullOrWhiteSpace($fileName)) {
+        $null = $entries.Add($fileName.ToLowerInvariant())
+      }
+    }
+  } catch {
+    Write-Verbose ("Failed to read mixin config entries from '{0}': {1}" -f $JarPath, $_.Exception.Message)
+  } finally {
+    if ($null -ne $zip) { $zip.Dispose() }
+  }
+
+  $JarMixinConfigEntryCache[$JarPath] = $entries
+  return $entries
+}
+
+function Select-GameJarPathsByMixinEvidence {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModId,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$CandidateJarPaths = @(),
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$EvidenceLines = @(),
+    [Parameter(Mandatory = $true)]
+    [hashtable]$JarMixinConfigEntryCache
+  )
+
+  if (-not $CandidateJarPaths -or $CandidateJarPaths.Count -le 1) { return @($CandidateJarPaths) }
+  $mixinHints = @(Get-MixinConfigNameHintsFromEvidence -EvidenceLines $EvidenceLines)
+  if (-not $mixinHints -or $mixinHints.Count -eq 0) { return @($CandidateJarPaths) }
+
+  $matchedPaths = New-Object System.Collections.Generic.List[string]
+  foreach ($jarPath in @($CandidateJarPaths)) {
+    $pathValue = [string]$jarPath
+    if ([string]::IsNullOrWhiteSpace($pathValue)) { continue }
+    $entryLookup = Get-MixinConfigEntryLookupForJar -JarPath $pathValue -JarMixinConfigEntryCache $JarMixinConfigEntryCache
+    if ($null -eq $entryLookup) { continue }
+    foreach ($hint in @($mixinHints)) {
+      $hintKey = [string]$hint
+      if ([string]::IsNullOrWhiteSpace($hintKey)) { continue }
+      if (-not $entryLookup.Contains($hintKey.ToLowerInvariant())) { continue }
+      $matchedPaths.Add($pathValue) | Out-Null
+      break
+    }
+  }
+
+  if ($matchedPaths.Count -eq 0 -or $matchedPaths.Count -ge $CandidateJarPaths.Count) {
+    return @($CandidateJarPaths)
+  }
+
+  $selected = @($matchedPaths.ToArray() | Sort-Object -Unique)
+  $selectedNames = @($selected | ForEach-Object { [System.IO.Path]::GetFileName([string]$_) } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
+  if ($selectedNames.Count -gt 0) {
+    Write-Host ("Disambiguated mod '{0}' by Mixin config evidence. Selected jar(s): {1}" -f $ModId, ($selectedNames -join ", ")) -ForegroundColor Gray
+  }
+  return @($selected)
+}
+
+function Resolve-GameJarPathsFromMixinEvidence {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModId,
+    [Parameter(Mandatory = $true)]
+    [string]$ModsDir,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$EvidenceLines = @(),
+    [Parameter(Mandatory = $true)]
+    [hashtable]$JarMixinConfigEntryCache
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModsDir) -or -not (Test-Path -LiteralPath $ModsDir)) { return @() }
+  $mixinHints = @(Get-MixinConfigNameHintsFromEvidence -EvidenceLines $EvidenceLines)
+  if (-not $mixinHints -or $mixinHints.Count -eq 0) { return @() }
+
+  $matchedPaths = New-Object System.Collections.Generic.List[string]
+  $jarFiles = @(Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue |
+      Sort-Object -Property @{ Expression = { $_.LastWriteTime }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true })
+  foreach ($jarFile in @($jarFiles)) {
+    if ($null -eq $jarFile) { continue }
+    $jarPath = [string]$jarFile.FullName
+    if ([string]::IsNullOrWhiteSpace($jarPath)) { continue }
+
+    $entryLookup = Get-MixinConfigEntryLookupForJar -JarPath $jarPath -JarMixinConfigEntryCache $JarMixinConfigEntryCache
+    if ($null -eq $entryLookup) { continue }
+    foreach ($hint in @($mixinHints)) {
+      $hintKey = [string]$hint
+      if ([string]::IsNullOrWhiteSpace($hintKey)) { continue }
+      if (-not $entryLookup.Contains($hintKey.ToLowerInvariant())) { continue }
+      $matchedPaths.Add($jarPath) | Out-Null
+      break
+    }
+  }
+
+  if ($matchedPaths.Count -eq 0) { return @() }
+  $resolved = @($matchedPaths.ToArray() | Sort-Object -Unique)
+  $resolvedNames = @($resolved | ForEach-Object { [System.IO.Path]::GetFileName([string]$_) } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+  $baseId = [string]$ModId
+  if (-not [string]::IsNullOrWhiteSpace($baseId)) {
+    $baseId = $baseId.Trim().ToLowerInvariant()
+    $baseId = [regex]::Replace($baseId, '[_\-](mixin|modloader)$', '')
+    if (-not [string]::IsNullOrWhiteSpace($baseId) -and $baseId.Length -ge 3) {
+      $baseNameMatched = @($resolved | Where-Object { [System.IO.Path]::GetFileName([string]$_).ToLowerInvariant() -like ("*{0}*" -f $baseId) })
+      if ($baseNameMatched.Count -gt 0 -and $baseNameMatched.Count -lt $resolved.Count) {
+        $resolved = @($baseNameMatched | Sort-Object -Unique)
+        $resolvedNames = @($resolved | ForEach-Object { [System.IO.Path]::GetFileName([string]$_) } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+      }
+    }
+  }
+
+  if ($resolvedNames.Count -gt 0) {
+    Write-Host ("Disambiguated mod '{0}' by Mixin config evidence. Selected jar(s): {1}" -f $ModId, ($resolvedNames -join ", ")) -ForegroundColor Gray
+  }
+  return @($resolved)
 }
 
 function Get-LastWriteTimeSafe {
@@ -721,6 +1042,17 @@ foreach ($p in $storageRootJars) {
 }
 $storageIdToJars = Build-ModIdToJarMap -DirPath $StorageModsDir
 
+# * Nested fallback caches to resolve unresolved mod IDs without building a full nested map.
+$nestedFallbackMaxDepth = 1
+$nestedFallbackJarIdsByPathCache = @{}
+$nestedFallbackGamePathsByModId = @{}
+$nestedFallbackStoragePathsByModId = @{}
+$jarMixinConfigEntryCache = @{}
+
+# * Keeps track of game jar paths already handled in this run to avoid duplicate moves
+# * when multiple mod IDs resolve to the same physical jar.
+$handledGameJarPathKeySet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
 $dependencyPriorityApplied = $false
 $dependencyPrioritySourceUsed = "none"
 $dependencyPriorityMapJsonPath = ""
@@ -896,6 +1228,9 @@ $orderedModIds = @($modIdOrder | Sort-Object -Property $modIdSortProps | ForEach
 $actions = New-Object System.Collections.Generic.List[object]
 
 foreach ($modId in $orderedModIds) {
+  $modIdVariants = @(Get-ModIdLookupVariantList -ModId $modId)
+  $modIdVariantKeys = @($modIdVariants | Where-Object { -not [string]::Equals([string]$_, [string]$modId, [System.StringComparison]::OrdinalIgnoreCase) })
+
   $modPriority = $null
   if ($dependencyPriorityByModId.ContainsKey($modId)) {
     $modPriority = $dependencyPriorityByModId[$modId]
@@ -912,7 +1247,65 @@ foreach ($modId in $orderedModIds) {
   $referencedByOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencedByOtherCount").Count -gt 0) { [int]$modPriority.ReferencedByOtherCount } else { 0 }
 
   $gameJarPaths = @()
-  if ($gameIdToJars.ContainsKey($modId)) { $gameJarPaths = @($gameIdToJars[$modId]) }
+  $resolvedByDirectGameId = $false
+  if ($gameIdToJars.ContainsKey($modId)) {
+    $gameJarPaths = @($gameIdToJars[$modId])
+    if ($gameJarPaths.Count -gt 0) {
+      $resolvedByDirectGameId = $true
+    }
+  }
+  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0) -and $modIdVariantKeys.Count -gt 0) {
+    $variantGameJarPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($variantModId in @($modIdVariantKeys)) {
+      $variantKey = [string]$variantModId
+      if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
+      if (-not $gameIdToJars.ContainsKey($variantKey)) { continue }
+      foreach ($variantJarPath in @($gameIdToJars[$variantKey])) {
+        $variantPath = [string]$variantJarPath
+        if ([string]::IsNullOrWhiteSpace($variantPath)) { continue }
+        $variantGameJarPaths.Add($variantPath) | Out-Null
+      }
+    }
+    if ($variantGameJarPaths.Count -gt 0) {
+      $gameJarPaths = @($variantGameJarPaths.ToArray() | Sort-Object -Unique)
+    }
+  }
+  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0)) {
+    $gameJarPaths = @(Resolve-ModJarPathsByNestedFallback `
+        -DirPath $GameModsDir `
+        -ModId $modId `
+        -ResolvedByModIdCache $nestedFallbackGamePathsByModId `
+        -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
+        -MaxNestedJarDepth $nestedFallbackMaxDepth)
+  }
+  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0) -and $modIdVariantKeys.Count -gt 0) {
+    $variantFallbackGameJarPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($variantModId in @($modIdVariantKeys)) {
+      $variantKey = [string]$variantModId
+      if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
+      $variantResolved = @(Resolve-ModJarPathsByNestedFallback `
+          -DirPath $GameModsDir `
+          -ModId $variantKey `
+          -ResolvedByModIdCache $nestedFallbackGamePathsByModId `
+          -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
+          -MaxNestedJarDepth $nestedFallbackMaxDepth)
+      foreach ($variantJarPath in @($variantResolved)) {
+        $variantPath = [string]$variantJarPath
+        if ([string]::IsNullOrWhiteSpace($variantPath)) { continue }
+        $variantFallbackGameJarPaths.Add($variantPath) | Out-Null
+      }
+    }
+    if ($variantFallbackGameJarPaths.Count -gt 0) {
+      $gameJarPaths = @($variantFallbackGameJarPaths.ToArray() | Sort-Object -Unique)
+    }
+  }
+  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0)) {
+    $gameJarPaths = @(Resolve-GameJarPathsFromMixinEvidence `
+        -ModId $modId `
+        -ModsDir $GameModsDir `
+        -EvidenceLines @($evidenceByModId[$modId]) `
+        -JarMixinConfigEntryCache $jarMixinConfigEntryCache)
+  }
   if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
     $gameJarSortProps = @(
       @{ Expression = { Get-LastWriteTimeSafe -Path $_ }; Descending = $true }
@@ -920,8 +1313,63 @@ foreach ($modId in $orderedModIds) {
     )
     $gameJarPaths = @($gameJarPaths | Sort-Object -Property $gameJarSortProps)
   }
+  if ($resolvedByDirectGameId -and $gameJarPaths -and $gameJarPaths.Count -gt 1) {
+    # * Multiple root jars with the same mod id are handled one-by-one per attempt.
+    # * This keeps the isolation step minimal and avoids removing all duplicate versions at once.
+    $gameJarPaths = @($gameJarPaths | Select-Object -First 1)
+  }
+  if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
+    $gameJarPaths = @(Select-GameJarPathsByMixinEvidence `
+        -ModId $modId `
+        -CandidateJarPaths @($gameJarPaths) `
+        -EvidenceLines @($evidenceByModId[$modId]) `
+        -JarMixinConfigEntryCache $jarMixinConfigEntryCache)
+  }
+
+  $alreadyHandledGameJarPaths = New-Object System.Collections.Generic.List[string]
+  if ($gameJarPaths -and $gameJarPaths.Count -gt 0) {
+    $pendingGameJarPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($candidateGameJarPath in @($gameJarPaths)) {
+      $candidatePath = [string]$candidateGameJarPath
+      if ([string]::IsNullOrWhiteSpace($candidatePath)) { continue }
+      if ($handledGameJarPathKeySet.Contains($candidatePath)) {
+        $alreadyHandledGameJarPaths.Add($candidatePath) | Out-Null
+        continue
+      }
+      $pendingGameJarPaths.Add($candidatePath) | Out-Null
+    }
+    $gameJarPaths = @($pendingGameJarPaths.ToArray())
+  }
 
   if (-not $gameJarPaths -or $gameJarPaths.Count -eq 0) {
+    if ($alreadyHandledGameJarPaths.Count -gt 0) {
+      $alreadyHandledNames = @(
+        $alreadyHandledGameJarPaths |
+          ForEach-Object { [System.IO.Path]::GetFileName([string]$_) } |
+          Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+          Sort-Object -Unique
+      )
+      $alreadyHandledLabel = if ($alreadyHandledNames.Count -gt 0) { $alreadyHandledNames -join ", " } else { "<unknown>" }
+      $actions.Add([pscustomobject]@{
+          modId = $modId
+          status = "handled"
+          evidence = @($evidenceByModId[$modId])
+          game = @("already handled by previous mod action: $alreadyHandledLabel")
+          storage = @()
+          dependencyTier = $priorityTier
+          dependentMods = $priorityDependents
+          dependentModsKnown = $priorityKnown
+          priorityDecision = $priorityDecision
+          conflictScore = $conflictScore
+          evidenceCount = $evidenceCount
+          fabricSuggestionCount = $fabricSuggestionCount
+          incompatibleDetailCount = $incompatibleDetailCount
+          referencesOtherCount = $referencesOtherCount
+          referencedByOtherCount = $referencedByOtherCount
+        })
+      continue
+    }
+
     $actions.Add([pscustomobject]@{
         modId = $modId
         status = "unresolved_in_game_mods"
@@ -945,16 +1393,65 @@ foreach ($modId in $orderedModIds) {
   foreach ($gameJarPath in $gameJarPaths) {
     $gameFileName = [System.IO.Path]::GetFileName($gameJarPath)
     $storageJarPath = $null
+    $gameHandledNow = $false
     $storageKey = $gameFileName.ToLowerInvariant()
     if ($storageFileNameToPath.ContainsKey($storageKey)) {
       $storageJarPath = $storageFileNameToPath[$storageKey]
     } elseif ($storageIdToJars.ContainsKey($modId) -and $storageIdToJars[$modId].Count -gt 0) {
       $storageJarPath = $storageIdToJars[$modId][0]
+    } elseif ($modIdVariantKeys.Count -gt 0) {
+      foreach ($variantModId in @($modIdVariantKeys)) {
+        $variantKey = [string]$variantModId
+        if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
+        if (-not $storageIdToJars.ContainsKey($variantKey)) { continue }
+        if ($storageIdToJars[$variantKey].Count -le 0) { continue }
+        $storageJarPath = $storageIdToJars[$variantKey][0]
+        break
+      }
+    } else {
+      $storageFallbackJarPaths = @(Resolve-ModJarPathsByNestedFallback `
+          -DirPath $StorageModsDir `
+          -ModId $modId `
+          -ResolvedByModIdCache $nestedFallbackStoragePathsByModId `
+          -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
+          -MaxNestedJarDepth $nestedFallbackMaxDepth)
+      if ($storageFallbackJarPaths.Count -eq 0 -and $modIdVariantKeys.Count -gt 0) {
+        $variantStorageFallbackPaths = New-Object System.Collections.Generic.List[string]
+        foreach ($variantModId in @($modIdVariantKeys)) {
+          $variantKey = [string]$variantModId
+          if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
+          $variantResolved = @(Resolve-ModJarPathsByNestedFallback `
+              -DirPath $StorageModsDir `
+              -ModId $variantKey `
+              -ResolvedByModIdCache $nestedFallbackStoragePathsByModId `
+              -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
+              -MaxNestedJarDepth $nestedFallbackMaxDepth)
+          foreach ($variantPath in @($variantResolved)) {
+            $value = [string]$variantPath
+            if ([string]::IsNullOrWhiteSpace($value)) { continue }
+            $variantStorageFallbackPaths.Add($value) | Out-Null
+          }
+        }
+        if ($variantStorageFallbackPaths.Count -gt 0) {
+          $storageFallbackJarPaths = @($variantStorageFallbackPaths.ToArray() | Sort-Object -Unique)
+        }
+      }
+      if ($storageFallbackJarPaths.Count -gt 0) {
+        $storageNameMatched = @($storageFallbackJarPaths | Where-Object { [string]::Equals([System.IO.Path]::GetFileName([string]$_), $gameFileName, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($storageNameMatched.Count -gt 0) {
+          $storageJarPath = $storageNameMatched[0]
+        } else {
+          $storageJarPath = $storageFallbackJarPaths[0]
+        }
+      }
     }
 
     $gameResult = $null
     if ($DryRun) {
         $gameResult = Move-OrDelete -SourcePath $gameJarPath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun $true
+        if (-not [string]::IsNullOrWhiteSpace([string]$gameResult)) {
+            $gameHandledNow = $true
+        }
     } else {
         $moveResult = Move-CulpritToLegacyAndAppendLog `
             -JarName $gameFileName `
@@ -971,7 +1468,12 @@ foreach ($modId in $orderedModIds) {
 
         if ($moveResult.GameMoved) {
             $gameResult = if ($deleteFromGame) { "deleted: $gameJarPath" } else { "moved: $gameJarPath -> $gameLegacyVersionDir" }
+            $gameHandledNow = $true
         }
+    }
+
+    if ($gameHandledNow) {
+        $null = $handledGameJarPathKeySet.Add([string]$gameJarPath)
     }
 
     $storageResult = $null

@@ -1288,4 +1288,16 @@ if ($EmitResultObject) {
   Write-Output (New-StageResult @stageResultParams)
 }
 
+if ($exitCode -eq 0 -and (-not $DryRun)) {
+  $finalCrashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+  if ($null -ne $finalCrashWindow) {
+    Write-Host ("Closing remaining crash window: {0}" -f $finalCrashWindow.Title) -ForegroundColor Gray
+    [void](Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $finalCrashWindow }) `
+      -DelaySeconds $CrashCloseDelaySeconds `
+      -OffsetX $CrashCloseClickOffsetX `
+      -OffsetY $CrashCloseClickOffsetY `
+      -CloseExtraFabricDialogs $true)
+  }
+}
+
 exit $exitCode

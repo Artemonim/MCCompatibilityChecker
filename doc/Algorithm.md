@@ -9,8 +9,8 @@ This document describes the complete cycle of automatic mod conflict diagnostics
 3. The script waits for the cursor to be positioned over the launch button and clicks it.
 4. After the click, the script waits for one of several outcomes: a crash (crash window), a Fabric dialog (missing dependencies), or a successful launch.
 5. Detection of crash/Fabric windows is prioritized to the launcher process (fallback is a general search) to avoid catching "foreign" system windows.
-6. If there is no crash, a modal dialog asks whether to continue.
-7. If a crash is detected, the diagnostic chain begins.
+6. If there is no crash and the session still has isolated mods, Recovery runs automatically (when enabled).
+7. A user dialog appears only when unresolved isolated mods remain, Recovery is disabled, or the launch outcome is ambiguous (Fabric/NoLaunch).
 
 ## Stage 1: Baseline Analysis
 
@@ -159,7 +159,7 @@ When a successful launch occurs during an exclusion, or a confirmed change in th
 
 > Script: `Recover-PhantomCulprits.ps1`
 
-Post-Isolation: checks if the found culprits were "false positives" due to a shared Mixin error. Runs after Layering/Isolation when 3+ culprits are found.
+Post-Isolation: checks if the found culprits were "false positives" due to a shared Mixin error. Runs after Layering/Isolation when 3+ culprits are found, and also after a clean launch if isolated mods still remain in the current session.
 
 ### Logic
 

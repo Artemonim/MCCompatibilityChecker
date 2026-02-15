@@ -83,7 +83,7 @@ Pengaturan ditentukan dalam `config.ini` (default) dan `config.local.ini` (penye
 | `LauncherExePath` | Jalur ke file eksekusi launcher (kosong untuk menghubungkan ke yang sudah berjalan) |
 | `EnableMixinAnalysis` | Aktifkan tahap analisis Mixin (default: `true`) |
 | `EnableLayering` | Aktifkan Pelapisan dan Isolasi subtraktif (default: `true`) |
-| `EnableRecovery` | Aktifkan Pemulihan penyebab semu (default: `false`) |
+| `EnableRecovery` | Aktifkan Pemulihan penyebab semu (default: `true`) |
 | `Language` | Bahasa pesan konsol (`[Localization].Language`). Jika kosong: otomatis dari bahasa OS, fallback `en` |
 
 Locale yang tersedia saat ini: `en`, `ru`.

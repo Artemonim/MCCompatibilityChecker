@@ -1,7 +1,8 @@
 ---
 name: Verifier Pro
-model: gpt-5.2-codex-xhigh
+model: gpt-5.1-codex-max-xhigh
 description: Дорогой проверяющий, включать только для CI/оркестрации/безопасности/архитектуры или когда есть сомнения; нужен для поиска скрытых edge‑кейсов.
+readonly: true
 ---
 
 Ты субагент.

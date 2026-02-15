@@ -11,6 +11,10 @@ You can pass files or folders as arguments; folders are scanned recursively.
 param(
   # * Skip localization asset checks.
   [switch]$NoLocales,
+  # * Skip Pester tests.
+  [switch]$NoPester,
+  # * Optional path to Pester tests (relative to repo root by default).
+  [string]$PesterPath = "tests",
   # * Optional file or directory paths to analyze (defaults to repo root).
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$Path = @()
@@ -121,6 +125,7 @@ if (-not $uniqueFiles -or $uniqueFiles.Count -eq 0) {
 $findings = New-Object System.Collections.Generic.List[object]
 $hadAnalyzerError = $false
 $localeValidationFailed = $false
+$pesterValidationFailed = $false
 foreach ($file in $uniqueFiles) {
   try {
     $settingsPath = Join-Path -Path $repoRoot -ChildPath "PSScriptAnalyzerSettings.psd1"
@@ -183,6 +188,54 @@ if (-not $NoLocales) {
   }
 }
 
+if (-not $NoPester) {
+  $resolvedPesterPath = if ([System.IO.Path]::IsPathRooted($PesterPath)) {
+    $PesterPath
+  } else {
+    Join-Path -Path $repoRoot -ChildPath $PesterPath
+  }
+
+  if (-not (Test-Path -LiteralPath $resolvedPesterPath)) {
+    $hadAnalyzerError = $true
+    Write-Warning ("Pester path not found: {0}" -f $resolvedPesterPath)
+  } else {
+    $pesterCommand = Get-Command -Name "Invoke-Pester" -ErrorAction SilentlyContinue
+    if ($null -eq $pesterCommand) {
+      try {
+        Import-Module -Name "Pester" -ErrorAction Stop
+      } catch {
+        $hadAnalyzerError = $true
+        Write-Warning ("Failed to import Pester module: {0}" -f $_.Exception.Message)
+      }
+      $pesterCommand = Get-Command -Name "Invoke-Pester" -ErrorAction SilentlyContinue
+    }
+
+    if ($null -eq $pesterCommand) {
+      $hadAnalyzerError = $true
+      Write-Warning "Invoke-Pester command is unavailable. Use -NoPester to skip test checks."
+    } else {
+      Write-Output ("Running Pester tests from: {0}" -f $resolvedPesterPath)
+      try {
+        $pesterResult = Invoke-Pester -Path $resolvedPesterPath -PassThru -ErrorAction Stop
+        $failedCount = 0
+        if ($null -ne $pesterResult) {
+          if ($pesterResult.PSObject.Properties.Match("FailedCount").Count -gt 0) {
+            $failedCount = [int]$pesterResult.FailedCount
+          } elseif ($pesterResult.PSObject.Properties.Match("Failed").Count -gt 0 -and $null -ne $pesterResult.Failed) {
+            $failedCount = @($pesterResult.Failed).Count
+          }
+        }
+        if ($failedCount -gt 0) {
+          $pesterValidationFailed = $true
+        }
+      } catch {
+        $hadAnalyzerError = $true
+        Write-Warning ("Pester execution failed: {0}" -f $_.Exception.Message)
+      }
+    }
+  }
+}
+
 if ($findings.Count -gt 0) {
   $findings |
     Sort-Object -Property ScriptName, Line, RuleName |
@@ -205,11 +258,18 @@ if ($WriteSummary) {
   } elseif (-not $hadAnalyzerError) {
     Write-Output "Localization check: passed."
   }
+  if ($NoPester) {
+    Write-Output "Pester check: skipped (-NoPester)."
+  } elseif ($pesterValidationFailed) {
+    Write-Output "Pester check: failed."
+  } elseif (-not $hadAnalyzerError) {
+    Write-Output "Pester check: passed."
+  }
   if ($hadAnalyzerError) {
     Write-Warning "One or more checks failed to execute."
   }
 }
 
 if ($hadAnalyzerError) { exit $ExitCodeOnErrors }
-if ($localeValidationFailed -or $findings.Count -gt 0) { exit $ExitCodeOnFindings }
+if ($localeValidationFailed -or $pesterValidationFailed -or $findings.Count -gt 0) { exit $ExitCodeOnFindings }
 exit 0
