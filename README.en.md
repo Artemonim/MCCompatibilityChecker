@@ -83,7 +83,7 @@ Settings are defined in `config.ini` (defaults) and `config.local.ini` (your ove
 | `LauncherExePath` | Path to the launcher executable (empty to connect to a running one) |
 | `EnableMixinAnalysis` | Enable Mixin analysis stage (default: `true`) |
 | `EnableLayering` | Enable Layering and subtractive Isolation (default: `true`) |
-| `EnableRecovery` | Enable Recovery of phantom culprits (default: `false`) |
+| `EnableRecovery` | Enable Recovery of phantom culprits (default: `true`) |
 | `Language` | Language for console messages (`[Localization].Language`). If empty: auto-detect from OS, fallback to `en` |
 
 Available locales: `en`, `ru`.

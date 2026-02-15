@@ -83,7 +83,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 | `LauncherExePath` | Путь к исполняемому файлу лаунчера (пусто — подключиться к запущенному) |
 | `EnableMixinAnalysis` | Включить этап Mixin-анализа (по умолчанию: `true`) |
 | `EnableLayering` | Включить Наслоение и субтрактивную Изоляцию (по умолчанию: `true`) |
-| `EnableRecovery` | Включить Recovery фантомных виновников (по умолчанию: `false`) |
+| `EnableRecovery` | Включить Recovery фантомных виновников (по умолчанию: `true`) |
 | `Language` | Язык консольных сообщений (`[Localization].Language`). Если пусто: авто из языка ОС, fallback `en` |
 
 Доступные локали сейчас: `en`, `ru`.

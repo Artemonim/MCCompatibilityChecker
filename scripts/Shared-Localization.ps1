@@ -685,6 +685,22 @@ function ConvertTo-McccStringList {
   return ,@($result.ToArray())
 }
 
+function Test-McccUnsafeCrashWindowTitlePattern {
+  [CmdletBinding()]
+  [OutputType([bool])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Pattern
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Pattern)) { return $true }
+
+  # * A bare "Minecraft" pattern is too broad and matches normal game windows.
+  $normalized = ([string]$Pattern).Trim().ToLowerInvariant()
+  $normalized = $normalized -replace "[^a-z0-9]+", ""
+  return ($normalized -eq "minecraft")
+}
+
 function Get-McccLocaleCrashWindowTitlePatternSet {
   [CmdletBinding()]
   [OutputType([string[]])]
@@ -703,6 +719,7 @@ function Get-McccLocaleCrashWindowTitlePatternSet {
   $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
   foreach ($item in (ConvertTo-McccStringList -Value $FallbackPatterns)) {
+    if (Test-McccUnsafeCrashWindowTitlePattern -Pattern $item) { continue }
     if ($seen.Add($item)) {
       $patterns.Add($item) | Out-Null
     }
@@ -745,6 +762,7 @@ function Get-McccLocaleCrashWindowTitlePatternSet {
     }
 
     foreach ($pattern in (ConvertTo-McccStringList -Value $rawPatterns)) {
+      if (Test-McccUnsafeCrashWindowTitlePattern -Pattern $pattern) { continue }
       if ($seen.Add($pattern)) {
         $patterns.Add($pattern) | Out-Null
       }

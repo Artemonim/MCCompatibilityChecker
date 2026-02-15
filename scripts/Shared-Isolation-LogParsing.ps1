@@ -144,13 +144,16 @@ function Get-IncompatibleModPatternSet {
   $fromModPattern = "^\[.*?\]\s+\[.*?\/" + $fromModSeverityRegex + "\]:\s+.*?\bfrom mod\s+(?<id>[a-z0-9_\-\.]+)\b"
   $mixinApplyPattern = "^\[.*?\]\s+\[.*?\/" + $mixinApplySeverityRegex + "\]:\s+Mixin apply for mod\s+(?<id>[a-z0-9_\-\.]+)\s+failed\b"
   $crashReportModPattern = "^(?!\[).*(failed|Critical injection|InjectionError|Mixin transformation).*\bfrom mod\s+(?<id>[a-z0-9_\-\.]+)\b"
-  $crashProvidedByPattern = "^(?!\[).*\bprovided by\s+['""](?<id>[a-z0-9_\-\.]+)['""]"
+  # * Keep only high-signal "provided by" crash lines:
+  # * - skip suppressed wrapper exceptions;
+  # * - skip generic "Exception while loading entries for entrypoint" wrappers.
+  $crashProvidedByPattern = "^(?!\[)(?!\s*Suppressed:)(?!.*Exception\s+while\s+loading\s+entries\s+for\s+entrypoint).*\bprovided by\s+['""](?<id>[a-z0-9_\-\.]+)['""]"
   $requiresPattern1 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\s+requires\b"
   $requiresPattern2 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Could not find required mod:\s+(?<id>[a-z0-9_\-\.]+)\b"
   $requiresPattern3 = "^\[.*?\]\s+\[.*?\/ERROR\]:\s+Mod\s+['""]?.*?['""]?\s+\((?<id>[a-z0-9_\-\.]+)\)\s+\S+\s+requires\b"
   $fabricRemovePattern = "^\s*(?:[-*•]\s+)?Remove\s+mod\b.*?\((?<id>[a-z0-9_\-\.]+)\)(?=\s|$|[.,!])"
   $fabricReplacePattern = "^\s*(?:[-*•]\s+)?Replace\s+mod\b.*?\((?<id>[a-z0-9_\-\.]+)\)(?=\s|$|[.,!])"
-  $incompatibleDetailPattern = '(requires|required|incompatible|not compatible|depends|needs|was built for|requires version|requires minecraft|requires fabric|requires fabricloader|requires loader)'
+  $incompatibleDetailPattern = '(requires|required|incompatible|not compatible|depends|needs|was built for|requires version|requires minecraft|requires fabric|requires fabricloader|requires loader|breaks)'
   $modNamedErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)(?<detail>\s+.*)$'
   $modNamedListPattern = '^\s*(?:[-*•]\s+)?Mod\s+[''"]?.*?[''"]?\s+\((?<id>[a-z0-9_\-\.]+)\)(?<detail>\s+.*)$'
   $modBareErrorPattern = '^\[.*?\]\s+\[.*?/(ERROR|WARN)\]:\s+Mod\s+(?<id>[a-z0-9_\-\.]+)\b(?<detail>.*)$'
@@ -196,6 +199,36 @@ function Get-FabricFixCandidateModIdList {
 
   if ($ids.Count -eq 0) { return @() }
   return @($ids.Keys | Sort-Object)
+}
+
+function Get-FabricReasonCandidateModIdList {
+  <#
+  .SYNOPSIS
+  Extracts primary mod IDs from Fabric resolver "Reason"/"Immediate reason" lines.
+  #>
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Line
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Line)) { return @() }
+  if ($Line -notmatch "(?i)\b(?:Immediate\s+reason|Reason):\s+\[") { return @() }
+
+  $ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $reasonEntryPattern = '(?i)(?:^|[\[,]\s*)(?<kind>[A-Z_]{3,})\s+(?<id>[a-z0-9_\-\.]+)\b'
+  $reasonMatches = [regex]::Matches($Line, $reasonEntryPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  foreach ($match in @($reasonMatches)) {
+    if (-not $match.Success) { continue }
+    $kind = [string]$match.Groups["kind"].Value
+    $id = [string]$match.Groups["id"].Value
+    if ([string]::IsNullOrWhiteSpace($kind) -or [string]::IsNullOrWhiteSpace($id)) { continue }
+    if ($kind -notmatch "(?i)(DEP|FORCELOAD|ROOT)") { continue }
+    if ($id -notmatch "[a-z]") { continue }
+    $null = $ids.Add($id.ToLowerInvariant())
+  }
+
+  if ($ids.Count -eq 0) { return @() }
+  return @($ids | Sort-Object)
 }
 
 function Get-IncompatibleModIdsFromLog {
@@ -249,6 +282,14 @@ function Get-IncompatibleModIdsFromLog {
     $m = [regex]::Match($line, $patterns.FabricReplacePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
+      continue
+    }
+
+    $reasonIds = @(Get-FabricReasonCandidateModIdList -Line ([string]$line))
+    if ($reasonIds.Count -gt 0) {
+      foreach ($reasonId in $reasonIds) {
+        $ids[[string]$reasonId] = $true
+      }
       continue
     }
 
@@ -373,6 +414,17 @@ function Get-IncompatibleModEvidenceFromLog {
       continue
     }
 
+    $reasonIds = @(Get-FabricReasonCandidateModIdList -Line ([string]$line))
+    if ($reasonIds.Count -gt 0) {
+      foreach ($reasonId in $reasonIds) {
+        $id = [string]$reasonId
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        if (-not $evidence.ContainsKey($id)) { $evidence[$id] = New-Object System.Collections.Generic.List[string] }
+        $evidence[$id].Add($line.Trim())
+      }
+      continue
+    }
+
     $m = [regex]::Match($line, $patterns.ModNamedErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $id = $m.Groups["id"].Value.ToLowerInvariant()
@@ -476,14 +528,23 @@ function Get-FabricRequiringModId {
   )
 
   $ids = @{}
-  # * Pattern: "Mod 'Name' (mod-id) X.Y.Z requires version ... of dependency, which is missing!"
-  # * Accepts versions like "1.4.1+1.21.7" and list-style lines like "- Mod 'Bonded' ...".
-  $fabricRequiresPattern = "^\s*(?:-\s+)?Mod\s+['""]?[^'""]+['""]?\s+\((?<id>[a-z0-9_\-\.]+)\)\s+\S+\s+requires\s+"
+  # * Supports both English and Russian Fabric dialog lines.
+  # * Examples:
+  # * - Mod 'Name' (mod-id) 1.2.3 requires ...
+  # * - Мод 'Name' (mod-id) 1.2.3 требует ...
+  $fabricRequiresPatterns = @(
+    "^\s*(?:-\s+)?Mod\s+['""]?[^'""]+['""]?\s+\((?<id>[a-z0-9_\-\.]+)\)\s+\S+\s+requires\s+",
+    "^\s*(?:-\s+)?Мод\s+['""]?[^'""]+['""]?\s+\((?<id>[a-z0-9_\-\.]+)\)\s+\S+\s+требует\s+"
+  )
 
   foreach ($line in $Lines) {
-    $m = [regex]::Match($line, $fabricRequiresPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
+    foreach ($pattern in @($fabricRequiresPatterns)) {
+      $m = [regex]::Match($line, [string]$pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      if (-not $m.Success) { continue }
+      $id = [string]$m.Groups["id"].Value
+      if ([string]::IsNullOrWhiteSpace($id)) { continue }
+      $ids[$id.ToLowerInvariant()] = $true
+      break
     }
   }
 
@@ -502,21 +563,34 @@ function Get-FabricMissingDependencyId {
   )
 
   $ids = @{}
-  # * Pattern: "... requires any version of modmenu, which is missing!"
-  # * Pattern: "... requires version 3.11.0 or later of resourcefullib, which is missing!"
-  # * Pattern: "... requires version 1.21.1 of 'Minecraft' (minecraft), which is missing!"
-  $requiresMissingPattern = "requires\s+.+?\s+of\s+(?:['""][^'""]+['""]\s+)?\(?\s*(?<id>[a-z0-9_\-\.]+)\s*\)?,?\s+which\s+is\s+missing"
+  # * Supports both English and Russian Fabric dialog phrasing.
+  # * Examples:
+  # * - ... requires ... of modmenu, which is missing!
+  # * - ... требует ... мода prickle, который отсутствует!
+  # * - Установите мод prickle, версию ...
+  $requiresMissingPatterns = @(
+    "requires\s+.+?\s+of\s+(?:['""][^'""]+['""]\s+)?\(?\s*(?<id>[a-z0-9_\-\.]+)\s*\)?,?\s+which\s+is\s+missing",
+    "(?:requires|требует)\s+.+?\s+(?:мода|mod)\s+(?<id>[a-z0-9_\-\.]+)\s*,?\s*котор(?:ый|ая|ое)\s+отсутствует",
+    "^\s*(?:[-*•]\s+)?(?:Установите|Install)\s+мод\s+(?<id>[a-z0-9_\-\.]+)\b"
+  )
   # * Pattern: "Could not find required mod: libjf-base"
   $couldNotFindPattern = "Could not find required mod:\s+(?<id>[a-z0-9_\-\.]+)\b"
   # * Pattern: "owo-lib is required to run the following mods"
   $requiredToRunPattern = "(?<id>[a-z0-9_\-\.]+)\s+is\s+required\s+to\s+run\s+the\s+following\s+mods?\b"
 
   foreach ($line in $Lines) {
-    $m = [regex]::Match($line, $requiresMissingPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($m.Success) {
-      $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true
-      continue
+    $matchedFromRequiresPattern = $false
+    foreach ($pattern in @($requiresMissingPatterns)) {
+      $m = [regex]::Match($line, [string]$pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      if (-not $m.Success) { continue }
+      $id = [string]$m.Groups["id"].Value
+      if ([string]::IsNullOrWhiteSpace($id)) { continue }
+      $ids[$id.ToLowerInvariant()] = $true
+      $matchedFromRequiresPattern = $true
+      break
     }
+    if ($matchedFromRequiresPattern) { continue }
+
     $m = [regex]::Match($line, $couldNotFindPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($m.Success) {
       $ids[$m.Groups["id"].Value.ToLowerInvariant()] = $true

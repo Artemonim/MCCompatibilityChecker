@@ -4,31 +4,29 @@ $launcherWindow = $null
 $lastCrashDialogHandleId = 0
 $inputKeyRetryYes = "y"
 $inputKeyRetryNo = "n"
-$inputKeyContinueAsIs = "c"
-$inputKeyRestoreContinue = "r"
-$inputKeyRestoreExit = "n"
-$inputKeyKeepExit = "s"
+$inputKeyRunRecovery = "r"
+$inputKeyRollbackExit = "n"
+$inputKeyAcceptExit = "s"
 $inputKeyHintRetry = "{0}/{1}" -f $inputKeyRetryYes, $inputKeyRetryNo
-$inputKeyHintIsolants = "{0}/{1}/{2}/{3}" -f $inputKeyContinueAsIs, $inputKeyRestoreContinue, $inputKeyRestoreExit, $inputKeyKeepExit
+$inputKeyHintIsolants = "{0}/{1}/{2}" -f $inputKeyRunRecovery, $inputKeyRollbackExit, $inputKeyAcceptExit
 
 if (Get-Command -Name Set-McccLocalizationTagValue -ErrorAction SilentlyContinue) {
   Set-McccLocalizationTagValue -TagMap @{
     "<KEY_RETRY_YES>" = $inputKeyRetryYes
     "<KEY_RETRY_NO>" = $inputKeyRetryNo
-    "<KEY_CONTINUE_AS_IS>" = $inputKeyContinueAsIs
-    "<KEY_RESTORE_CONTINUE>" = $inputKeyRestoreContinue
-    "<KEY_RESTORE_EXIT>" = $inputKeyRestoreExit
-    "<KEY_KEEP_EXIT>" = $inputKeyKeepExit
+    "<KEY_CONTINUE_AS_IS>" = $inputKeyRunRecovery
+    "<KEY_RESTORE_CONTINUE>" = $inputKeyRollbackExit
+    "<KEY_RESTORE_EXIT>" = $inputKeyRollbackExit
+    "<KEY_KEEP_EXIT>" = $inputKeyAcceptExit
     "<KEY_RETRY_HINT>" = $inputKeyHintRetry
     "<KEY_ISOLANTS_HINT>" = $inputKeyHintIsolants
   }
 }
 
 $regexRetryYes = "^(?:{0}|yes)$" -f [regex]::Escape($inputKeyRetryYes)
-$regexChoiceContinue = "^(?:{0}|continue)$" -f [regex]::Escape($inputKeyContinueAsIs)
-$regexChoiceRestoreContinue = "^(?:{0}|restore|{1}|yes)$" -f [regex]::Escape($inputKeyRestoreContinue), [regex]::Escape($inputKeyRetryYes)
-$regexChoiceRestoreExit = "^(?:{0}|{1}|no)$" -f [regex]::Escape($inputKeyRestoreExit), [regex]::Escape($inputKeyRetryNo)
-$regexChoiceKeepExit = "^(?:{0}|skip|stop)$" -f [regex]::Escape($inputKeyKeepExit)
+$regexChoiceRunRecovery = "^(?:{0}|recovery|recover)$" -f [regex]::Escape($inputKeyRunRecovery)
+$regexChoiceRollbackExit = "^(?:{0}|restore|rollback|undo|{1}|no)$" -f [regex]::Escape($inputKeyRollbackExit), [regex]::Escape($inputKeyRetryNo)
+$regexChoiceAcceptExit = "^(?:{0}|accept|keep|skip|stop)$" -f [regex]::Escape($inputKeyAcceptExit)
 
 function Invoke-PreLaunchOutcomeDialogCleanup {
   [CmdletBinding()]
@@ -91,6 +89,19 @@ function Invoke-PreLaunchOutcomeDialogCleanup {
 
   if ($ignoredHandleIds.Count -eq 0) { return [long[]]@() }
   return [long[]]($ignoredHandleIds | Sort-Object -Unique)
+}
+
+function Invoke-PostSessionOutcomeDialogCleanup {
+  if ($DryRun) { return }
+  $finalCrashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+  if ($null -ne $finalCrashWindow) {
+    Write-Host ("Closing remaining crash window: {0}" -f $finalCrashWindow.Title) -ForegroundColor Gray
+    [void](Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $finalCrashWindow }) `
+      -DelaySeconds $CrashCloseDelaySeconds `
+      -OffsetX $CrashCloseClickOffsetX `
+      -OffsetY $CrashCloseClickOffsetY `
+      -CloseExtraFabricDialogs $true)
+  }
 }
 
 # * Capture click offsets from current cursor position once, before the run, if not provided.
@@ -161,6 +172,7 @@ while ($true) {
     $answer = Read-Host "Launcher not found. Continue retrying? (<KEY_RETRY_HINT>)"
     if ($answer -notmatch $regexRetryYes) {
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
+      Invoke-PostSessionOutcomeDialogCleanup
       exit 0
     }
     Write-Host ("Retrying in {0}s." -f $PollIntervalSeconds) -ForegroundColor Yellow
@@ -199,6 +211,17 @@ while ($true) {
     $preLaunchIgnoredOutcomeIds = @(Invoke-PreLaunchOutcomeDialogCleanup -ProcessIds $launcherProcessIds)
   }
 
+  # * Capture pre-existing crash/fabric windows BEFORE clicking Play.
+  # * Keep both launcher-scoped and global handles to avoid treating stale dialogs as a new outcome.
+  $preExistingOutcomeHandleSet = [System.Collections.Generic.HashSet[long]]::new()
+  $preExistingOutcomeHandlesScoped = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns) -ProcessIds $launcherProcessIds)
+  $preExistingOutcomeHandlesGlobal = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns))
+  foreach ($id in @($preExistingOutcomeHandlesScoped + $preExistingOutcomeHandlesGlobal)) {
+    if ($null -eq $id -or [long]$id -eq 0) { continue }
+    $null = $preExistingOutcomeHandleSet.Add([long]$id)
+  }
+  $preExistingOutcomeHandles = @($preExistingOutcomeHandleSet | Sort-Object -Unique)
+
   Invoke-LauncherPlay -LauncherHandle $launcherWindow.Handle `
     -ButtonNames $PlayButtonNames `
     -ClickOffsetX $PlayClickOffsetX `
@@ -214,7 +237,6 @@ while ($true) {
   } else {
     $lastCrashDialogHandleId = 0
   }
-  $preExistingOutcomeHandles = @(Get-WindowHandleMatch -Patterns @($CrashWindowTitlePatterns + $FabricWindowTitlePatterns) -ProcessIds $launcherProcessIds)
   $ignoreHandleSet = [System.Collections.Generic.HashSet[long]]::new()
   foreach ($id in @($ignoreCrashIds + $preLaunchIgnoredOutcomeIds + $preExistingOutcomeHandles)) {
     if ($null -eq $id -or [long]$id -eq 0) { continue }
@@ -261,6 +283,8 @@ while ($true) {
   }
 
   $fabricMissingDepsDetected = $false
+  $fabricMissingDepIds = @()
+  $fabricRequiringModIds = @()
   $fabricRoutedToCleanup = $false
 
   # * Route Fabric "remove/replace" outcomes into the same debug pipeline as crash dialogs.
@@ -288,8 +312,10 @@ while ($true) {
       $depInfo = Get-FabricDependencyDialogInfo -Lines $logSnapshot.Lines
       if ($depInfo.HasMissingDeps) {
         $fabricMissingDepsDetected = $true
-        $missLabel = if ($depInfo.MissingDepIds.Count -gt 0) { $depInfo.MissingDepIds -join ", " } else { "<none>" }
-        $reqLabel = if ($depInfo.RequiringModIds.Count -gt 0) { $depInfo.RequiringModIds -join ", " } else { "<none>" }
+        $fabricMissingDepIds = @($depInfo.MissingDepIds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
+        $fabricRequiringModIds = @($depInfo.RequiringModIds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
+        $missLabel = if ($fabricMissingDepIds.Count -gt 0) { $fabricMissingDepIds -join ", " } else { "<none>" }
+        $reqLabel = if ($fabricRequiringModIds.Count -gt 0) { $fabricRequiringModIds -join ", " } else { "<none>" }
         Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
         Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
 
@@ -352,8 +378,11 @@ while ($true) {
         }
       }
     } else {
-      Write-Host "Fabric dialog detected, but the log slice is empty. Routing to debug pipeline." -ForegroundColor Yellow
-      $fabricShouldRunCleanup = $true
+      $fabricMissingDepsDetected = $true
+      $fabricMissingDepIds = @()
+      $fabricRequiringModIds = @()
+      Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f "<unknown>") -ForegroundColor Yellow
+      Write-Host ("Requiring mods: {0}" -f "<unknown>") -ForegroundColor Gray
     }
 
     if ($fabricShouldRunCleanup) {
@@ -438,6 +467,9 @@ while ($true) {
       }
 
       if ($compatExitCode -ne 0) {
+        if ($compatExitCode -eq 130) {
+          $sessionInterrupted = $true
+        }
         if ($compatExitCode -eq 3) {
           $skipDeepPipelineForFabric = $false
           if ($fabricRoutedToCleanup) {
@@ -668,6 +700,7 @@ while ($true) {
                 continue
               }
               if ($layerExitCode -eq 130) {
+                $sessionInterrupted = $true
                 Write-Host "Launcher start canceled by user during Layering. Stopping by user choice." -ForegroundColor Yellow
                 exit 0
               }
@@ -798,6 +831,7 @@ while ($true) {
               }
 
               if ($isolateExitCode -eq 130) {
+                $sessionInterrupted = $true
                 Write-Host "Launcher start canceled by user during Isolation. Stopping by user choice." -ForegroundColor Yellow
                 exit 0
               }
@@ -872,7 +906,11 @@ while ($true) {
       if ($DryRun) {
         Write-Host "DRYRUN would close Fabric Loader dialog." -ForegroundColor Gray
       } elseif ($fabricMissingDepsDetected) {
-        Write-Host "Fabric window was left open for manual review of missing dependencies." -ForegroundColor Yellow
+        [void](Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
+            -DelaySeconds 0 `
+            -OffsetX $CrashCloseClickOffsetX `
+            -OffsetY $CrashCloseClickOffsetY `
+            -CloseExtraFabricDialogs $true)
       } else {
         [void](Close-OutcomeWindowWithExtraDialog -Outcome $outcome `
             -DelaySeconds 0 `
@@ -893,16 +931,14 @@ while ($true) {
     Write-Host "DRYRUN would try to auto-handle the Fabric dialog." -ForegroundColor Gray
   }
   if (-not $DryRun) {
-    # * Do not force-stop the game after a clean Timeout outcome.
-    # * Killing a healthy run here can trigger a synthetic launcher crash dialog on the next loop.
     if ($outcome.Type -eq "Timeout") {
-      Write-Host "Game appears to be running after a clean launch; leaving it open before prompt." -ForegroundColor Gray
-    } else {
-      $closedAfterNonCrashOutcome = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
-      if ($closedAfterNonCrashOutcome -gt 0) {
-        Write-Host ("Closed {0} running game process(es) before prompt." -f $closedAfterNonCrashOutcome) -ForegroundColor Gray
-      }
+      Write-Host "No crash detected after clean launch; closing game before prompt so the terminal menu is visible." -ForegroundColor Gray
     }
+    $closedAfterNonCrashOutcome = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+    if ($closedAfterNonCrashOutcome -gt 0) {
+      Write-Host ("Closed {0} running game process(es) before prompt." -f $closedAfterNonCrashOutcome) -ForegroundColor Gray
+    }
+    [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "terminal decision prompt")
   }
   $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
   if ($hasSessionIsolants) {
@@ -914,8 +950,86 @@ while ($true) {
       Write-Host ""
     }
   }
+  if ($outcome.Type -eq "FabricDialog" -and $fabricMissingDepsDetected) {
+    if ($hasSessionIsolants) {
+      Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
+      $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+      if (-not $ok) {
+        Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
+        exit 1
+      }
+      $sessionIsolationCulpritByJar = @{}
+    }
+    $missLabel = if ($fabricMissingDepIds.Count -gt 0) { $fabricMissingDepIds -join ", " } else { "<none>" }
+    $reqLabel = if ($fabricRequiringModIds.Count -gt 0) { $fabricRequiringModIds -join ", " } else { "<none>" }
+    Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
+    Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
+    exit 0
+  }
   $cleanOutcome = ($outcome.Type -eq "Timeout" -or $outcome.Type -eq "ProcessExit")
-  $requiresUserDecision = $hasSessionIsolants -or ($outcome.Type -eq "FabricDialog") -or ($outcome.Type -eq "NoLaunch") -or $cleanOutcome
+  if ($cleanOutcome -and $hasSessionIsolants -and $recoveryAvailable) {
+    if (-not $DryRun) {
+      $closedBeforeRecovery = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+      if ($closedBeforeRecovery -gt 0) {
+        Write-Host ("Closed {0} running game process(es) before Recovery." -f $closedBeforeRecovery) -ForegroundColor Gray
+      }
+      [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "Recovery analysis")
+    }
+
+    Write-Host "Running Recovery analysis." -ForegroundColor Cyan
+    try {
+      $recParams = Get-RecoveryParam
+      $culpritDataForRecovery = @($sessionIsolationCulpritHistoryByJar.Values | ForEach-Object {
+          [pscustomobject]@{
+            JarName = [string]$_.JarName
+            CrashEvidenceKey = if ($_ | Get-Member -Name "CrashEvidenceKey" -MemberType NoteProperty, Property) { [string]$_.CrashEvidenceKey } else { "" }
+            StorageLegacyPath = [string]$_.StorageLegacyPath
+            GameLegacyPath = [string]$_.GameLegacyPath
+          }
+        })
+      $recParams["CulpritDataJson"] = ($culpritDataForRecovery | ConvertTo-Json -Compress -Depth 5)
+      $firstCulpritMove = $sessionIsolationCulpritHistoryByJar.Values | Select-Object -First 1
+      if ($null -ne $firstCulpritMove) {
+        $recParams["Minecraft"] = if ($firstCulpritMove | Get-Member -Name "Minecraft" -MemberType NoteProperty, Property) { [string]$firstCulpritMove.Minecraft } else { "unknown" }
+      }
+
+      $recResult = & $RecoveryScriptPath @recParams
+      $recObj = Select-StageResultObject -Result $recResult
+      if ($null -ne $recObj -and ($recObj | Get-Member -Name "Stage" -MemberType NoteProperty, Property) -and $recObj.Stage -eq "Recovery") {
+        foreach ($restored in @($recObj.RestoredJarNames)) {
+          $rk = [string]$restored
+          if (-not [string]::IsNullOrWhiteSpace($rk)) {
+            $sessionIsolationCulpritByJar.Remove($rk.ToLowerInvariant())
+            $sessionIsolationCulpritHistoryByJar.Remove($rk.ToLowerInvariant())
+            $sessionRecoveredJarNames[$rk.ToLowerInvariant()] = $rk
+          }
+        }
+        foreach ($newCulprit in @($recObj.NewCulpritJarNames)) {
+          $nk = [string]$newCulprit
+          if ([string]::IsNullOrWhiteSpace($nk)) { continue }
+          $move = [pscustomobject]@{
+            JarName = $nk; GameModsDir = ""; StorageModsDir = ""; StorageLegacyPath = ""
+            GameLegacyPath = ""; Minecraft = ""; KeepCulpritInGameLegacy = $true
+            CrashEvidenceKey = ""; Stage = "recovery"
+          }
+          $sessionIsolationCulpritByJar[$nk.ToLowerInvariant()] = $move
+          $sessionIsolationCulpritHistoryByJar[$nk.ToLowerInvariant()] = $move
+        }
+      }
+    } catch {
+      Write-Host ("Warning: Recovery failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
+  }
+
+  if ($cleanOutcome -and (-not $hasSessionIsolants)) {
+    Write-Host "No blocking errors and no isolated mods pending. Continuing automatically." -ForegroundColor Cyan
+    Start-Sleep -Seconds 2
+    continue
+  }
+
+  $requiresUserDecision = $hasSessionIsolants -or ($outcome.Type -eq "FabricDialog") -or ($outcome.Type -eq "NoLaunch")
   if (-not $requiresUserDecision) {
     Write-Host "No blocking errors and no isolated mods pending. Continuing automatically." -ForegroundColor Cyan
     Start-Sleep -Seconds 2
@@ -935,71 +1049,122 @@ while ($true) {
 
   if ($hasSessionIsolants) {
     Write-Host $prompt -ForegroundColor Yellow
-    Write-Host "  <KEY_CONTINUE_AS_IS> = continue with current isolated mods (incomplete mod set)." -ForegroundColor Gray
-    Write-Host "  <KEY_RESTORE_CONTINUE> = restore isolated mods and continue with the full set." -ForegroundColor Gray
-    Write-Host "  <KEY_RESTORE_EXIT> = restore isolated mods and stop." -ForegroundColor Gray
-    Write-Host "  <KEY_KEEP_EXIT> = skip Recovery and stop (keep current isolated mods as incompatible)." -ForegroundColor Gray
+    Write-Host "Why this prompt appears: previous attempts isolated one or more mods into Legacy to test stability." -ForegroundColor Gray
+    Write-Host "Choose final action: run Recovery, rollback isolated mods, or accept current isolated mods and stop." -ForegroundColor Gray
+    Write-Host "  <KEY_CONTINUE_AS_IS> = run Recovery analysis and stop." -ForegroundColor Gray
+    Write-Host "  <KEY_RESTORE_EXIT> = rollback changes (restore isolated mods) and stop." -ForegroundColor Gray
+    Write-Host "  <KEY_KEEP_EXIT> = accept current isolated mods and stop." -ForegroundColor Gray
 
     $choice = ""
     while ([string]::IsNullOrWhiteSpace($choice)) {
       $answerRaw = [string](Read-Host "Choice [<KEY_ISOLANTS_HINT>]")
       $answer = $answerRaw.Trim().ToLowerInvariant()
-      if ($answer -match $regexChoiceContinue) {
-        $choice = "continue-as-is"
+      if ($answer -match $regexChoiceRunRecovery) {
+        $choice = "run-recovery-and-exit"
         break
       }
-      if ($answer -match $regexChoiceRestoreContinue) {
-        $choice = "restore-and-continue"
+      if ($answer -match $regexChoiceRollbackExit) {
+        $choice = "rollback-and-exit"
         break
       }
-      if ($answer -match $regexChoiceRestoreExit) {
-        $choice = "restore-and-exit"
+      if ($answer -match $regexChoiceAcceptExit) {
+        $choice = "accept-and-exit"
         break
       }
-      if ($answer -match $regexChoiceKeepExit) {
-        $choice = "keep-and-exit"
-        break
-      }
-      Write-Host "Invalid input. Enter <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_CONTINUE>, <KEY_RESTORE_EXIT>, or <KEY_KEEP_EXIT>." -ForegroundColor Yellow
+      Write-Host "Invalid input. Enter <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_EXIT>, or <KEY_KEEP_EXIT>." -ForegroundColor Yellow
     }
 
-    if ($choice -eq "continue-as-is") {
-      Write-Host "Continuing attempts without de-isolating mods." -ForegroundColor Cyan
-      Start-Sleep -Seconds 1
-      continue
-    }
-
-    if ($choice -eq "keep-and-exit") {
+    if ($choice -eq "accept-and-exit") {
       Write-Host "Recovery skipped by user choice. Current isolated mods are kept as incompatible." -ForegroundColor Yellow
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
+      Invoke-PostSessionOutcomeDialogCleanup
       exit 0
     }
 
-    # * Restore needs mod file operations; ensure the game is closed to avoid file locks.
-    if (-not $DryRun) {
-      $closedBeforeRestore = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
-      if ($closedBeforeRestore -gt 0) {
-        Write-Host ("Closed {0} running game process(es) before restore." -f $closedBeforeRestore) -ForegroundColor Gray
+    # * User selected rollback; restore all currently isolated mods and stop.
+    if ($choice -eq "rollback-and-exit") {
+      if (-not $DryRun) {
+        $closedBeforeRestore = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+        if ($closedBeforeRestore -gt 0) {
+          Write-Host ("Closed {0} running game process(es) before restore." -f $closedBeforeRestore) -ForegroundColor Gray
+        }
+        [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "restore isolated mods")
       }
-      [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "restore isolated mods")
+
+      Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
+      $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+      if (-not $ok) {
+        Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
+        exit 1
+      }
+      $sessionIsolationCulpritByJar = @{}
+      Write-Host "Stopping by user choice." -ForegroundColor Yellow
+      Invoke-PostSessionOutcomeDialogCleanup
+      exit 0
     }
 
-    $restoreLabel = if ($choice -eq "restore-and-exit") { "before exit" } else { "before continuing" }
-    Write-Host ("Restoring isolated mods {0}..." -f $restoreLabel) -ForegroundColor Cyan
-    $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
-    if (-not $ok) {
-      Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
-      exit 1
-    }
-    $sessionIsolationCulpritByJar = @{}
-
-    if ($choice -eq "restore-and-exit") {
-      Write-Host "If the script did not resolve the issue or broke on specific mods and dependencies, isolate those toxic mods manually while the script runs." -ForegroundColor Yellow
+    # * Recovery mode: run Recovery stage once and stop.
+    if (-not $recoveryAvailable) {
+      Write-Host "Recovery stage disabled in config ([Stages].EnableRecovery=false)." -ForegroundColor Yellow
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
       exit 0
     }
 
-    continue
+    if (-not $DryRun) {
+      $closedBeforeRecovery = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
+      if ($closedBeforeRecovery -gt 0) {
+        Write-Host ("Closed {0} running game process(es) before Recovery." -f $closedBeforeRecovery) -ForegroundColor Gray
+      }
+      [void](Wait-ConfiguredGameExit -StartedAfter $sessionStartTime -WarningContext "Recovery analysis")
+    }
+
+    Write-Host "Running Recovery analysis." -ForegroundColor Cyan
+    try {
+      $recParams = Get-RecoveryParam
+      $culpritDataForRecovery = @($sessionIsolationCulpritHistoryByJar.Values | ForEach-Object {
+          [pscustomobject]@{
+            JarName = [string]$_.JarName
+            CrashEvidenceKey = if ($_ | Get-Member -Name "CrashEvidenceKey" -MemberType NoteProperty, Property) { [string]$_.CrashEvidenceKey } else { "" }
+            StorageLegacyPath = [string]$_.StorageLegacyPath
+            GameLegacyPath = [string]$_.GameLegacyPath
+          }
+        })
+      $recParams["CulpritDataJson"] = ($culpritDataForRecovery | ConvertTo-Json -Compress -Depth 5)
+      $firstCulpritMove = $sessionIsolationCulpritHistoryByJar.Values | Select-Object -First 1
+      if ($null -ne $firstCulpritMove) {
+        $recParams["Minecraft"] = if ($firstCulpritMove | Get-Member -Name "Minecraft" -MemberType NoteProperty, Property) { [string]$firstCulpritMove.Minecraft } else { "unknown" }
+      }
+
+      $recResult = & $RecoveryScriptPath @recParams
+      $recObj = Select-StageResultObject -Result $recResult
+      if ($null -ne $recObj -and ($recObj | Get-Member -Name "Stage" -MemberType NoteProperty, Property) -and $recObj.Stage -eq "Recovery") {
+        foreach ($restored in @($recObj.RestoredJarNames)) {
+          $rk = [string]$restored
+          if (-not [string]::IsNullOrWhiteSpace($rk)) {
+            $sessionIsolationCulpritByJar.Remove($rk.ToLowerInvariant())
+            $sessionIsolationCulpritHistoryByJar.Remove($rk.ToLowerInvariant())
+            $sessionRecoveredJarNames[$rk.ToLowerInvariant()] = $rk
+          }
+        }
+        foreach ($newCulprit in @($recObj.NewCulpritJarNames)) {
+          $nk = [string]$newCulprit
+          if ([string]::IsNullOrWhiteSpace($nk)) { continue }
+          $move = [pscustomobject]@{
+            JarName = $nk; GameModsDir = ""; StorageModsDir = ""; StorageLegacyPath = ""
+            GameLegacyPath = ""; Minecraft = ""; KeepCulpritInGameLegacy = $true
+            CrashEvidenceKey = ""; Stage = "recovery"
+          }
+          $sessionIsolationCulpritByJar[$nk.ToLowerInvariant()] = $move
+          $sessionIsolationCulpritHistoryByJar[$nk.ToLowerInvariant()] = $move
+        }
+      }
+    } catch {
+      Write-Host ("Warning: Recovery failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+      exit 1
+    }
+    Write-Host "Stopping by user choice." -ForegroundColor Yellow
+    Invoke-PostSessionOutcomeDialogCleanup
+    exit 0
   }
 
   $answer = Read-Host $prompt
@@ -1015,6 +1180,7 @@ while ($true) {
     }
     Write-Host "If the script did not resolve the issue or broke on specific mods and dependencies, isolate those toxic mods manually while the script runs." -ForegroundColor Yellow
     Write-Host "Stopping by user choice." -ForegroundColor Yellow
+    Invoke-PostSessionOutcomeDialogCleanup
     exit 0
   }
 

@@ -204,61 +204,254 @@ function Read-LogLinesWithRetry {
   return $lines
 }
 
-function Get-FabricModIdsFromJar {
+function Add-FabricModIdsFromModJsonObject {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [psobject]$ModJson,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [System.Collections.Generic.HashSet[string]]$IdSet
+  )
+
+  if ($null -eq $ModJson) { return }
+
+  if ($ModJson.PSObject.Properties.Name -contains "id") {
+    $idValue = [string]$ModJson.id
+    if (-not [string]::IsNullOrWhiteSpace($idValue)) {
+      $null = $IdSet.Add($idValue.Trim().ToLowerInvariant())
+    }
+  }
+
+  if ($ModJson.PSObject.Properties.Name -contains "provides" -and $null -ne $ModJson.provides) {
+    if ($ModJson.provides -is [string]) {
+      $value = [string]$ModJson.provides
+      if (-not [string]::IsNullOrWhiteSpace($value)) {
+        $null = $IdSet.Add($value.Trim().ToLowerInvariant())
+      }
+      return
+    }
+
+    if ($ModJson.provides -is [System.Collections.IDictionary] -or $ModJson.provides -is [System.Management.Automation.PSCustomObject]) {
+      foreach ($prop in $ModJson.provides.psobject.properties) {
+        $value = [string]$prop.Name
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+          $null = $IdSet.Add($value.Trim().ToLowerInvariant())
+        }
+      }
+      return
+    }
+
+    foreach ($entryId in $ModJson.provides) {
+      $value = [string]$entryId
+      if (-not [string]::IsNullOrWhiteSpace($value)) {
+        $null = $IdSet.Add($value.Trim().ToLowerInvariant())
+      }
+    }
+  }
+}
+
+function Get-FabricNestedJarEntryPathsFromModJson {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [psobject]$ModJson
+  )
+
+  if ($null -eq $ModJson) { return @() }
+  if (-not ($ModJson.PSObject.Properties.Name -contains "jars")) { return @() }
+  if ($null -eq $ModJson.jars) { return @() }
+
+  $result = New-Object System.Collections.Generic.List[string]
+  $jarsValue = $ModJson.jars
+
+  if ($jarsValue -is [string]) {
+    $value = [string]$jarsValue
+    if (-not [string]::IsNullOrWhiteSpace($value)) { $result.Add($value.Trim()) | Out-Null }
+  } elseif ($jarsValue -is [System.Collections.IEnumerable]) {
+    foreach ($entry in $jarsValue) {
+      if ($null -eq $entry) { continue }
+      if ($entry -is [string]) {
+        $value = [string]$entry
+        if (-not [string]::IsNullOrWhiteSpace($value)) { $result.Add($value.Trim()) | Out-Null }
+        continue
+      }
+      if ($entry -is [System.Collections.IDictionary]) {
+        if ($entry.Contains("file")) {
+          $value = [string]$entry["file"]
+          if (-not [string]::IsNullOrWhiteSpace($value)) { $result.Add($value.Trim()) | Out-Null }
+        }
+        continue
+      }
+      if ($entry -is [pscustomobject]) {
+        if ($entry.PSObject.Properties.Name -contains "file") {
+          $value = [string]$entry.file
+          if (-not [string]::IsNullOrWhiteSpace($value)) { $result.Add($value.Trim()) | Out-Null }
+        }
+        continue
+      }
+    }
+  }
+
+  return @($result | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Replace("\", "/") } | Sort-Object -Unique)
+}
+
+function Get-FabricNestedJarEntryPathsFromJar {
   param(
     [Parameter(Mandatory = $true)]
     [string]$JarPath
   )
+
+  if ([string]::IsNullOrWhiteSpace($JarPath) -or -not (Test-Path -LiteralPath $JarPath)) { return @() }
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = $null
+  try {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+    $fabricEntry = $zip.Entries | Where-Object { [string]::Equals(([string]$_.FullName).Replace("\", "/"), "fabric.mod.json", [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+    if ($null -eq $fabricEntry) { return @() }
+
+    $reader = $null
+    $jsonText = ""
+    try {
+      $reader = New-Object System.IO.StreamReader($fabricEntry.Open(), [System.Text.Encoding]::UTF8, $true)
+      $jsonText = [string]$reader.ReadToEnd()
+    } finally {
+      if ($null -ne $reader) { $reader.Dispose() }
+    }
+    if ([string]::IsNullOrWhiteSpace($jsonText)) { return @() }
+
+    $modJson = $null
+    try {
+      $modJson = $jsonText | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      return @()
+    }
+    return @(Get-FabricNestedJarEntryPathsFromModJson -ModJson $modJson)
+  } catch {
+    return @()
+  } finally {
+    if ($null -ne $zip) { $zip.Dispose() }
+  }
+}
+
+function Get-FabricModIdsFromZipArchiveInternal {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.IO.Compression.ZipArchive]$Zip,
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeNestedJarIds = $false,
+    [Parameter(Mandatory = $false)]
+    [int]$CurrentDepth = 0,
+    [Parameter(Mandatory = $false)]
+    [int]$MaxNestedJarDepth = 2
+  )
+
+  $fabricEntry = $null
+  $entryByNormalizedPath = @{}
+  foreach ($zipEntry in @($Zip.Entries)) {
+    if ($null -eq $zipEntry) { continue }
+    $entryName = [string]$zipEntry.FullName
+    if ([string]::IsNullOrWhiteSpace($entryName)) { continue }
+    $normalizedEntryName = $entryName.Replace("\", "/")
+    $entryByNormalizedPath[$normalizedEntryName.ToLowerInvariant()] = $zipEntry
+    if ($null -eq $fabricEntry -and [string]::Equals($normalizedEntryName, "fabric.mod.json", [System.StringComparison]::OrdinalIgnoreCase)) {
+      $fabricEntry = $zipEntry
+    }
+  }
+  if ($null -eq $fabricEntry) { return @() }
+
+  $reader = $null
+  $jsonText = ""
+  try {
+    $reader = New-Object System.IO.StreamReader($fabricEntry.Open(), [System.Text.Encoding]::UTF8, $true)
+    $jsonText = [string]$reader.ReadToEnd()
+  } finally {
+    if ($null -ne $reader) { $reader.Dispose() }
+  }
+  if ([string]::IsNullOrWhiteSpace($jsonText)) { return @() }
+
+  $modJson = $null
+  try {
+    $modJson = $jsonText | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    return @()
+  }
+
+  $idSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  Add-FabricModIdsFromModJsonObject -ModJson $modJson -IdSet $idSet
+
+  if ($IncludeNestedJarIds -and $CurrentDepth -lt $MaxNestedJarDepth) {
+    $nestedEntryPaths = @(Get-FabricNestedJarEntryPathsFromModJson -ModJson $modJson)
+    foreach ($nestedEntryPath in @($nestedEntryPaths)) {
+      $nestedPath = [string]$nestedEntryPath
+      if ([string]::IsNullOrWhiteSpace($nestedPath)) { continue }
+      $nestedKey = $nestedPath.Replace("\", "/").ToLowerInvariant()
+      if (-not $entryByNormalizedPath.ContainsKey($nestedKey)) { continue }
+
+      $nestedEntry = $entryByNormalizedPath[$nestedKey]
+      if ($null -eq $nestedEntry) { continue }
+
+      $nestedStream = $null
+      $nestedMemoryStream = $null
+      $nestedZip = $null
+      try {
+        $nestedStream = $nestedEntry.Open()
+        $nestedMemoryStream = New-Object System.IO.MemoryStream
+        $nestedStream.CopyTo($nestedMemoryStream)
+        $nestedMemoryStream.Position = 0
+
+        $nestedZip = [System.IO.Compression.ZipArchive]::new($nestedMemoryStream, [System.IO.Compression.ZipArchiveMode]::Read, $true)
+        $nestedIds = @(Get-FabricModIdsFromZipArchiveInternal `
+            -Zip $nestedZip `
+            -IncludeNestedJarIds $true `
+            -CurrentDepth ($CurrentDepth + 1) `
+            -MaxNestedJarDepth $MaxNestedJarDepth)
+        foreach ($nestedId in @($nestedIds)) {
+          $value = [string]$nestedId
+          if ([string]::IsNullOrWhiteSpace($value)) { continue }
+          $null = $idSet.Add($value.ToLowerInvariant())
+        }
+      } catch {
+        continue
+      } finally {
+        if ($null -ne $nestedZip) { $nestedZip.Dispose() }
+        if ($null -ne $nestedStream) { $nestedStream.Dispose() }
+        if ($null -ne $nestedMemoryStream) { $nestedMemoryStream.Dispose() }
+      }
+    }
+  }
+
+  if ($idSet.Count -eq 0) { return @() }
+  return @($idSet | Sort-Object -Unique)
+}
+
+function Get-FabricModIdsFromJar {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarPath,
+    [Parameter(Mandatory = $false)]
+    [bool]$IncludeNestedJarIds = $false,
+    [Parameter(Mandatory = $false)]
+    [int]$MaxNestedJarDepth = 2
+  )
+
+  if ([string]::IsNullOrWhiteSpace($JarPath) -or -not (Test-Path -LiteralPath $JarPath)) { return @() }
+  if ($MaxNestedJarDepth -lt 0) { $MaxNestedJarDepth = 0 }
 
   # * Reads fabric.mod.json from the jar (zip) without extracting to disk.
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = $null
   try {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
-    $entry = $zip.Entries | Where-Object { $_.FullName -eq "fabric.mod.json" } | Select-Object -First 1
-    if (-not $entry) { return @() }
-    $sr = New-Object System.IO.StreamReader($entry.Open(), [System.Text.Encoding]::UTF8, $true)
-    try {
-      $jsonText = $sr.ReadToEnd()
-    } finally {
-      $sr.Dispose()
-    }
-    $obj = $jsonText | ConvertFrom-Json -ErrorAction Stop
-    $ids = @{}
-    $hasId = ($obj -and $obj.PSObject -and ($obj.PSObject.Properties.Name -contains "id"))
-    if ($hasId) {
-      $idValue = [string]$obj.id
-      if (-not [string]::IsNullOrWhiteSpace($idValue)) {
-        $ids[$idValue.Trim().ToLowerInvariant()] = $true
-      }
-    }
-    $hasProvides = ($obj -and $obj.PSObject -and ($obj.PSObject.Properties.Name -contains "provides"))
-    if ($hasProvides -and $null -ne $obj.provides) {
-      if ($obj.provides -is [string]) {
-        $value = [string]$obj.provides
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-          $ids[$value.Trim().ToLowerInvariant()] = $true
-        }
-      } elseif ($obj.provides -is [System.Collections.IDictionary] -or $obj.provides -is [System.Management.Automation.PSCustomObject]) {
-        # * In fabric.mod.json, "provides" can be a map of ID to version.
-        foreach ($prop in $obj.provides.psobject.properties) {
-          $value = [string]$prop.Name
-          if (-not [string]::IsNullOrWhiteSpace($value)) {
-            $ids[$value.Trim().ToLowerInvariant()] = $true
-          }
-        }
-      } else {
-        foreach ($entryId in $obj.provides) {
-          $value = [string]$entryId
-          if (-not [string]::IsNullOrWhiteSpace($value)) {
-            $ids[$value.Trim().ToLowerInvariant()] = $true
-          }
-        }
-      }
-    }
+    $ids = @(Get-FabricModIdsFromZipArchiveInternal `
+        -Zip $zip `
+        -IncludeNestedJarIds $IncludeNestedJarIds `
+        -CurrentDepth 0 `
+        -MaxNestedJarDepth $MaxNestedJarDepth)
     if ($ids.Count -eq 0) { return @() }
     # ! Use unary comma to prevent single-element unwrapping.
-    return ,@($ids.Keys)
+    return ,@($ids)
   } catch {
     return @()
   } finally {

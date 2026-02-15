@@ -124,6 +124,7 @@
     "Game is still running (pid: {0}). Waiting for it to exit before next Play click..." = "O jogo ainda está em execução (pid: {0}). Aguardando ele fechar antes do próximo clique em Play..."
     "Game is still running. Retrying check in {0}s..." = "O jogo ainda está em execução. Verificando novamente em {0}s..."
     "Game appears to be running after a clean launch; leaving it open before prompt." = "O jogo parece estar rodando após um lançamento limpo; deixando-o aberto antes da escolha."
+    "No crash detected after clean launch; closing game before prompt so the terminal menu is visible." = "No crash detected after clean launch; closing game before prompt so the terminal menu is visible."
     "Launcher not found. Continue retrying? (<KEY_RETRY_HINT>)" = "Launcher não encontrado. Continuar tentando? (<KEY_RETRY_HINT>)"
     "Launcher title pattern: {0}" = "Padrão de título do Launcher: {0}"
     "Launcher start canceled by user during Isolation. Stopping by user choice." = "Inicialização do Launcher cancelada pelo usuário durante o Isolamento. Parando por escolha do usuário."
@@ -202,18 +203,11 @@
     "`n[+] Matches found: {0}" = "`n[+] Coincidências encontradas: {0}"
     "`n[-] No matches found." = "`n[-] Nenhuma coincidência encontrada."
     "      reason: {0}" = "      motivo: {0}"
-    "    Closing stray crash dialog: {0}" = "    Fechando diálogo de crash aleatório: {0}"
-    "    Confirmed: removing {0} fixes the Mixin crash." = "    Confirmado: remover {0} corrige o crash de Mixin."
     "    Confirming stability ({0}s)..." = "    Confirmando estabilidade ({0}s)..."
-    "    DRYRUN: would remove and test." = "    DRYRUN: removeria e testaria."
-    "    Error during Mixin test: {0}. Rolling back." = "    Erro durante o teste de Mixin: {0}. Revertendo."
     "    Outcome: {0}" = "    Resultado: {0}"
     "    Skipping {0}: not found in game mods." = "    Pulando {0}: não encontrado nos mods do jogo."
-    "    Skipping {0}: {1}." = "    Pulando {0}: {1}."
     "    Source JAR: {0}" = "    JAR de origem: {0}"
     "    Target JAR: {0} (mod: {1})" = "    JAR de destino: {0} (mod: {1})"
-    "    Testing removal of: {0}" = "    Testando remoção de: {0}"
-    "    {0} did not fix the crash. Restoring." = "    {0} não corrigiu o crash. Restaurando."
     "  + {0}" = "  + {0}"
     "  - {0}" = "  - {0}"
     "  - {0} [{1}] tier={2}, dependents={3}; {4}" = "  - {0} [{1}] nível={2}, dependentes={3}; {4}"
@@ -319,6 +313,7 @@
     "Dependency-aware ordering forces linear isolation strategy." = "A ordenação ciente de dependências força a estratégia de isolamento linear."
     "Dependency-priority order (top): {0}" = "Ordem de prioridade de dependência (topo): {0}"
     "Dependency-priority ordering enabled. Source: {0}" = "Ordenação por prioridade de dependência ativada. Fonte: {0}"
+    "Disambiguated mod '{0}' by Mixin config evidence. Selected jar(s): {1}" = "Disambiguated mod '{0}' by Mixin config evidence. Selected jar(s): {1}"
     "Detected Fabric dialog after outcome: {0}" = "Diálogo do Fabric detectado após o resultado: {0}"
     "Detected crash dialog after outcome: {0}" = "Diálogo de crash detectado após o resultado: {0}"
     "Detected missing dependency caused by removed library '{0}'. Restoring it and isolating requiring mod(s)." = "Detectada dependência ausente causada pela remoção da biblioteca '{0}'. Restaurando-a e isolando o(s) mod(s) requerente(s)."
@@ -462,6 +457,9 @@
     "Storage quarantine dir: {0}" = "Dir de quarentena do armazenamento: {0}"
     "Strict core-only baseline succeeded. Hash-cached mods are excluded for this layering run." = "Base estritamente apenas do núcleo bem-sucedida. Mods em cache de hash estão excluídos para esta rodada de análise por camadas."
     "To retry the launch WITH these mods, they must be restored from Legacy first." = "Para tentar o lançamento COM estes mods, eles devem ser restaurados do Legacy primeiro."
+    "Why this prompt appears: previous attempts isolated one or more mods into Legacy to test stability." = "Why this prompt appears: previous attempts isolated one or more mods into Legacy to test stability."
+    "The latest launch looked clean, but isolated mods are still excluded. Choose to keep isolation or restore the full mod set." = "The latest launch looked clean, but isolated mods are still excluded. Choose to keep isolation or restore the full mod set."
+    "Choose whether to continue testing with isolated mods or restore them before the next action." = "Choose whether to continue testing with isolated mods or restore them before the next action."
     "Unhandled error: {0}" = "Erro não tratado: {0}"
     "User interruption detected. Restoring mods from legacy log..." = "Interrupção do usuário detectada. Restaurando mods do log legado..."
     "Using broad UI Automation search fallback for Play element." = "Usando busca ampla via UI Automation como fallback para o elemento Play."
@@ -514,6 +512,18 @@
     "{0} baseline outcome: {1}" = "Resultado base de {0}: {1}"
     "{0} baseline signature is empty. Error change detection may be limited." = "A assinatura base de {0} está vazia. A detecção de mudança de erro pode ser limitada."
 
+    "    Closing stray crash dialog before probe: {0}" = "    Closing stray crash dialog before probe: {0}"
+    "    Outcome ({0}): {1}" = "    Outcome ({0}): {1}"
+    "Mixin analysis: no candidate jars resolved from Mixin errors." = "Mixin analysis: no candidate jars resolved from Mixin errors."
+    "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." = "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back."
+    "Mixin analysis: no candidate jars are available for staged probing." = "Mixin analysis: no candidate jars are available for staged probing."
+    "Batch probe: disabled all {0} resolved Mixin candidate mod(s)." = "Batch probe: disabled all {0} resolved Mixin candidate mod(s)."
+    "Batch probe failed after removing all Mixin candidates. Handing off to next stage." = "Batch probe failed after removing all Mixin candidates. Handing off to next stage."
+    "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back." = "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back."
+    "    Layering probe: add back {0}" = "    Layering probe: add back {0}"
+    "    {0} does not reintroduce the crash." = "    {0} does not reintroduce the crash."
+    "    {0} reintroduces the crash. Moving to Legacy." = "    {0} reintroduces the crash. Moving to Legacy."
+    "Warning: failed to locate candidate for legacy move: {0}" = "Warning: failed to locate candidate for legacy move: {0}"
   }
   Substrings = @{
     # =========================================================================
@@ -538,4 +548,7 @@
     )
   }
 }
+
+
+
 

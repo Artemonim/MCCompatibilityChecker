@@ -76,6 +76,41 @@ function Resolve-IsolationLauncherContext {
     $cache = [hashtable]$cacheVar.Value
   }
 
+  $persistentCacheEnabled = $false
+  $persistentCacheEnabledVar = Get-Variable -Name "UsePersistentLaunchConfigCache" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $persistentCacheEnabledVar) {
+    $persistentCacheEnabled = [bool]$persistentCacheEnabledVar.Value
+  }
+
+  $persistentCacheFileName = "MCCC.launch-config-cache.json"
+  $persistentCacheFileNameVar = Get-Variable -Name "SessionLaunchConfigCacheFileName" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $persistentCacheFileNameVar -and -not [string]::IsNullOrWhiteSpace([string]$persistentCacheFileNameVar.Value)) {
+    $persistentCacheFileName = [string]$persistentCacheFileNameVar.Value
+  }
+
+  $persistentCachePath = ""
+  $persistentCachePathVar = Get-Variable -Name "SessionLaunchConfigCachePath" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $persistentCachePathVar -and -not [string]::IsNullOrWhiteSpace([string]$persistentCachePathVar.Value)) {
+    $persistentCachePath = [string]$persistentCachePathVar.Value
+  } elseif (-not [string]::IsNullOrWhiteSpace($gameModsDir) -and -not [string]::IsNullOrWhiteSpace($persistentCacheFileName)) {
+    $persistentCachePath = Join-Path -Path $gameModsDir -ChildPath $persistentCacheFileName
+  }
+
+  $persistentCacheMaxEntries = 5000
+  $persistentCacheMaxEntriesVar = Get-Variable -Name "SessionLaunchConfigCacheMaxEntries" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $persistentCacheMaxEntriesVar) {
+    $candidateMaxEntries = [int]$persistentCacheMaxEntriesVar.Value
+    if ($candidateMaxEntries -gt 0) {
+      $persistentCacheMaxEntries = $candidateMaxEntries
+    }
+  }
+
+  $persistentCacheInitialized = $false
+  $persistentCacheInitializedVar = Get-Variable -Name "sessionSuccessfulLaunchConfigCacheInitialized" -Scope Script -ErrorAction SilentlyContinue
+  if ($null -ne $persistentCacheInitializedVar) {
+    $persistentCacheInitialized = [bool]$persistentCacheInitializedVar.Value
+  }
+
   return [pscustomobject]@{
     Paths = [pscustomobject]@{
       GameModsDir = $gameModsDir
@@ -111,6 +146,10 @@ function Resolve-IsolationLauncherContext {
     Cache = [pscustomobject]@{
       EnableSessionLaunchConfigCache = $cacheEnabled
       SessionSuccessfulLaunchConfigCache = $cache
+      UsePersistentLaunchConfigCache = $persistentCacheEnabled
+      SessionLaunchConfigCachePath = $persistentCachePath
+      SessionLaunchConfigCacheMaxEntries = $persistentCacheMaxEntries
+      SessionSuccessfulLaunchConfigCacheInitialized = $persistentCacheInitialized
     }
   }
 }
@@ -195,6 +234,287 @@ function Get-SessionLaunchConfigKey {
   return ($jarNames -join "|")
 }
 
+function Get-SessionLaunchConfigCacheToken {
+  [OutputType([string])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ConfigKey
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ConfigKey)) { return "" }
+
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($ConfigKey)
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hashBytes = $sha.ComputeHash($bytes)
+    return ([System.BitConverter]::ToString($hashBytes).Replace("-", "").ToLowerInvariant())
+  } finally {
+    if ($null -ne $sha) { $sha.Dispose() }
+  }
+}
+
+function Convert-SessionLaunchConfigCacheToTokenMap {
+  [OutputType([hashtable])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Cache
+  )
+
+  $normalized = @{}
+  foreach ($entry in @($Cache.GetEnumerator())) {
+    if ($null -eq $entry) { continue }
+    $rawKey = [string]$entry.Key
+    if ([string]::IsNullOrWhiteSpace($rawKey)) { continue }
+    $token = ""
+    if ($rawKey -match "^[a-f0-9]{64}$") {
+      $token = $rawKey.ToLowerInvariant()
+    } else {
+      $token = Get-SessionLaunchConfigCacheToken -ConfigKey $rawKey
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) { continue }
+
+    $timestamp = [string]$entry.Value
+    if ([string]::IsNullOrWhiteSpace($timestamp)) {
+      $timestamp = (Get-Date).ToString("o")
+    }
+
+    if ($normalized.ContainsKey($token)) {
+      try {
+        $existingTime = [datetime]::Parse([string]$normalized[$token])
+        $candidateTime = [datetime]::Parse($timestamp)
+        if ($candidateTime -gt $existingTime) {
+          $normalized[$token] = $timestamp
+        }
+      } catch {
+        $normalized[$token] = $timestamp
+      }
+    } else {
+      $normalized[$token] = $timestamp
+    }
+  }
+
+  return $normalized
+}
+
+function Read-SessionLaunchConfigCacheFromDisk {
+  [OutputType([hashtable])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $result = @{}
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $result }
+  if (-not (Test-Path -LiteralPath $Path)) { return $result }
+
+  try {
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $result }
+
+    $parsed = ConvertFrom-Json -InputObject $raw -AsHashtable -ErrorAction Stop
+    if ($null -eq $parsed -or -not ($parsed -is [hashtable])) { return $result }
+
+    $entries = $parsed["configs"]
+    if ($null -eq $entries -or -not ($entries -is [hashtable])) { return $result }
+
+    foreach ($entry in @($entries.GetEnumerator())) {
+      if ($null -eq $entry) { continue }
+      $rawKey = [string]$entry.Key
+      if ([string]::IsNullOrWhiteSpace($rawKey)) { continue }
+      $key = ""
+      if ($rawKey -match "^[a-f0-9]{64}$") {
+        $key = $rawKey.ToLowerInvariant()
+      } else {
+        $key = Get-SessionLaunchConfigCacheToken -ConfigKey $rawKey
+      }
+      if ([string]::IsNullOrWhiteSpace($key)) { continue }
+      $value = [string]$entry.Value
+      if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = (Get-Date).ToString("o")
+      }
+      $result[$key] = $value
+    }
+  } catch {
+    return @{}
+  }
+
+  return $result
+}
+
+function Write-SessionLaunchConfigCacheToDisk {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Cache,
+    [Parameter(Mandatory = $false)]
+    [int]$MaxEntries = 5000
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  if ($null -eq $Cache) { return }
+  if ($MaxEntries -lt 1) { $MaxEntries = 1 }
+
+  $rows = @()
+  foreach ($entry in @($Cache.GetEnumerator())) {
+    if ($null -eq $entry) { continue }
+    $key = [string]$entry.Key
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+
+    $rawTimestamp = [string]$entry.Value
+    $parsedTimestamp = [datetime]::MinValue
+    if (-not [string]::IsNullOrWhiteSpace($rawTimestamp)) {
+      try {
+        $parsedTimestamp = [datetime]::Parse($rawTimestamp)
+      } catch {
+        $parsedTimestamp = [datetime]::MinValue
+      }
+    }
+
+    $rows += @([pscustomobject]@{
+        Key = $key
+        TimestampRaw = $rawTimestamp
+        TimestampValue = $parsedTimestamp
+      })
+  }
+
+  $sortedRows = @(
+    $rows |
+      Sort-Object -Property `
+        @{ Expression = { [datetime]$_.TimestampValue }; Descending = $true }, `
+        @{ Expression = { [string]$_.Key }; Ascending = $true }
+  )
+  if ($sortedRows.Count -gt $MaxEntries) {
+    $sortedRows = @($sortedRows | Select-Object -First $MaxEntries)
+  }
+
+  $normalized = @{}
+  foreach ($row in $sortedRows) {
+    $key = [string]$row.Key
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    $rawValue = [string]$row.TimestampRaw
+    if ([string]::IsNullOrWhiteSpace($rawValue)) {
+      $rawValue = (Get-Date).ToString("o")
+    }
+    $normalized[$key] = $rawValue
+  }
+
+  $payload = @{
+    schemaVersion = 1
+    updatedUtc = (Get-Date).ToUniversalTime().ToString("o")
+    configs = $normalized
+  }
+
+  $parent = Split-Path -Path $Path -Parent
+  if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+  }
+
+  $json = ConvertTo-Json -InputObject $payload -Depth 6
+  Set-Content -LiteralPath $Path -Value $json -Encoding UTF8 -ErrorAction Stop
+}
+
+function Initialize-SessionSuccessfulLaunchConfigCache {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$Context,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Cache
+  )
+
+  if ($null -eq $Context) { return }
+  if ($null -eq $Context.Cache) { return }
+
+  $alreadyInitialized = $false
+  if ($Context.Cache | Get-Member -Name "SessionSuccessfulLaunchConfigCacheInitialized" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $alreadyInitialized = [bool]$Context.Cache.SessionSuccessfulLaunchConfigCacheInitialized
+  }
+  if ($alreadyInitialized) { return }
+
+  if ($Context.Cache | Get-Member -Name "SessionSuccessfulLaunchConfigCacheInitialized" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $Context.Cache.SessionSuccessfulLaunchConfigCacheInitialized = $true
+  } else {
+    Add-Member -InputObject $Context.Cache -NotePropertyName "SessionSuccessfulLaunchConfigCacheInitialized" -NotePropertyValue $true -Force
+  }
+  Set-Variable -Name "sessionSuccessfulLaunchConfigCacheInitialized" -Scope Script -Value $true
+
+  $persistentEnabled = $false
+  if ($Context.Cache | Get-Member -Name "UsePersistentLaunchConfigCache" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $persistentEnabled = [bool]$Context.Cache.UsePersistentLaunchConfigCache
+  }
+  if (-not $persistentEnabled) { return }
+
+  $cachePath = ""
+  if ($Context.Cache | Get-Member -Name "SessionLaunchConfigCachePath" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $cachePath = [string]$Context.Cache.SessionLaunchConfigCachePath
+  }
+  if ([string]::IsNullOrWhiteSpace($cachePath)) { return }
+
+  $maxEntries = 5000
+  if ($Context.Cache | Get-Member -Name "SessionLaunchConfigCacheMaxEntries" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $maxEntries = [int]$Context.Cache.SessionLaunchConfigCacheMaxEntries
+  }
+  if ($maxEntries -lt 1) { $maxEntries = 5000 }
+
+  $persisted = Read-SessionLaunchConfigCacheFromDisk -Path $cachePath
+  foreach ($entry in @($persisted.GetEnumerator())) {
+    if ($null -eq $entry) { continue }
+    $key = [string]$entry.Key
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    if (-not $Cache.ContainsKey($key)) {
+      $Cache[$key] = [string]$entry.Value
+    }
+  }
+
+  $normalizedCache = Convert-SessionLaunchConfigCacheToTokenMap -Cache $Cache
+  if ($null -ne $Context.Cache) {
+    $Context.Cache.SessionSuccessfulLaunchConfigCache = $normalizedCache
+  }
+  Set-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -Value $normalizedCache
+  $Cache = $normalizedCache
+
+  try {
+    Write-SessionLaunchConfigCacheToDisk -Path $cachePath -Cache $Cache -MaxEntries $maxEntries
+  } catch {
+    Write-Verbose ("Failed to persist launch-config cache during initialization: {0}" -f $_.Exception.Message)
+  }
+}
+
+function Save-SessionSuccessfulLaunchConfigCache {
+  param(
+    [Parameter(Mandatory = $true)]
+    [pscustomobject]$Context,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$Cache
+  )
+
+  if ($null -eq $Context -or $null -eq $Context.Cache) { return }
+
+  $persistentEnabled = $false
+  if ($Context.Cache | Get-Member -Name "UsePersistentLaunchConfigCache" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $persistentEnabled = [bool]$Context.Cache.UsePersistentLaunchConfigCache
+  }
+  if (-not $persistentEnabled) { return }
+
+  $cachePath = ""
+  if ($Context.Cache | Get-Member -Name "SessionLaunchConfigCachePath" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $cachePath = [string]$Context.Cache.SessionLaunchConfigCachePath
+  }
+  if ([string]::IsNullOrWhiteSpace($cachePath)) { return }
+
+  $maxEntries = 5000
+  if ($Context.Cache | Get-Member -Name "SessionLaunchConfigCacheMaxEntries" -MemberType NoteProperty, Property -ErrorAction SilentlyContinue) {
+    $maxEntries = [int]$Context.Cache.SessionLaunchConfigCacheMaxEntries
+  }
+  if ($maxEntries -lt 1) { $maxEntries = 5000 }
+
+  try {
+    Write-SessionLaunchConfigCacheToDisk -Path $cachePath -Cache $Cache -MaxEntries $maxEntries
+  } catch {
+    Write-Verbose ("Failed to persist launch-config cache: {0}" -f $_.Exception.Message)
+  }
+}
+
 function Get-SessionSuccessfulLaunchConfigCache {
   param(
     [Parameter(Mandatory = $false)]
@@ -208,6 +528,13 @@ function Get-SessionSuccessfulLaunchConfigCache {
     $cache = $ctx.Cache.SessionSuccessfulLaunchConfigCache
   }
   if ($null -ne $cache -and $cache -is [hashtable]) {
+    $cache = Convert-SessionLaunchConfigCacheToTokenMap -Cache $cache
+    if ($null -ne $ctx.Cache) {
+      $ctx.Cache.SessionSuccessfulLaunchConfigCache = $cache
+    } else {
+      Set-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -Value $cache
+    }
+    Initialize-SessionSuccessfulLaunchConfigCache -Context $ctx -Cache $cache
     return [hashtable]$cache
   }
 
@@ -217,6 +544,7 @@ function Get-SessionSuccessfulLaunchConfigCache {
   } else {
     Set-Variable -Name "sessionSuccessfulLaunchConfigCache" -Scope Script -Value $cache
   }
+  Initialize-SessionSuccessfulLaunchConfigCache -Context $ctx -Cache $cache
   return $cache
 }
 
@@ -238,10 +566,12 @@ function Register-SessionLaunchConfigSuccess {
   }
   if (-not $cacheEnabled) { return }
 
+  $cacheToken = Get-SessionLaunchConfigCacheToken -ConfigKey $ConfigKey
+  if ([string]::IsNullOrWhiteSpace($cacheToken)) { return }
+
   $cache = Get-SessionSuccessfulLaunchConfigCache -Context $ctx
-  if (-not $cache.ContainsKey($ConfigKey)) {
-    $cache[$ConfigKey] = (Get-Date).ToString("o")
-  }
+  $cache[$cacheToken] = (Get-Date).ToString("o")
+  Save-SessionSuccessfulLaunchConfigCache -Context $ctx -Cache $cache
 }
 
 function Invoke-ConfiguredLaunchAttempt {
@@ -260,12 +590,16 @@ function Invoke-ConfiguredLaunchAttempt {
   }
 
   $configKey = ""
+  $configCacheLookupKey = ""
   if ($cacheEnabled) {
     $configKey = Get-SessionLaunchConfigKey -ModsDir ([string]$ctx.Paths.GameModsDir)
-
     if (-not [string]::IsNullOrWhiteSpace($configKey)) {
+      $configCacheLookupKey = Get-SessionLaunchConfigCacheToken -ConfigKey $configKey
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($configCacheLookupKey)) {
       $cache = Get-SessionSuccessfulLaunchConfigCache -Context $ctx
-      if ($cache.ContainsKey($configKey)) {
+      if ($cache.ContainsKey($configCacheLookupKey)) {
         Write-Host "Session launch cache: skipping already passed mod configuration (use -NoCache to force re-check)." -ForegroundColor Gray
         return [pscustomobject]@{
           Type = "Timeout"
@@ -679,7 +1013,10 @@ function Wait-ForOutcome {
   }
 
   $launchTriggered = $gameStarted -or $launcherClosed -or $logUpdated
-  if ($RequireGameStartForTimeout -and (-not $gameStarted)) {
+  $launchEvidenceForTimeout = $gameStarted -or $logUpdated
+  # * Keep NoLaunch strict to "no launch evidence at all", but do not use launcher closure alone as success.
+  # * Launcher close can be a manual cancel, while log activity is a safer fallback when game process heuristics miss.
+  if ($RequireGameStartForTimeout -and (-not $gameStarted) -and (-not $launchEvidenceForTimeout)) {
     return [pscustomobject]@{
       Type = "NoLaunch"
       Window = $null

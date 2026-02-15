@@ -83,7 +83,7 @@ Ayarlar `config.ini` (varsayılanlar) ve `config.local.ini` (sizin özel ayarlar
 | `LauncherExePath` | Başlatıcı çalıştırılabilir dosya yolu (çalışan bir tanesine bağlanmak için boş bırakın) |
 | `EnableMixinAnalysis` | Mixin analizi aşamasını etkinleştir (varsayılan: `true`) |
 | `EnableLayering` | Katmanlama ve çıkarmalı izolasyonu etkinleştir (varsayılan: `true`) |
-| `EnableRecovery` | Hayalet suçluların kurtarılmasını etkinleştir (varsayılan: `false`) |
+| `EnableRecovery` | Hayalet suçluların kurtarılmasını etkinleştir (varsayılan: `true`) |
 | `Language` | Konsol mesajları dili (`[Localization].Language`). Boşsa: işletim sistemi dilinden otomatik, yedek olarak `en` |
 
 Şu anki mevcut yereller: `en`, `ru`.

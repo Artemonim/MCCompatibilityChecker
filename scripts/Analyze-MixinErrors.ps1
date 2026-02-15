@@ -125,6 +125,21 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$PollIntervalSeconds = 2,
 
+  # * If true, uses MCCC.json in GameModsDir to prioritize unknown candidates.
+  [Parameter(Mandatory = $false)]
+  [bool]$UseHashCache = $true,
+
+  # * Cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$HashCacheFileName = "MCCC.json",
+
+  # * File hash retry settings (handles transient locks).
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryCount = 3,
+
+  [Parameter(Mandatory = $false)]
+  [int]$HashCacheHashRetryDelayMs = 200,
+
   [Parameter(Mandatory = $false)]
   [ValidateSet("Tool", "File", "Internal")]
   [string]$DependencyMapSource = "Tool",
@@ -196,6 +211,9 @@ if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy hel
 $sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
 if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
 . $sharedStageResultPath
+$sharedHashCachePath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-HashCache.ps1"
+if (-not (Test-Path -LiteralPath $sharedHashCachePath)) { throw ("Shared hash cache helpers not found: {0}" -f $sharedHashCachePath) }
+. $sharedHashCachePath
 $runtimeConfig = Initialize-McccRuntimeConfig `
   -StartDir $PSScriptRoot `
   -BoundParameters $PSBoundParameters `
@@ -823,7 +841,7 @@ if ($modIdToJar.Count -eq 0 -and $fallbackMixinConfigToJar.Count -eq 0) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# * Resolve candidates and test targeted removal.
+# * Resolve candidates and run staged Mixin strategy.
 # ────────────────────────────────────────────────────────────────────────────
 
 $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $logSnapshot.Lines
@@ -833,7 +851,132 @@ $culpritJarNames = New-Object System.Collections.Generic.List[string]
 $culpritMoves = New-Object System.Collections.Generic.List[pscustomobject]
 $mixinConflicts = New-Object System.Collections.Generic.List[pscustomobject]
 $resolved = $false
-$candidateTestStatusByJar = @{}
+
+$script:mixinHashCacheEnabled = $false
+$script:mixinHashCache = $null
+$script:mixinHashKnownGoodByJar = @{}
+if ((-not $DryRun) -and $UseHashCache) {
+  $mixinCachePath = Get-McccHashCachePath -GameModsDir $GameModsDir -FileName $HashCacheFileName
+  $script:mixinHashCache = Read-McccHashCache -Path $mixinCachePath
+  if ($null -ne $script:mixinHashCache -and $script:mixinHashCache.ContainsKey("passed") -and ($script:mixinHashCache["passed"] -is [hashtable])) {
+    $script:mixinHashCacheEnabled = ($script:mixinHashCache["passed"].Count -gt 0)
+  }
+}
+
+function Test-MixinCandidateKnownGoodByHash {
+  [OutputType([bool])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$JarName
+  )
+
+  if (-not $script:mixinHashCacheEnabled) { return $false }
+  if ([string]::IsNullOrWhiteSpace($JarName)) { return $false }
+
+  $key = $JarName.Trim().ToLowerInvariant()
+  if ($script:mixinHashKnownGoodByJar.ContainsKey($key)) {
+    return [bool]$script:mixinHashKnownGoodByJar[$key]
+  }
+
+  $jarPath = Join-Path -Path $GameModsDir -ChildPath $JarName
+  if (-not (Test-Path -LiteralPath $jarPath)) {
+    $script:mixinHashKnownGoodByJar[$key] = $false
+    return $false
+  }
+
+  $hash = Get-Sha256LowerHex -Path $jarPath -Retries $HashCacheHashRetryCount -DelayMs $HashCacheHashRetryDelayMs
+  if ([string]::IsNullOrWhiteSpace($hash)) {
+    $script:mixinHashKnownGoodByJar[$key] = $false
+    return $false
+  }
+
+  $isKnownGood = Test-McccHashPassed -Cache $script:mixinHashCache -Sha256LowerHex $hash
+  $script:mixinHashKnownGoodByJar[$key] = [bool]$isKnownGood
+  return [bool]$isKnownGood
+}
+
+function Get-MixinProbeConfirmDuration {
+  [OutputType([int])]
+  param()
+
+  $effectiveConfirmSeconds = $SuccessConfirmSeconds
+  if ($useDynamicOutcomeTimeout -or $useDynamicSuccessConfirm) {
+    $activeModCount = Get-ActiveModCount -ModsDir $GameModsDir
+    $scaledLaunchSeconds = Get-ScaledLaunchWaitTime -ActiveModCount $activeModCount `
+      -PerModSeconds $launchWaitPerModSeconds `
+      -BaseSeconds $launchWaitBaseSeconds
+    if ($useDynamicOutcomeTimeout) { Set-Variable -Name "OutcomeTimeoutSeconds" -Scope Script -Value $scaledLaunchSeconds }
+    if ($useDynamicSuccessConfirm) { $effectiveConfirmSeconds = $scaledLaunchSeconds }
+  }
+  return [int]$effectiveConfirmSeconds
+}
+
+function Invoke-MixinLaunchProbe {
+  [OutputType([pscustomobject])]
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$ProbeLabel = ""
+  )
+
+  $effectiveConfirmSeconds = Get-MixinProbeConfirmDuration
+  $launchStart = Get-Date
+  $outcomeType = "Unknown"
+  $isSuccess = $false
+
+  try {
+    # * Close any stray crash dialogs before each probe.
+    $strayCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+    if ($null -ne $strayCrash) {
+      Write-Host ("    Closing stray crash dialog before probe: {0}" -f $strayCrash.Title) -ForegroundColor Gray
+      Invoke-WindowClose -Handle $strayCrash.Handle
+      Start-Sleep -Seconds 2
+    }
+
+    $outcome = Invoke-ConfiguredLaunchAttempt
+    $outcomeType = [string]$outcome.Type
+    if ([string]::IsNullOrWhiteSpace($ProbeLabel)) {
+      Write-Host ("    Outcome: {0}" -f $outcomeType) -ForegroundColor Gray
+    } else {
+      Write-Host ("    Outcome ({0}): {1}" -f $ProbeLabel, $outcomeType) -ForegroundColor Gray
+    }
+
+    if ($outcome.Type -eq "Timeout") {
+      Write-Host ("    Confirming stability ({0}s)..." -f $effectiveConfirmSeconds) -ForegroundColor Gray
+      Start-Sleep -Seconds $effectiveConfirmSeconds
+      $crashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+      if ($null -eq $crashNow) {
+        $isSuccess = $true
+      } else {
+        Invoke-WindowClose -Handle $crashNow.Handle
+      }
+      [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
+    }
+
+    if ($outcome.Type -eq "CrashDialog" -and $null -ne $outcome.Window) {
+      Invoke-WindowClose -Handle $outcome.Window.Handle
+    }
+    if ($outcome.Type -eq "FabricDialog" -and $null -ne $outcome.Window) {
+      Invoke-WindowClose -Handle $outcome.Window.Handle
+    }
+
+    Start-Sleep -Seconds 2
+    $postCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+    if ($null -ne $postCrash) {
+      Invoke-WindowClose -Handle $postCrash.Handle
+    }
+  } finally {
+    [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
+    [void](Wait-ConfiguredGameExit -StartedAfter $launchStart -WarningContext "Mixin analysis cleanup")
+  }
+
+  return [pscustomobject]@{
+    IsSuccess = [bool]$isSuccess
+    OutcomeType = $outcomeType
+  }
+}
+
+$candidateByJar = @{}
+$candidateOrder = 0
 
 foreach ($mxErr in $mixinErrors) {
   # * Resolve source mod JAR.
@@ -880,213 +1023,217 @@ foreach ($mxErr in $mixinErrors) {
   if ($null -ne $sourceJar) { Write-Host ("    Source JAR: {0}" -f $sourceJar) -ForegroundColor Gray }
   if ($null -ne $targetJar) { Write-Host ("    Target JAR: {0} (mod: {1})" -f $targetJar, $targetModId) -ForegroundColor Gray }
 
-  # * Try candidates: source first, then target.
-  $candidates = @()
-  if ($null -ne $sourceJar) { $candidates += $sourceJar }
+  # * Try candidates with priority: unknown-by-hash first, then known-good-by-hash.
+  $candidateObjects = New-Object System.Collections.Generic.List[object]
+  if ($null -ne $sourceJar) {
+    $candidateObjects.Add([pscustomobject]@{
+        JarName = $sourceJar
+        BaseOrder = 0
+      })
+  }
   $allowTargetCandidate = ($null -ne $targetJar -and $targetJar -ne $sourceJar)
   if ($allowTargetCandidate -and $mxErr.ErrorKind -eq "apply_failed") {
     if ($isMinecraftTargetClass -or $targetModId -in @("minecraft", "java", "fabricloader")) {
       $allowTargetCandidate = $false
     }
   }
-  if ($allowTargetCandidate) { $candidates += $targetJar }
-
-  foreach ($candJar in $candidates) {
-    $candidateKey = $candJar.ToLowerInvariant()
-    if ($candidateTestStatusByJar.ContainsKey($candidateKey)) {
-      $previousStatus = [string]$candidateTestStatusByJar[$candidateKey]
-      $statusLabel = switch ($previousStatus) {
-        "success" { "already confirmed as culprit"; break }
-        "missing" { "not found in game mods"; break }
-        default { "already tested and did not fix the crash" }
-      }
-      Write-Host ("    Skipping {0}: {1}." -f $candJar, $statusLabel) -ForegroundColor Gray
-      if ($previousStatus -eq "success") {
-        $resolved = $true
-        break
-      }
-      continue
-    }
-
-    $gamePath = Join-Path -Path $GameModsDir -ChildPath $candJar
-    if (-not (Test-Path -LiteralPath $gamePath)) {
-      Write-Host ("    Skipping {0}: not found in game mods." -f $candJar) -ForegroundColor Gray
-      $candidateTestStatusByJar[$candidateKey] = "missing"
-      continue
-    }
-
-    Write-Host ("    Testing removal of: {0}" -f $candJar) -ForegroundColor Cyan
-
-    if ($DryRun) {
-      Write-Host "    DRYRUN: would remove and test." -ForegroundColor Gray
-      continue
-    }
-
-    # * Quarantine the candidate.
-    $tempDir = Join-Path -Path $GameModsDir -ChildPath ("{0}\temp\mixin-{1}" -f $GameLegacyFolderName, (Get-Date -Format "yyyyMMdd-HHmmss"))
-    if (-not (Test-Path -LiteralPath $tempDir)) {
-      New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    }
-    $tempDest = Join-Path -Path $tempDir -ChildPath $candJar
-    Move-Item -LiteralPath $gamePath -Destination $tempDest -Force
-
-    $storageTemp = $null
-    $storagePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $candJar } else { $null }
-    if ($useStorage -and $storagePath -and (Test-Path -LiteralPath $storagePath)) {
-      $storageTemp = Join-Path -Path $tempDir -ChildPath ("storage-{0}" -f $candJar)
-      Move-Item -LiteralPath $storagePath -Destination $storageTemp -Force
-    }
-
-    $isSuccess = $false
-    $launchStart = $null
-    try {
-      # * Close any stray crash dialogs.
-      $strayCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-      if ($null -ne $strayCrash) {
-        Write-Host ("    Closing stray crash dialog: {0}" -f $strayCrash.Title) -ForegroundColor Gray
-        Invoke-WindowClose -Handle $strayCrash.Handle
-        Start-Sleep -Seconds 2
-      }
-
-      # * Launch game.
-      $effectiveConfirmSeconds = $SuccessConfirmSeconds
-      if ($useDynamicOutcomeTimeout -or $useDynamicSuccessConfirm) {
-        $activeModCount = Get-ActiveModCount -ModsDir $GameModsDir
-        $scaledLaunchSeconds = Get-ScaledLaunchWaitTime -ActiveModCount $activeModCount `
-          -PerModSeconds $launchWaitPerModSeconds `
-          -BaseSeconds $launchWaitBaseSeconds
-        if ($useDynamicOutcomeTimeout) { $OutcomeTimeoutSeconds = $scaledLaunchSeconds }
-        if ($useDynamicSuccessConfirm) { $effectiveConfirmSeconds = $scaledLaunchSeconds }
-      }
-
-      $launchStart = Get-Date
-      $outcome = Invoke-ConfiguredLaunchAttempt
-      Write-Host ("    Outcome: {0}" -f $outcome.Type) -ForegroundColor Gray
-
-      if ($outcome.Type -eq "Timeout") {
-        # * Wait for stability confirmation.
-        Write-Host ("    Confirming stability ({0}s)..." -f $effectiveConfirmSeconds) -ForegroundColor Gray
-        Start-Sleep -Seconds $effectiveConfirmSeconds
-        $crashNow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-        if ($null -eq $crashNow) {
-          $isSuccess = $true
-        } else {
-          Invoke-WindowClose -Handle $crashNow.Handle
-        }
-        # * Kill game process.
-        [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
-      }
-
-      if ($outcome.Type -eq "CrashDialog" -and $null -ne $outcome.Window) {
-        Invoke-WindowClose -Handle $outcome.Window.Handle
-      }
-      if ($outcome.Type -eq "FabricDialog" -and $null -ne $outcome.Window) {
-        Invoke-WindowClose -Handle $outcome.Window.Handle
-      }
-
-      # * Close post-outcome crash dialogs.
-      Start-Sleep -Seconds 2
-      $postCrash = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-      if ($null -ne $postCrash) {
-        Invoke-WindowClose -Handle $postCrash.Handle
-      }
-    } catch {
-      # ! Error during launch/test — restore quarantined mod and re-throw.
-      Write-Host ("    Error during Mixin test: {0}. Rolling back." -f $_.Exception.Message) -ForegroundColor Red
-      if (Test-Path -LiteralPath $tempDest) {
-        Move-Item -LiteralPath $tempDest -Destination $gamePath -Force -ErrorAction SilentlyContinue
-      }
-      if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp) -and $null -ne $storagePath) {
-        Move-Item -LiteralPath $storageTemp -Destination $storagePath -Force -ErrorAction SilentlyContinue
-      }
-      throw
-    } finally {
-      if ($null -ne $launchStart) {
-        [void](Stop-ConfiguredGameProcess -StartedAfter $launchStart)
-        [void](Wait-ConfiguredGameExit -StartedAfter $launchStart -WarningContext "Mixin analysis cleanup")
-      }
-    }
-
-    if ($isSuccess) {
-      Write-Host ("    Confirmed: removing {0} fixes the Mixin crash." -f $candJar) -ForegroundColor Green
-
-      # * Move to legacy.
-      $storageSourcePath = Get-FirstExistingPath -Candidates @($storageTemp, $tempDest)
-      $gameSourcePath = Get-FirstExistingPath -Candidates @($tempDest)
-      $moveResult = Move-CulpritToLegacyAndAppendLog `
-        -JarName $candJar `
-        -MinecraftVersion $mcVersionForLegacy `
-        -GameModsDir $GameModsDir `
-        -StorageModsDir $StorageModsDir `
-        -GameLegacyFolderName $GameLegacyFolderName `
-        -StorageLegacyFolderName $StorageLegacyFolderName `
-        -KeepCulpritInGameLegacy ([bool]$KeepCulpritInGameLegacy) `
-        -StorageSourcePath $storageSourcePath `
-        -GameSourcePath $gameSourcePath `
-        -StorageTransferMode "Copy" `
-        -GameTransferMode "Move"
-      $culpritStorageLegacy = $moveResult.StorageLegacyPath
-      $culpritGameLegacy = $moveResult.GameLegacyPath
-
-      $priorityTier = 4
-      $priorityDependentCount = -1
-      $priorityKnown = $false
-      $candKey = $candJar.ToLowerInvariant()
-      if ($mixinPriorityByJarName.ContainsKey($candKey)) {
-        $priorityMeta = $mixinPriorityByJarName[$candKey]
-        if ($null -ne $priorityMeta) {
-          $priorityTier = [int]$priorityMeta.Tier
-          $priorityDependentCount = [int]$priorityMeta.DependentCount
-          $priorityKnown = [bool]$priorityMeta.Known
-        }
-      }
-      $priorityDecision = if ($priorityKnown) {
-        "dependency-priority metadata: tier={0}, dependents={1}" -f $priorityTier, $priorityDependentCount
-      } else {
-        "dependency-priority metadata unavailable for this jar"
-      }
-
-      # * Clean up temp storage copy.
-      if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp)) {
-        Remove-Item -LiteralPath $storageTemp -Force -ErrorAction SilentlyContinue
-      }
-      # * Clean up temp game copy if not already moved.
-      if (Test-Path -LiteralPath $tempDest) {
-        Remove-Item -LiteralPath $tempDest -Force -ErrorAction SilentlyContinue
-      }
-
-      $culpritJarNames.Add($candJar)
-      $culpritMoves.Add([pscustomobject]@{
-          JarName            = $candJar
-          GameModsDir        = $GameModsDir
-          StorageModsDir     = if ($useStorage) { $StorageModsDir } else { "" }
-          StorageLegacyPath  = $culpritStorageLegacy
-          GameLegacyPath     = $culpritGameLegacy
-          Minecraft          = $mcVersionForLegacy
-          KeepCulpritInGameLegacy = [bool]$KeepCulpritInGameLegacy
-          CrashEvidenceKey   = $mxErr.ErrorLine
-          DependencyTier     = [int]$priorityTier
-          DependentModCount  = [int]$priorityDependentCount
-          DependentModCountKnown = [bool]$priorityKnown
-          PriorityDecision   = $priorityDecision
-          Stage              = "mixin-analysis"
-        })
-      $candidateTestStatusByJar[$candidateKey] = "success"
-      Write-Host ("Culprit identified: {0}" -f $candJar) -ForegroundColor Green
-      $resolved = $true
-      break
-    } else {
-      # * Restore the candidate.
-      Write-Host ("    {0} did not fix the crash. Restoring." -f $candJar) -ForegroundColor Gray
-      Move-Item -LiteralPath $tempDest -Destination $gamePath -Force
-      if ($null -ne $storageTemp -and (Test-Path -LiteralPath $storageTemp)) {
-        Move-Item -LiteralPath $storageTemp -Destination $storagePath -Force
-      }
-      $candidateTestStatusByJar[$candidateKey] = "failed"
-    }
+  if ($allowTargetCandidate) {
+    $candidateObjects.Add([pscustomobject]@{
+        JarName = $targetJar
+        BaseOrder = 1
+      })
   }
 
-  if ($resolved) { break }
+  $candidates = @(
+    $candidateObjects |
+      Sort-Object -Property `
+        @{ Expression = { if (Test-MixinCandidateKnownGoodByHash -JarName ([string]$_.JarName) ) { 1 } else { 0 } }; Ascending = $true }, `
+        @{ Expression = { [int]$_.BaseOrder }; Ascending = $true } |
+      ForEach-Object { [string]$_.JarName }
+  )
+
+  foreach ($candJar in $candidates) {
+    if ([string]::IsNullOrWhiteSpace($candJar)) { continue }
+    $candidateKey = $candJar.ToLowerInvariant()
+    if ($candidateByJar.ContainsKey($candidateKey)) { continue }
+    $candidateByJar[$candidateKey] = [pscustomobject]@{
+      JarName = $candJar
+      JarKey = $candidateKey
+      Order = $candidateOrder
+      CrashEvidenceKey = [string]$mxErr.ErrorLine
+    }
+    $candidateOrder++
+  }
+}
+
+$orderedCandidates = @(
+  $candidateByJar.Values |
+    Sort-Object -Property @{ Expression = { [int]$_.Order }; Ascending = $true }
+)
+
+if ($orderedCandidates.Count -eq 0) {
+  Write-Host "Mixin analysis: no candidate jars resolved from Mixin errors." -ForegroundColor Yellow
+} elseif ($DryRun) {
+  Write-Host ("DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." -f $orderedCandidates.Count) -ForegroundColor Gray
+} else {
+  $batchTempDir = Join-Path -Path $GameModsDir -ChildPath ("{0}\temp\mixin-batch-{1}" -f $GameLegacyFolderName, (Get-Date -Format "yyyyMMdd-HHmmss"))
+  if (-not (Test-Path -LiteralPath $batchTempDir)) {
+    New-Item -ItemType Directory -Path $batchTempDir -Force | Out-Null
+  }
+
+  $candidateStates = New-Object System.Collections.Generic.List[object]
+  try {
+    foreach ($entry in $orderedCandidates) {
+      $jarName = [string]$entry.JarName
+      if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+
+      $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
+      $tempGamePath = Join-Path -Path $batchTempDir -ChildPath $jarName
+      $storagePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $jarName } else { "" }
+      $tempStoragePath = if ($useStorage) { Join-Path -Path $batchTempDir -ChildPath ("storage-{0}" -f $jarName) } else { "" }
+
+      $state = [pscustomobject]@{
+        JarName = $jarName
+        JarKey = [string]$entry.JarKey
+        Order = [int]$entry.Order
+        CrashEvidenceKey = [string]$entry.CrashEvidenceKey
+        GamePath = $gamePath
+        TempGamePath = $tempGamePath
+        StoragePath = $storagePath
+        TempStoragePath = $tempStoragePath
+        WasQuarantined = $false
+        HasStorageBackup = $false
+        IsKnownGood = $false
+        IsCulprit = $false
+      }
+      $candidateStates.Add($state) | Out-Null
+
+      if (-not (Test-Path -LiteralPath $gamePath)) {
+        Write-Host ("    Skipping {0}: not found in game mods." -f $jarName) -ForegroundColor Gray
+        continue
+      }
+
+      Move-Item -LiteralPath $gamePath -Destination $tempGamePath -Force
+      $state.WasQuarantined = $true
+
+      if ($useStorage -and -not [string]::IsNullOrWhiteSpace($storagePath) -and (Test-Path -LiteralPath $storagePath)) {
+        Move-Item -LiteralPath $storagePath -Destination $tempStoragePath -Force
+        $state.HasStorageBackup = $true
+      }
+    }
+
+    $activeCandidates = @($candidateStates | Where-Object { [bool]$_.WasQuarantined })
+    if ($activeCandidates.Count -eq 0) {
+      Write-Host "Mixin analysis: no candidate jars are available for staged probing." -ForegroundColor Yellow
+    } else {
+      Write-Host ("Batch probe: disabled all {0} resolved Mixin candidate mod(s)." -f $activeCandidates.Count) -ForegroundColor Cyan
+      $batchProbe = Invoke-MixinLaunchProbe -ProbeLabel "batch-without-mixin-candidates"
+
+      if (-not [bool]$batchProbe.IsSuccess) {
+        Write-Host "Batch probe failed after removing all Mixin candidates. Handing off to next stage." -ForegroundColor Yellow
+      } else {
+        Write-Host "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back." -ForegroundColor Green
+        $layerOrderedCandidates = @(
+          $activeCandidates |
+            Sort-Object -Property `
+              @{ Expression = { if (Test-MixinCandidateKnownGoodByHash -JarName ([string]$_.JarName)) { 1 } else { 0 } }; Ascending = $true }, `
+              @{ Expression = { [int]$_.Order }; Ascending = $true }
+        )
+
+        foreach ($state in $layerOrderedCandidates) {
+          if ($state.IsCulprit) { continue }
+          if (Test-Path -LiteralPath $state.TempGamePath) {
+            Move-Item -LiteralPath $state.TempGamePath -Destination $state.GamePath -Force
+          }
+          if ([bool]$state.HasStorageBackup -and (Test-Path -LiteralPath $state.TempStoragePath) -and -not [string]::IsNullOrWhiteSpace([string]$state.StoragePath)) {
+            Move-Item -LiteralPath $state.TempStoragePath -Destination $state.StoragePath -Force
+          }
+
+          Write-Host ("    Layering probe: add back {0}" -f $state.JarName) -ForegroundColor Cyan
+          $probe = Invoke-MixinLaunchProbe -ProbeLabel ("add-back {0}" -f $state.JarName)
+          if ([bool]$probe.IsSuccess) {
+            Write-Host ("    {0} does not reintroduce the crash." -f $state.JarName) -ForegroundColor Gray
+            $state.IsKnownGood = $true
+            continue
+          }
+
+          Write-Host ("    {0} reintroduces the crash. Moving to Legacy." -f $state.JarName) -ForegroundColor Yellow
+
+          $storageSourcePath = if ($useStorage) {
+            Get-FirstExistingPath -Candidates @($state.StoragePath, $state.TempStoragePath)
+          } else {
+            ""
+          }
+          $gameSourcePath = Get-FirstExistingPath -Candidates @($state.GamePath, $state.TempGamePath)
+          if ([string]::IsNullOrWhiteSpace($gameSourcePath)) {
+            Write-Host ("Warning: failed to locate candidate for legacy move: {0}" -f $state.JarName) -ForegroundColor Yellow
+            continue
+          }
+
+          $moveResult = Move-CulpritToLegacyAndAppendLog `
+            -JarName $state.JarName `
+            -MinecraftVersion $mcVersionForLegacy `
+            -GameModsDir $GameModsDir `
+            -StorageModsDir $StorageModsDir `
+            -GameLegacyFolderName $GameLegacyFolderName `
+            -StorageLegacyFolderName $StorageLegacyFolderName `
+            -KeepCulpritInGameLegacy ([bool]$KeepCulpritInGameLegacy) `
+            -StorageSourcePath $storageSourcePath `
+            -GameSourcePath $gameSourcePath `
+            -StorageTransferMode "Copy" `
+            -GameTransferMode "Move"
+          $culpritStorageLegacy = $moveResult.StorageLegacyPath
+          $culpritGameLegacy = $moveResult.GameLegacyPath
+
+          $priorityTier = 4
+          $priorityDependentCount = -1
+          $priorityKnown = $false
+          if ($mixinPriorityByJarName.ContainsKey($state.JarKey)) {
+            $priorityMeta = $mixinPriorityByJarName[$state.JarKey]
+            if ($null -ne $priorityMeta) {
+              $priorityTier = [int]$priorityMeta.Tier
+              $priorityDependentCount = [int]$priorityMeta.DependentCount
+              $priorityKnown = [bool]$priorityMeta.Known
+            }
+          }
+          $priorityDecision = if ($priorityKnown) {
+            "dependency-priority metadata: tier={0}, dependents={1}" -f $priorityTier, $priorityDependentCount
+          } else {
+            "dependency-priority metadata unavailable for this jar"
+          }
+
+          $culpritJarNames.Add($state.JarName)
+          $culpritMoves.Add([pscustomobject]@{
+              JarName            = $state.JarName
+              GameModsDir        = $GameModsDir
+              StorageModsDir     = if ($useStorage) { $StorageModsDir } else { "" }
+              StorageLegacyPath  = $culpritStorageLegacy
+              GameLegacyPath     = $culpritGameLegacy
+              Minecraft          = $mcVersionForLegacy
+              KeepCulpritInGameLegacy = [bool]$KeepCulpritInGameLegacy
+              CrashEvidenceKey   = $state.CrashEvidenceKey
+              DependencyTier     = [int]$priorityTier
+              DependentModCount  = [int]$priorityDependentCount
+              DependentModCountKnown = [bool]$priorityKnown
+              PriorityDecision   = $priorityDecision
+              Stage              = "mixin-analysis"
+            })
+          $state.IsCulprit = $true
+          $resolved = $true
+        }
+      }
+    }
+  } finally {
+    foreach ($state in @($candidateStates | Where-Object { [bool]$_.WasQuarantined })) {
+      if ([bool]$state.IsCulprit) { continue }
+      if (Test-Path -LiteralPath $state.TempGamePath) {
+        Move-Item -LiteralPath $state.TempGamePath -Destination $state.GamePath -Force -ErrorAction SilentlyContinue
+      }
+      if ([bool]$state.HasStorageBackup -and (Test-Path -LiteralPath $state.TempStoragePath) -and -not [string]::IsNullOrWhiteSpace([string]$state.StoragePath)) {
+        Move-Item -LiteralPath $state.TempStoragePath -Destination $state.StoragePath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
 }
 
 # * Clean up empty temp dirs.
@@ -1139,6 +1286,18 @@ if ($EmitResultObject) {
     }
   }
   Write-Output (New-StageResult @stageResultParams)
+}
+
+if ($exitCode -eq 0 -and (-not $DryRun)) {
+  $finalCrashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+  if ($null -ne $finalCrashWindow) {
+    Write-Host ("Closing remaining crash window: {0}" -f $finalCrashWindow.Title) -ForegroundColor Gray
+    [void](Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $finalCrashWindow }) `
+      -DelaySeconds $CrashCloseDelaySeconds `
+      -OffsetX $CrashCloseClickOffsetX `
+      -OffsetY $CrashCloseClickOffsetY `
+      -CloseExtraFabricDialogs $true)
+  }
 }
 
 exit $exitCode

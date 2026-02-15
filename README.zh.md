@@ -83,7 +83,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 | `LauncherExePath` | 启动器可执行文件的路径（留空则连接到已运行的启动器） |
 | `EnableMixinAnalysis` | 启用 Mixin 分析阶段（默认值：`true`） |
 | `EnableLayering` | 启用分层和减法隔离（默认值：`true`） |
-| `EnableRecovery` | 启用虚假罪魁祸首恢复（默认值：`false`） |
+| `EnableRecovery` | 启用虚假罪魁祸首恢复（默认值：`true`） |
 | `Language` | 控制台消息语言 (`[Localization].Language`)。如果为空：根据操作系统语言自动检测，回退到 `en` |
 
 目前可用的本地化：`en`, `ru`。

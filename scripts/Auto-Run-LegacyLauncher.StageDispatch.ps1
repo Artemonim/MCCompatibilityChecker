@@ -305,6 +305,9 @@ function Get-IsolationParam {
   if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $isolateParams["HashCacheFileName"] = $HashCacheFileName }
   if ($HashCacheHashRetryCount -gt 0) { $isolateParams["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
   if ($HashCacheHashRetryDelayMs -ge 0) { $isolateParams["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
+  $isolateParams["UsePersistentLaunchConfigCache"] = [bool]$UsePersistentLaunchConfigCache
+  if (-not [string]::IsNullOrWhiteSpace($SessionLaunchConfigCacheFileName)) { $isolateParams["SessionLaunchConfigCacheFileName"] = $SessionLaunchConfigCacheFileName }
+  if ($SessionLaunchConfigCacheMaxEntries -gt 0) { $isolateParams["SessionLaunchConfigCacheMaxEntries"] = $SessionLaunchConfigCacheMaxEntries }
   $isolateHasDepMapOverride = (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapSource") -or
     (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapJsonPath") -or
     (Test-ExtraArgsContainNamedParam -Args $IsolateScriptArguments -ParamName "DependencyMapToolPath") -or
@@ -337,6 +340,9 @@ function Get-LayeringParam {
   if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $layerParams["HashCacheFileName"] = $HashCacheFileName }
   if ($HashCacheHashRetryCount -gt 0) { $layerParams["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
   if ($HashCacheHashRetryDelayMs -ge 0) { $layerParams["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
+  $layerParams["UsePersistentLaunchConfigCache"] = [bool]$UsePersistentLaunchConfigCache
+  if (-not [string]::IsNullOrWhiteSpace($SessionLaunchConfigCacheFileName)) { $layerParams["SessionLaunchConfigCacheFileName"] = $SessionLaunchConfigCacheFileName }
+  if ($SessionLaunchConfigCacheMaxEntries -gt 0) { $layerParams["SessionLaunchConfigCacheMaxEntries"] = $SessionLaunchConfigCacheMaxEntries }
   Add-SessionDependencyMapParam -Params $layerParams -RequireFile $false
 
   return $layerParams
@@ -353,6 +359,11 @@ function Get-MixinAnalysisParam {
   if ($LogSinceTimestamp -ne [datetime]::MinValue) { $p["LogSinceTimestamp"] = $LogSinceTimestamp }
   if ($PSBoundParameters.ContainsKey("Verbose")) { $p["Verbose"] = $true }
   if ($GameLegacy) { $p["KeepCulpritInGameLegacy"] = $true }
+  $effectiveHashCache = ([bool]$UseHashCache) -and (-not [bool]$script:hashCacheDisabledThisSession)
+  $p["UseHashCache"] = [bool]$effectiveHashCache
+  if (-not [string]::IsNullOrWhiteSpace($HashCacheFileName)) { $p["HashCacheFileName"] = $HashCacheFileName }
+  if ($HashCacheHashRetryCount -gt 0) { $p["HashCacheHashRetryCount"] = $HashCacheHashRetryCount }
+  if ($HashCacheHashRetryDelayMs -ge 0) { $p["HashCacheHashRetryDelayMs"] = $HashCacheHashRetryDelayMs }
   $p["EmitResultObject"] = $true
   Add-SessionDependencyMapParam -Params $p -RequireFile $false
   return $p

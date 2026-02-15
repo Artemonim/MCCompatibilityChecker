@@ -271,6 +271,18 @@ param(
   [Parameter(Mandatory = $false)]
   [int]$HashCacheHashRetryDelayMs = 200,
 
+  # * If true, persists launch-config dedup cache across runs.
+  [Parameter(Mandatory = $false)]
+  [bool]$UsePersistentLaunchConfigCache = $true,
+
+  # * Persistent launch-config cache file name stored in GameModsDir.
+  [Parameter(Mandatory = $false)]
+  [string]$SessionLaunchConfigCacheFileName = "MCCC.launch-config-cache.json",
+
+  # * Max number of launch-config entries to keep in the persistent cache.
+  [Parameter(Mandatory = $false)]
+  [int]$SessionLaunchConfigCacheMaxEntries = 5000,
+
   # * If set, disables launch-config dedup cache in Layer-Mods.ps1 / Isolate-Incompatible-Mod.ps1.
   [Parameter(Mandatory = $false)]
   [switch]$NoCache,
@@ -351,7 +363,7 @@ $script:compatReportDir = Join-Path -Path $projectRoot -ChildPath "logs"
 if (-not (Test-Path -LiteralPath $script:compatReportDir)) {
   New-Item -ItemType Directory -Path $script:compatReportDir -Force | Out-Null
 }
-$enableTranscript = $PSBoundParameters.ContainsKey("Verbose")
+$enableTranscript = $true
 $transcriptStarted = $false
 $script:OutcomeTimeoutSecondsBound = $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
 
@@ -371,6 +383,7 @@ $sessionStartTime = Get-Date
 
 # * Tracks whether the session was interrupted by the user (Ctrl+C).
 $sessionInterrupted = $false
+$autoRestoreExitCode = 0
 
 try {
   if ($enableTranscript) {
@@ -436,6 +449,13 @@ $profileTypeMap = @{
   LauncherWindowTimeoutSeconds = "int"
   OutcomeTimeoutSeconds = "int"
   PollIntervalSeconds = "int"
+  UseHashCache = "bool"
+  HashCacheFileName = "string"
+  HashCacheHashRetryCount = "int"
+  HashCacheHashRetryDelayMs = "int"
+  UsePersistentLaunchConfigCache = "bool"
+  SessionLaunchConfigCacheFileName = "string"
+  SessionLaunchConfigCacheMaxEntries = "int"
   SuccessGraceSeconds = "int"
   GameProcessNames = "string[]"
 }
@@ -454,7 +474,7 @@ if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns") -and (-not $
 
 $stageMixinAnalysisEnabled = Get-IniBool -Ini $configIni -Section "Stages" -Key "EnableMixinAnalysis" -Default $true
 $stageLayeringEnabled = Get-IniBool -Ini $configIni -Section "Stages" -Key "EnableLayering" -Default $true
-$stageRecoveryEnabled = Get-IniBool -Ini $configIni -Section "Stages" -Key "EnableRecovery" -Default $false
+$stageRecoveryEnabled = Get-IniBool -Ini $configIni -Section "Stages" -Key "EnableRecovery" -Default $true
 
 $script:hashCacheGameModsDir = ""
 $script:hashCachePath = ""
@@ -600,6 +620,9 @@ try {
 }
 
 . $autoRunSessionPath
+} catch [System.OperationCanceledException] {
+  $sessionInterrupted = $true
+  throw
 } catch [System.Management.Automation.PipelineStoppedException] {
   $sessionInterrupted = $true
   throw
@@ -611,12 +634,19 @@ try {
       Write-Host "User interruption detected. Restoring mods from legacy log..." -ForegroundColor Yellow
       try {
         & $restoreScriptPath -SinceTimestamp $sessionStartTime -NoExit
+        $restoreExitCode = [int]$LASTEXITCODE
+        if ($restoreExitCode -ne 0) {
+          Write-Host ("Warning: auto-restore failed: {0}" -f $restoreExitCode) -ForegroundColor Yellow
+          $autoRestoreExitCode = $restoreExitCode
+        }
       } catch {
         Write-Host ("Warning: auto-restore failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        $autoRestoreExitCode = 1
       }
     }
     else {
       Write-Host ("Warning: restore script not found: {0}" -f $restoreScriptPath) -ForegroundColor Yellow
+      $autoRestoreExitCode = 1
     }
   }
 
@@ -670,5 +700,8 @@ try {
   }
   if ($transcriptStarted) {
     Stop-Transcript | Out-Null
+  }
+  if ($autoRestoreExitCode -ne 0) {
+    $global:LASTEXITCODE = $autoRestoreExitCode
   }
 }

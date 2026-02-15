@@ -83,7 +83,7 @@ Los ajustes se definen en `config.ini` (predeterminados) y `config.local.ini` (t
 | `LauncherExePath` | Ruta al ejecutable del lanzador (vacío para conectar a uno ya iniciado) |
 | `EnableMixinAnalysis` | Activar etapa de análisis de Mixin (por defecto: `true`) |
 | `EnableLayering` | Activar capas e aislamiento sustractivo (por defecto: `true`) |
-| `EnableRecovery` | Activar recuperación de culpables fantasmas (por defecto: `false`) |
+| `EnableRecovery` | Activar recuperación de culpables fantasmas (por defecto: `true`) |
 | `Language` | Idioma de los mensajes de consola (`[Localization].Language`). Si está vacío: automático según el SO, por defecto `en` |
 
 Locales disponibles: `en`, `ru`.

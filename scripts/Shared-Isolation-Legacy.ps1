@@ -66,6 +66,20 @@ function Move-CulpritToLegacyAndAppendLog {
     $legacyLog = Join-Path -Path $projectRoot -ChildPath "legacy.log"
   }
 
+  function Add-LegacyMoveLogEntry {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return }
+    try {
+      Add-Content -LiteralPath $legacyLog -Value $Message -ErrorAction Stop
+    } catch {
+      Write-Verbose ("Failed to append legacy move log entry: {0}" -f $_.Exception.Message)
+    }
+  }
+
   if ($useStorage -and -not [string]::IsNullOrWhiteSpace($StorageSourcePath) -and (Test-Path -LiteralPath $StorageSourcePath)) {
     $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
     $storageLegacyVersionDir = Join-Path -Path $storageLegacyRoot -ChildPath $MinecraftVersion
@@ -78,7 +92,7 @@ function Move-CulpritToLegacyAndAppendLog {
     }
     Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
     $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-    Add-Content -LiteralPath $legacyLog -Value $legacyLogEntry -ErrorAction SilentlyContinue
+    Add-LegacyMoveLogEntry -Message $legacyLogEntry
     $storageLegacyPath = $destPath
     $storageMoved = $true
   }
@@ -95,6 +109,8 @@ function Move-CulpritToLegacyAndAppendLog {
         Move-Item -LiteralPath $GameSourcePath -Destination $destPath -Force -ErrorAction Stop
       }
       Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
+      $legacyLogEntry = "Moved culprit to game legacy: {0}" -f $destPath
+      Add-LegacyMoveLogEntry -Message $legacyLogEntry
       $gameLegacyPath = $destPath
       $gameMoved = $true
     }
@@ -113,6 +129,8 @@ function Move-CulpritToLegacyAndAppendLog {
       $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $JarName
       Move-Item -LiteralPath $GameSourcePath -Destination $destPath -Force -ErrorAction Stop
       Write-Host ("Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath) -ForegroundColor Yellow
+      $legacyLogEntry = "Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath
+      Add-LegacyMoveLogEntry -Message $legacyLogEntry
       $gameLegacyPath = $destPath
       $gameMoved = $true
     }

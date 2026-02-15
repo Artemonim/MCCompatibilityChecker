@@ -53,6 +53,9 @@
     "  [core] {0} | tier=4 | dependents={1}" = "  [core] {0} | уровень=4 | зависимых={1}"
     "  [layer] {0} | tier={1} | dependents={2}" = "  [слой] {0} | уровень={1} | зависимых={2}"
     "  <KEY_CONTINUE_AS_IS> = continue with current isolated mods (incomplete mod set)." = "  <KEY_CONTINUE_AS_IS> = продолжить с текущими изолятами (неполный набор модов)."
+    "  <KEY_CONTINUE_AS_IS> = run Recovery analysis and stop." = "  <KEY_CONTINUE_AS_IS> = запустить Recovery-анализ и завершить."
+    "  <KEY_RESTORE_EXIT> = rollback changes (restore isolated mods) and stop." = "  <KEY_RESTORE_EXIT> = откатить изменения (восстановить изоляты) и завершить."
+    "  <KEY_KEEP_EXIT> = accept current isolated mods and stop." = "  <KEY_KEEP_EXIT> = принять текущие изоляты и завершить."
     "  <KEY_RESTORE_EXIT> = restore isolated mods and stop." = "  <KEY_RESTORE_EXIT> = вернуть изоляты и завершить."
     "  <KEY_RESTORE_CONTINUE> = restore isolated mods and continue with the full set." = "  <KEY_RESTORE_CONTINUE> = вернуть изоляты и продолжить с полного набора."
     "  <KEY_KEEP_EXIT> = skip Recovery and stop (keep current isolated mods as incompatible)." = "  <KEY_KEEP_EXIT> = пропустить Recovery и завершить (оставить текущие изоляты как несовместимые)."
@@ -83,6 +86,7 @@
     "Closed {0} running game process(es) before post-Layering actions." = "Закрыто {0} запущенных процессов игры перед действиями после Наслоения."
     "Closed {0} running game process(es) before prompt." = "Закрыто запущенных процессов игры перед выбором: {0}."
     "Closed {0} running game process(es) before restore." = "Закрыто запущенных процессов игры перед восстановлением: {0}."
+    "Closed {0} running game process(es) before Recovery." = "Закрыто запущенных процессов игры перед Recovery: {0}."
     "Compatibility report was not generated in this session." = "Отчёт совместимости в этой сессии не был сгенерирован."
     "Commonly Used Parameters:" = "Часто используемые параметры:"
     "Continuing Isolation after Fabric quick-isolate..." = "Продолжаю Изоляцию после быстрого изолирования Fabric..."
@@ -114,6 +118,7 @@
     "If the script did not resolve the issue or broke on specific mods and dependencies, isolate those toxic mods manually while the script runs." = "Если скрипт не устранил проблему или сломался об некоторые моды и их зависимости — на период работы скрипта изолируйте эти токсичные моды вручную."
     "Ignoring mod IDs from ignore list: {0}" = "Игнорирую mod ID из списка исключений: {0}"
     "Invalid input. Enter <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_CONTINUE>, <KEY_RESTORE_EXIT>, or <KEY_KEEP_EXIT>." = "Неверный ввод. Введите <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_CONTINUE>, <KEY_RESTORE_EXIT> или <KEY_KEEP_EXIT>."
+    "Invalid input. Enter <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_EXIT>, or <KEY_KEEP_EXIT>." = "Неверный ввод. Введите <KEY_CONTINUE_AS_IS>, <KEY_RESTORE_EXIT> или <KEY_KEEP_EXIT>."
     "Isolation completed. Returning to main loop." = "Изоляция завершена. Возвращаюсь в основной цикл."
     "Isolation failed with exit code {0}. Stopping." = "Изоляция завершилась с кодом {0}. Останавливаюсь."
     "Isolation interrupted by user (Ctrl+C)." = "Изоляция прервана пользователем (Ctrl+C)."
@@ -124,6 +129,7 @@
     "Game is still running (pid: {0}). Waiting for it to exit before next Play click..." = "Игра всё ещё запущена (pid: {0}). Жду её завершения перед следующим кликом Play..."
     "Game is still running. Retrying check in {0}s..." = "Игра всё ещё запущена. Повторная проверка через {0}с..."
     "Game appears to be running after a clean launch; leaving it open before prompt." = "Похоже, игра запущена после чистого старта; оставляю её открытой перед выбором."
+    "No crash detected after clean launch; closing game before prompt so the terminal menu is visible." = "После чистого запуска краш не обнаружен; закрываю игру перед выбором, чтобы в терминале было видно меню."
     "Launcher not found. Continue retrying? (<KEY_RETRY_HINT>)" = "Лаунчер не найден. Продолжить попытки? (<KEY_RETRY_HINT>)"
     "Launcher title pattern: {0}" = "Шаблон заголовка лаунчера: {0}"
     "Launcher start canceled by user during Isolation. Stopping by user choice." = "Запуск лаунчера отменён пользователем во время Изоляции. Останавливаюсь по выбору пользователя."
@@ -202,18 +208,11 @@
     "`n[+] Matches found: {0}" = "`n[+] Найдено совпадений: {0}"
     "`n[-] No matches found." = "`n[-] Совпадений не найдено."
     "      reason: {0}" = "      причина: {0}"
-    "    Closing stray crash dialog: {0}" = "    Закрываю случайный диалог краша: {0}"
-    "    Confirmed: removing {0} fixes the Mixin crash." = "    Подтверждено: удаление {0} исправляет Mixin-краш."
     "    Confirming stability ({0}s)..." = "    Подтверждаю стабильность ({0}с)..."
-    "    DRYRUN: would remove and test." = "    DRYRUN: удалил бы и протестировал."
-    "    Error during Mixin test: {0}. Rolling back." = "    Ошибка при тестировании Mixin: {0}. Откатываю."
     "    Outcome: {0}" = "    Результат: {0}"
     "    Skipping {0}: not found in game mods." = "    Пропускаю {0}: не найден среди игровых модов."
-    "    Skipping {0}: {1}." = "    Пропускаю {0}: {1}."
     "    Source JAR: {0}" = "    Исходный JAR: {0}"
     "    Target JAR: {0} (mod: {1})" = "    Целевой JAR: {0} (мод: {1})"
-    "    Testing removal of: {0}" = "    Тестирую удаление: {0}"
-    "    {0} did not fix the crash. Restoring." = "    {0} не исправил краш. Восстанавливаю."
     "  + {0}" = "  + {0}"
     "  - {0}" = "  - {0}"
     "  - {0} [{1}] tier={2}, dependents={3}; {4}" = "  - {0} [{1}] уровень={2}, зависимых={3}; {4}"
@@ -319,6 +318,7 @@
     "Dependency-aware ordering forces linear isolation strategy." = "Сортировка с учётом зависимостей принудительно включает линейную стратегию изоляции."
     "Dependency-priority order (top): {0}" = "Порядок по приоритету зависимостей (топ): {0}"
     "Dependency-priority ordering enabled. Source: {0}" = "Сортировка по приоритету зависимостей включена. Источник: {0}"
+    "Disambiguated mod '{0}' by Mixin config evidence. Selected jar(s): {1}" = "Уточнил мод '{0}' по Mixin-конфигу. Выбранные JAR: {1}"
     "Detected Fabric dialog after outcome: {0}" = "Обнаружен Fabric-диалог после результата: {0}"
     "Detected crash dialog after outcome: {0}" = "Обнаружен диалог краша после результата: {0}"
     "Detected missing dependency caused by removed library '{0}'. Restoring it and isolating requiring mod(s)." = "Обнаружена отсутствующая зависимость из-за удалённой библиотеки '{0}'. Восстанавливаю её и изолирую требующие мод(ы)."
@@ -462,6 +462,10 @@
     "Storage quarantine dir: {0}" = "Папка карантина хранилища: {0}"
     "Strict core-only baseline succeeded. Hash-cached mods are excluded for this layering run." = "Строгий core-only базис успешен. Хеш-кешированные моды исключены для этого запуска Наслоения."
     "To retry the launch WITH these mods, they must be restored from Legacy first." = "Чтобы повторить запуск С этими модами, их нужно сначала восстановить из Legacy."
+    "Why this prompt appears: previous attempts isolated one or more mods into Legacy to test stability." = "Почему показан этот выбор: предыдущие попытки изолировали один или несколько модов в Legacy для проверки стабильности."
+    "The latest launch looked clean, but isolated mods are still excluded. Choose to keep isolation or restore the full mod set." = "Последний запуск выглядит чистым, но изолированные моды всё ещё исключены. Выберите: оставить изоляцию или восстановить полный набор модов."
+    "Choose whether to continue testing with isolated mods or restore them before the next action." = "Выберите: продолжать проверку с изолированными модами или восстановить их перед следующим действием."
+    "Choose final action: run Recovery, rollback isolated mods, or accept current isolated mods and stop." = "Выберите финальное действие: запустить Recovery, откатить изоляцию модов или принять текущие изоляты и завершить."
     "Unhandled error: {0}" = "Необработанная ошибка: {0}"
     "User interruption detected. Restoring mods from legacy log..." = "Обнаружено прерывание пользователем. Восстанавливаю моды из legacy-лога..."
     "Using broad UI Automation search fallback for Play element." = "Использую расширенный поиск UI Automation для элемента Play."
@@ -514,6 +518,18 @@
     "{0} baseline outcome: {1}" = "{0} — результат базового запуска: {1}"
     "{0} baseline signature is empty. Error change detection may be limited." = "{0} — базовая сигнатура пуста. Обнаружение изменений ошибок может быть ограничено."
 
+    "    Closing stray crash dialog before probe: {0}" = "    Closing stray crash dialog before probe: {0}"
+    "    Outcome ({0}): {1}" = "    Outcome ({0}): {1}"
+    "Mixin analysis: no candidate jars resolved from Mixin errors." = "Mixin analysis: no candidate jars resolved from Mixin errors."
+    "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." = "DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back."
+    "Mixin analysis: no candidate jars are available for staged probing." = "Mixin analysis: no candidate jars are available for staged probing."
+    "Batch probe: disabled all {0} resolved Mixin candidate mod(s)." = "Batch probe: disabled all {0} resolved Mixin candidate mod(s)."
+    "Batch probe failed after removing all Mixin candidates. Handing off to next stage." = "Batch probe failed after removing all Mixin candidates. Handing off to next stage."
+    "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back." = "Batch probe succeeded. Crash is inside resolved Mixin candidates; starting layered add-back."
+    "    Layering probe: add back {0}" = "    Layering probe: add back {0}"
+    "    {0} does not reintroduce the crash." = "    {0} does not reintroduce the crash."
+    "    {0} reintroduces the crash. Moving to Legacy." = "    {0} reintroduces the crash. Moving to Legacy."
+    "Warning: failed to locate candidate for legacy move: {0}" = "Warning: failed to locate candidate for legacy move: {0}"
   }
   Substrings = @{
     # =========================================================================
@@ -537,4 +553,7 @@
     )
   }
 }
+
+
+
 
