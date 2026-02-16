@@ -15,6 +15,8 @@ param(
   [switch]$NoPester,
   # * Optional path to Pester tests (relative to repo root by default).
   [string]$PesterPath = "tests",
+  # * Run Pester tests tagged as AV-sensitive (disabled by default).
+  [switch]$IncludeAvSensitivePester,
   # * Optional file or directory paths to analyze (defaults to repo root).
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$Path = @()
@@ -216,7 +218,38 @@ if (-not $NoPester) {
     } else {
       Write-Output ("Running Pester tests from: {0}" -f $resolvedPesterPath)
       try {
-        $pesterResult = Invoke-Pester -Path $resolvedPesterPath -PassThru -ErrorAction Stop
+        $pesterInvokeParams = @{
+          Path = $resolvedPesterPath
+          PassThru = $true
+          ErrorAction = "Stop"
+        }
+        if (-not $IncludeAvSensitivePester) {
+          $pesterInvokeParams["ExcludeTag"] = @("AvSensitive")
+          Write-Output "Pester AV-sensitive tests: skipped by default (use -IncludeAvSensitivePester)."
+        } else {
+          Write-Output "Pester AV-sensitive tests: included."
+        }
+
+        # * Keep test temp artifacts inside repository workspace.
+        $previousTemp = $env:TEMP
+        $previousTmp = $env:TMP
+        $pesterTempRoot = Join-Path -Path $repoRoot -ChildPath ".temporary\pester-temp"
+        if (-not (Test-Path -LiteralPath $pesterTempRoot)) {
+          New-Item -ItemType Directory -Path $pesterTempRoot -Force | Out-Null
+        }
+        Write-Output ("Pester temp root: {0}" -f $pesterTempRoot)
+        $env:TEMP = $pesterTempRoot
+        $env:TMP = $pesterTempRoot
+        try {
+          $pesterResult = Invoke-Pester @pesterInvokeParams
+        } finally {
+          if ($null -ne $previousTemp) {
+            $env:TEMP = $previousTemp
+          }
+          if ($null -ne $previousTmp) {
+            $env:TMP = $previousTmp
+          }
+        }
         $failedCount = 0
         if ($null -ne $pesterResult) {
           if ($pesterResult.PSObject.Properties.Match("FailedCount").Count -gt 0) {
@@ -260,10 +293,17 @@ if ($WriteSummary) {
   }
   if ($NoPester) {
     Write-Output "Pester check: skipped (-NoPester)."
-  } elseif ($pesterValidationFailed) {
-    Write-Output "Pester check: failed."
-  } elseif (-not $hadAnalyzerError) {
-    Write-Output "Pester check: passed."
+  } elseif (-not $IncludeAvSensitivePester) {
+    Write-Output "Pester AV-sensitive tests: skipped by default (use -IncludeAvSensitivePester)."
+  } else {
+    Write-Output "Pester AV-sensitive tests: included."
+  }
+  if (-not $NoPester) {
+    if ($pesterValidationFailed) {
+      Write-Output "Pester check: failed."
+    } elseif (-not $hadAnalyzerError) {
+      Write-Output "Pester check: passed."
+    }
   }
   if ($hadAnalyzerError) {
     Write-Warning "One or more checks failed to execute."

@@ -1,10 +1,14 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-Describe "Check-Mod-Compatibility safeguards" {
+Describe "Check-Mod-Compatibility safeguards" -Tag @("AvSensitive", "Integration") {
   BeforeAll {
     $repoRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
-    $powershellExe = (Get-Command -Name "powershell" -ErrorAction Stop).Source
+    $powershellCmd = Get-Command -Name "pwsh" -ErrorAction SilentlyContinue
+    if ($null -eq $powershellCmd) {
+      $powershellCmd = Get-Command -Name "powershell" -ErrorAction Stop
+    }
+    $powershellExe = $powershellCmd.Source
 
     $newTestSandbox = {
       param(
@@ -154,7 +158,6 @@ Describe "Check-Mod-Compatibility safeguards" {
 
       $output = & $powershellExe `
         -NoProfile `
-        -ExecutionPolicy Bypass `
         -File $Sandbox.CheckScriptPath `
         -LogPath $LogPath `
         -GameModsDir $Sandbox.GameModsDir `
@@ -171,7 +174,7 @@ Describe "Check-Mod-Compatibility safeguards" {
   }
 
   It "avoids broad nested fallback matches for cardinal-components-entity" {
-    $sandbox = & $newTestSandbox -Name "cardinal-fallback-safety"
+    $sandbox = & $newTestSandbox -Name "id-fallback-filter"
     $logPath = Join-Path -Path $sandbox.LogsDir -ChildPath "tl-logger.txt"
 
     $cardinalBundleName = "cardinal-wrapper.jar"
