@@ -145,9 +145,12 @@ Comportamiento si falta Python:
 │   ├── Recover-PhantomCulprits.ps1      # Recuperación
 │   └── Shared-*.ps1                     # Módulos compartidos
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # Análisis de dependencias JAR
-│   ├── Analyze-JarDependencyMap.ps1     # Construcción de mapa de dependencias
-│   └── Restore-ModsFromLog.ps1          # Restauración de mods desde informe
+│   ├── Analyze-JarDependencies.ps1      # Análisis de dependencias dentro de los archivos JAR de los mods
+│   ├── Analyze-JarDependencyMap.ps1     # Construcción de mapa de dependencias completo e informes
+│   ├── Check-Localization.py            # Validación de activos de localización
+│   ├── Count-ModMinecraftVersions.py    # Conteo de mods por versión de Minecraft
+│   ├── Find-SuspiciousDuplicateMods.py  # Búsqueda de duplicados sospechosos de mods
+│   └── Restore-ModsFromLog.ps1          # Restauración de mods desde el registro de aislamiento
 └── doc/
     └── Algorithm.md                     # Descripción detallada del algoritmo
 ```

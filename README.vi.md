@@ -145,9 +145,12 @@ Hành vi khi thiếu Python:
 │   ├── Recover-PhantomCulprits.ps1      # Khôi phục
 │   └── Shared-*.ps1                     # Các module dùng chung
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # Phân tích phụ thuộc JAR
-│   ├── Analyze-JarDependencyMap.ps1     # Xây dựng bản đồ phụ thuộc
-│   └── Restore-ModsFromLog.ps1          # Khôi phục mod từ báo cáo
+│   ├── Analyze-JarDependencies.ps1      # Tìm kiếm phụ thuộc bên trong tệp JAR của mod
+│   ├── Analyze-JarDependencyMap.ps1     # Xây dựng bản đồ phụ thuộc đầy đủ và báo cáo
+│   ├── Check-Localization.py            # Kiểm tra tính hợp lệ của tài nguyên ngôn ngữ
+│   ├── Count-ModMinecraftVersions.py    # Thống kê mod theo phiên bản Minecraft
+│   ├── Find-SuspiciousDuplicateMods.py  # Tìm kiếm các bản sao mod nghi ngờ
+│   └── Restore-ModsFromLog.ps1          # Khôi phục mod từ nhật ký cách ly
 └── doc/
     └── Algorithm.md                     # Mô tả chi tiết thuật toán
 ```

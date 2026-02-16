@@ -145,9 +145,12 @@ Behavior when Python is missing:
 │   ├── Recover-PhantomCulprits.ps1      # Recovery
 │   └── Shared-*.ps1                     # Shared modules
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # JAR dependency analysis
-│   ├── Analyze-JarDependencyMap.ps1     # Dependency map building
-│   └── Restore-ModsFromLog.ps1          # Mod restoration from report
+│   ├── Analyze-JarDependencies.ps1      # Search for dependencies inside mod JAR files
+│   ├── Analyze-JarDependencyMap.ps1     # Build full dependency map and reports
+│   ├── Check-Localization.py            # Localization asset validation
+│   ├── Count-ModMinecraftVersions.py    # Count mods by Minecraft version
+│   ├── Find-SuspiciousDuplicateMods.py  # Find suspicious duplicate mods
+│   └── Restore-ModsFromLog.ps1          # Restore mods from isolation log
 └── doc/
     └── Algorithm.md                     # Detailed algorithm description
 ```

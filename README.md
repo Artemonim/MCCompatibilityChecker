@@ -145,9 +145,12 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 │   ├── Recover-PhantomCulprits.ps1      # Recovery
 │   └── Shared-*.ps1                     # Общие модули
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # Анализ зависимостей JAR
-│   ├── Analyze-JarDependencyMap.ps1     # Построение карты зависимостей
-│   └── Restore-ModsFromLog.ps1          # Восстановление модов из отчёта
+│   ├── Analyze-JarDependencies.ps1      # Поиск зависимостей внутри JAR-файлов модов
+│   ├── Analyze-JarDependencyMap.ps1     # Построение полной карты зависимостей и отчётов
+│   ├── Check-Localization.py            # Валидация файлов локализации
+│   ├── Count-ModMinecraftVersions.py    # Подсчёт модов по версиям Minecraft
+│   ├── Find-SuspiciousDuplicateMods.py  # Поиск подозрительных дубликатов модов
+│   └── Restore-ModsFromLog.ps1          # Восстановление модов из лога изоляции
 └── doc/
     └── Алгоритм.md                      # Детальное описание алгоритма
 ```

@@ -145,9 +145,12 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 │   ├── Recover-PhantomCulprits.ps1      # 恢复
 │   └── Shared-*.ps1                     # 共享模块
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # JAR 依赖分析
-│   ├── Analyze-JarDependencyMap.ps1     # 建立依赖关系图
-│   └── Restore-ModsFromLog.ps1          # 从报告中恢复模组
+│   ├── Analyze-JarDependencies.ps1      # 搜索模组 JAR 文件内部的依赖关系
+│   ├── Analyze-JarDependencyMap.ps1     # 构建完整的依赖关系图和报告
+│   ├── Check-Localization.py            # 本地化资产验证
+│   ├── Count-ModMinecraftVersions.py    # 按 Minecraft 版本统计模组数量
+│   ├── Find-SuspiciousDuplicateMods.py  # 查找可疑的重复模组
+│   └── Restore-ModsFromLog.ps1          # 从隔离日志中恢复模组
 └── doc/
     └── Algorithm.md                     # 详细算法描述
 ```

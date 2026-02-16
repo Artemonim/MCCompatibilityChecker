@@ -145,9 +145,12 @@ Python eksik olduğunda davranış:
 │   ├── Recover-PhantomCulprits.ps1      # Kurtarma
 │   └── Shared-*.ps1                     # Ortak modüller
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # JAR bağımlılık analizi
-│   ├── Analyze-JarDependencyMap.ps1     # Bağımlılık haritası oluşturma
-│   └── Restore-ModsFromLog.ps1          # Rapordan modları geri yükleme
+│   ├── Analyze-JarDependencies.ps1      # Mod JAR dosyaları içindeki bağımlılıkları arama
+│   ├── Analyze-JarDependencyMap.ps1     # Tam bağımlılık haritası oluşturma ve raporlar
+│   ├── Check-Localization.py            # Yerelleştirme varlıklarının doğrulanması
+│   ├── Count-ModMinecraftVersions.py    # Minecraft sürümlerine göre mod sayımı
+│   ├── Find-SuspiciousDuplicateMods.py  # Şüpheli mod kopyalarını bulma
+│   └── Restore-ModsFromLog.ps1          # İzolasyon günlüğünden modları geri yükleme
 └── doc/
     └── Algorithm.md                     # Algoritmanın ayrıntılı açıklaması
 ```

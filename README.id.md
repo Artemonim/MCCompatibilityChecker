@@ -145,9 +145,12 @@ Perilaku saat Python tidak ada:
 │   ├── Recover-PhantomCulprits.ps1      # Pemulihan
 │   └── Shared-*.ps1                     # Modul bersama
 ├── tools/
-│   ├── Analyze-JarDependencies.ps1      # Analisis dependensi JAR
-│   ├── Analyze-JarDependencyMap.ps1     # Pembuatan peta dependensi
-│   └── Restore-ModsFromLog.ps1          # Pemulihan mod dari laporan
+│   ├── Analyze-JarDependencies.ps1      # Pencarian dependensi di dalam file JAR mod
+│   ├── Analyze-JarDependencyMap.ps1     # Pembuatan peta dependensi lengkap dan laporan
+│   ├── Check-Localization.py            # Validasi aset lokalisasi
+│   ├── Count-ModMinecraftVersions.py    # Penghitungan mod berdasarkan versi Minecraft
+│   ├── Find-SuspiciousDuplicateMods.py  # Pencarian duplikat mod yang mencurigakan
+│   └── Restore-ModsFromLog.ps1          # Pemulihan mod dari log isolasi
 └── doc/
     └── Algorithm.md                     # Deskripsi detail algoritma
 ```
