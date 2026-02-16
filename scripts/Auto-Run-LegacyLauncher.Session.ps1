@@ -702,6 +702,7 @@ while ($true) {
               if ($layerExitCode -eq 130) {
                 $sessionInterrupted = $true
                 Write-Host "Launcher start canceled by user during Layering. Stopping by user choice." -ForegroundColor Yellow
+                Invoke-PostSessionOutcomeDialogCleanup
                 exit 0
               }
               Write-Host ("Layering finished with exit code {0}. Falling back to Isolation." -f $layerExitCode) -ForegroundColor Yellow
@@ -833,6 +834,7 @@ while ($true) {
               if ($isolateExitCode -eq 130) {
                 $sessionInterrupted = $true
                 Write-Host "Launcher start canceled by user during Isolation. Stopping by user choice." -ForegroundColor Yellow
+                Invoke-PostSessionOutcomeDialogCleanup
                 exit 0
               }
 
@@ -964,6 +966,7 @@ while ($true) {
     $reqLabel = if ($fabricRequiringModIds.Count -gt 0) { $fabricRequiringModIds -join ", " } else { "<none>" }
     Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
     Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
+    Invoke-PostSessionOutcomeDialogCleanup
     exit 0
   }
   $cleanOutcome = ($outcome.Type -eq "Timeout" -or $outcome.Type -eq "ProcessExit")
@@ -1025,15 +1028,15 @@ while ($true) {
 
   if ($cleanOutcome -and (-not $hasSessionIsolants)) {
     Write-Host "No blocking errors and no isolated mods pending. Continuing automatically." -ForegroundColor Cyan
-    Start-Sleep -Seconds 2
-    continue
+    Invoke-PostSessionOutcomeDialogCleanup
+    exit 0
   }
 
   $requiresUserDecision = $hasSessionIsolants -or ($outcome.Type -eq "FabricDialog") -or ($outcome.Type -eq "NoLaunch")
   if (-not $requiresUserDecision) {
     Write-Host "No blocking errors and no isolated mods pending. Continuing automatically." -ForegroundColor Cyan
-    Start-Sleep -Seconds 2
-    continue
+    Invoke-PostSessionOutcomeDialogCleanup
+    exit 0
   }
 
   $prompt = $null
@@ -1107,6 +1110,7 @@ while ($true) {
     if (-not $recoveryAvailable) {
       Write-Host "Recovery stage disabled in config ([Stages].EnableRecovery=false)." -ForegroundColor Yellow
       Write-Host "Stopping by user choice." -ForegroundColor Yellow
+      Invoke-PostSessionOutcomeDialogCleanup
       exit 0
     }
 
