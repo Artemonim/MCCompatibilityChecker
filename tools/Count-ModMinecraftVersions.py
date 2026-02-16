@@ -432,6 +432,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "in default output format."
         ),
     )
+    parser.add_argument(
+        "-help",
+        action="help",
+        help="Show this help message and exit.",
+    )
     return parser.parse_args(argv)
 
 
