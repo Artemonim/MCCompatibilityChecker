@@ -1231,7 +1231,7 @@ while ($true) {
   }
 
   if ($hasSessionIsolants) {
-    Write-Host $prompt -ForegroundColor Yellow
+    Write-Host $prompt -ForegroundColor Cyan
     Write-Host "Why this prompt appears: previous attempts isolated one or more mods into Legacy to test stability." -ForegroundColor Gray
     Write-Host "Choose final action: run Recovery, rollback isolated mods, or accept current isolated mods and stop." -ForegroundColor Gray
     Write-Host "  <KEY_CONTINUE_AS_IS> = run Recovery analysis and stop." -ForegroundColor Gray

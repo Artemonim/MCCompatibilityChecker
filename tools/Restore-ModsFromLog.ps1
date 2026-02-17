@@ -105,15 +105,15 @@ if ($effectiveSinceTimestamp -ne [datetime]::MinValue) {
 $culpritMoves = @($parsedLog.CulpritMoves)
 if ($culpritMoves.Count -eq 0) {
   if ($effectiveSinceTimestamp -ne [datetime]::MinValue) {
-    Write-Host ("No culprits found to restore in the log after {0}." -f $effectiveSinceTimestamp.ToString("yyyy-MM-dd HH:mm:ss"))
+    Write-Host ("No culprits found to restore in the log after {0}." -f $effectiveSinceTimestamp.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor Gray
   } else {
-    Write-Host "No culprits found to restore in the log."
+    Write-Host "No culprits found to restore in the log." -ForegroundColor Gray
   }
   Complete-Restore -ExitCode 0 -NoExit:$NoExit
   return
 }
 
-Write-Host ("Found {0} culprit(s) to restore." -f $culpritMoves.Count)
+Write-Host ("Found {0} culprit(s) to restore." -f $culpritMoves.Count) -ForegroundColor Cyan
 $restoreDetails = Restore-IsolationCulpritMod -CulpritMoves $culpritMoves -ReturnDetails
 
 if ($null -eq $restoreDetails) {
@@ -129,7 +129,7 @@ if ($failedCount -gt 0) {
   Write-Warning ("Warning: auto-restore failed: {0}" -f $failedLabel)
 }
 
-Write-Host "Restore process completed."
+Write-Host "Restore process completed." -ForegroundColor Green
 $exitCode = if ([bool]$restoreDetails.Success) { 0 } else { 1 }
 Complete-Restore -ExitCode $exitCode -NoExit:$NoExit
 return

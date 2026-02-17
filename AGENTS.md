@@ -13,3 +13,10 @@ Known logs in `C:\Users\Artem\AppData\Roaming\.tlauncher`:
 - `legacy/Minecraft/game/logs/chatlog.json` - needed to inspect chat/events history and reproduce issues tied to commands or chat interactions.
 - `legacy/Minecraft/game/crash-reports/crash-YYYY-MM-DD_HH.MM.SS-(client|server).txt` - needed for hard crashes of client/server with stack traces and crash context.
 - `legacy/Minecraft/game/debug/disconnect-YYYY-MM-DD_HH.MM.SS-client.txt` - needed for multiplayer disconnect diagnostics (kicks, timeouts, handshake/protocol mismatches).
+
+Console color classification (PowerShell):
+- Green: success/completion (e.g., recovery finished, no issues found).
+- Cyan: stage headers, progress, neutral informational steps.
+- Yellow: warnings, user decisions, non-fatal problem states (crash/fabric/no-launch outcomes).
+- Red: fatal errors, unrecoverable states, termination reasons.
+- Gray: secondary details, cleanup steps, dry-run notes, neutral “no action” statuses.

@@ -517,7 +517,8 @@ foreach ($group in $qualifiedGroups) {
         }
       }
 
-      Write-Host ("  Outcome: {0}" -f $outcome.Type) -ForegroundColor Gray
+      $outcomeColor = if ($outcome.Type -match "CrashDialog|FabricDialog|NoLaunch") { "Yellow" } else { "Green" }
+      Write-Host ("  Outcome: {0}" -f $outcome.Type) -ForegroundColor $outcomeColor
 
       if ($outcome.Type -eq "Timeout") {
         Start-Sleep -Seconds $effectiveConfirmSeconds
