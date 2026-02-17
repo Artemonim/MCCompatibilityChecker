@@ -44,6 +44,7 @@ Descrição detalhada do algoritmo em [doc/Algorithm.md](doc/Algorithm.md).
 
 - **PSScriptAnalyzer** (módulo PowerShell, necessário para `checker.ps1`)
 - **Python 3.x** (necessário para verificação de localizações via `tools/Check-Localization.py`)
+- **Pester** (módulo PowerShell, necessário para os testes do `checker.ps1` quando `-NoPester` não é usado)
 
 Instalação do `PSScriptAnalyzer`:
 ```powershell
@@ -89,7 +90,7 @@ As configurações são definidas em `config.ini` (padrão) e `config.local.ini`
 Locais disponíveis no momento: `en`, `ru`.
 Preparados para: `tr_TR`, `pt_BR`, `vi`, `es_ES`, `id_ID`, `zh-CN`.
 A busca pela janela de crash do launcher reúne automaticamente padrões de `scripts/locales/*.psd1` (`Ui.CrashWindowTitlePatterns`).
-Atualmente inclui `Something broke` / `Something went wrong` (en) e `Что-то сломалось...` (ru). Para novos idiomas, basta adicionar esta lista ao arquivo de locale correspondente.
+Atualmente inclui os padrões `Something broke...`, `Something went wrong...` e `Что-то сломалось...`. Para novos idiomas, basta adicionar esta lista ao arquivo de locale correspondente.
 Se o título da janela do seu launcher for diferente, você pode definir explicitamente `CrashWindowTitlePatterns` em `[Profile:<nome>]` e executar com `-Profile <nome>`.
 
 ## Principais parâmetros de inicialização
@@ -108,6 +109,7 @@ Se o título da janela do seu launcher for diferente, você pode definir explici
 | `-Verbose` | Logs detalhados (no console e em `MCCC.log`) |
 | `-UseLinearIsolation` | Busca linear em vez de binária (mais lento, porém mais simples) |
 | `-NoCache` | Desativar cache de sessão (reverificar até mesmo configurações bem-sucedidas anteriormente) |
+| `-OutcomeTimeoutSeconds <sec>` | Tempo de espera do resultado após clicar em Play (padrão: 60) |
 | `-ThoroughStabilityCheck` | Aumentar a janela de verificação de estabilidade das inicializações |
 | `-AutoHandleFabricDialog <bool>` | Roteamento automático de diálogos do Fabric sem dependências ausentes |
 | `-IgnoreModIds <id1,id2,...>` | Ignorar IDs de mods especificados na limpeza de compatibilidade |
@@ -124,6 +126,8 @@ Exemplos:
 ```powershell
 .\checker.ps1             # Verificação completa (incluindo locais)
 .\checker.ps1 -NoLocales  # Pular verificação de locais
+.\checker.ps1 -NoPester   # Pular testes do Pester
+.\checker.ps1 .\scripts\Shared-FileOps.ps1  # Verificar apenas o arquivo/caminho especificado
 ```
 
 Comportamento na ausência do Python:
@@ -171,7 +175,7 @@ Após a conclusão, o script exibe um relatório: tempo de execução, lista de 
 - Apenas Windows (Win32 API para gerenciamento de janelas)
 - O diagnóstico requer múltiplas inicializações do jogo — em grandes coleções de mods, isso pode levar um tempo considerável
 - Com grandes grupos de incompatibilidades, são possíveis execuções instáveis e interrupções precoces do diagnóstico
-- A etapa de Recuperação é experimental no momento e está desativada por padrão
+- A etapa de Recuperação é experimental no momento, mas está ativada por padrão (`[Stages].EnableRecovery=true`)
 
 ## Suporte
 

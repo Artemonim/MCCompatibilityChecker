@@ -1,12 +1,27 @@
 - archive/ - Legacy Launcher code
 - doc/Algorithm.md - description of the algorithm
 - scripts/ - main code
+- scripts/locales/ - localization dictionaries (`*.psd1`)
+- tests/ - Pester test suite
 - tools/ - additional scripts
 
 When changing scripts, check with `./checker.ps1 -NoLocales`
 New console output lines should be added to the localization files; check with `./checker.ps1`.
 
-Known logs in `C:\Users\Artem\AppData\Roaming\.tlauncher`:
+Primary entrypoints:
+- `./run.ps1` - user-facing launcher automation entrypoint.
+- `./checker.ps1` - repository quality gate (`PSScriptAnalyzer` + locales + Pester).
+- Useful checker flags: `-NoLocales`, `-NoPester`, and optional path arguments (for targeted checks).
+
+Config workflow:
+- Keep machine-specific paths and local settings in `config.local.ini` (git-ignored), not in `config.ini`.
+
+Validation dependencies:
+- `PSScriptAnalyzer` PowerShell module.
+- `Pester` PowerShell module (unless `./checker.ps1 -NoPester`).
+- Python 3.x (unless `./checker.ps1 -NoLocales`).
+
+Known logs in `%APPDATA%\.tlauncher` (example absolute path: `C:\Users\Artem\AppData\Roaming\.tlauncher`):
 - `logs/launcher.log` and rotated files `launcher.log.1` ... `launcher.log.10` - needed when TLauncher fails to start, update, authenticate, or download components.
 - `legacy/Minecraft/game/logs/latest.log` - needed for current session issues (startup errors, mod loading, runtime exceptions, missing dependencies).
 - `legacy/Minecraft/game/logs/YYYY-MM-DD-N.log.gz` (archived game logs) - needed when problem happened in a past session and `latest.log` is already overwritten.

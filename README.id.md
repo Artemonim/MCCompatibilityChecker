@@ -44,6 +44,7 @@ Deskripsi detail algoritma ada di [doc/Algorithm.md](doc/Algorithm.md).
 
 - **PSScriptAnalyzer** (modul PowerShell, diperlukan untuk `checker.ps1`)
 - **Python 3.x** (diperlukan untuk pemeriksaan lokalisasi melalui `tools/Check-Localization.py`)
+- **Pester** (modul PowerShell, diperlukan untuk tes `checker.ps1` jika `-NoPester` tidak digunakan)
 
 Instalasi `PSScriptAnalyzer`:
 ```powershell
@@ -89,7 +90,7 @@ Pengaturan ditentukan dalam `config.ini` (default) dan `config.local.ini` (penye
 Locale yang tersedia saat ini: `en`, `ru`.
 Stub disiapkan untuk: `tr_TR`, `pt_BR`, `vi`, `es_ES`, `id_ID`, `zh-CN`.
 Pencarian jendela crash launcher secara otomatis mengumpulkan pola dari `scripts/locales/*.psd1` (`Ui.CrashWindowTitlePatterns`).
-Saat ini mencakup `Something broke` / `Something went wrong` (en) dan `Что-то сломалось...` (ru). Untuk bahasa baru, cukup tambahkan daftar ini ke file locale yang sesuai.
+Saat ini mencakup pola judul `Something broke...`, `Something went wrong...`, dan `Что-то сломалось...`. Untuk bahasa baru, cukup tambahkan daftar ini ke file locale yang sesuai.
 Jika judul jendela launcher Anda berbeda, Anda dapat mengatur `CrashWindowTitlePatterns` secara eksplisit di `[Profile:<nama>]` dan jalankan dengan `-Profile <nama>`.
 
 ## Parameter Utama Menjalankan
@@ -108,6 +109,7 @@ Jika judul jendela launcher Anda berbeda, Anda dapat mengatur `CrashWindowTitleP
 | `-Verbose` | Log mendetail (ke konsol dan `MCCC.log`) |
 | `-UseLinearIsolation` | Pencarian linear alih-alih biner (lebih lambat tetapi lebih sederhana) |
 | `-NoCache` | Matikan cache sesi (verifikasi ulang bahkan konfigurasi yang sebelumnya berhasil) |
+| `-OutcomeTimeoutSeconds <sec>` | Waktu tunggu hasil setelah menekan Play (default: 60) |
 | `-ThoroughStabilityCheck` | Tingkatkan jendela pemeriksaan stabilitas saat menjalankan |
 | `-AutoHandleFabricDialog <bool>` | Pengalihan otomatis dialog Fabric tanpa dependensi yang hilang dalam pipeline debug |
 | `-IgnoreModIds <id1,id2,...>` | Abaikan id mod yang ditentukan dalam pembersihan kompatibilitas |
@@ -124,6 +126,8 @@ Contoh:
 ```powershell
 .\checker.ps1             # Pemeriksaan lengkap (termasuk locale)
 .\checker.ps1 -NoLocales  # Lewati pemeriksaan locale
+.\checker.ps1 -NoPester   # Lewati tes Pester
+.\checker.ps1 .\scripts\Shared-FileOps.ps1  # Periksa hanya file/path yang ditentukan
 ```
 
 Perilaku saat Python tidak ada:
@@ -171,7 +175,7 @@ Setelah selesai, script akan menampilkan laporan: waktu eksekusi, daftar penyeba
 - Hanya Windows (Win32 API untuk manajemen jendela)
 - Diagnosis memerlukan berkalikali menjalankan game — pada susunan mod yang besar, hal ini dapat memakan waktu yang cukup lama
 - Pada klaster ketidakcocokan yang besar, kemungkinan terjadi sesi berjalan yang tidak stabil dan penghentian diagnosis lebih awal
-- Tahap Pemulihan saat ini masih eksperimental dan dimatikan secara default
+- Tahap Pemulihan saat ini masih eksperimental, tetapi diaktifkan secara default (`[Stages].EnableRecovery=true`)
 
 ## Dukungan
 

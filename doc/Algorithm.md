@@ -11,6 +11,7 @@ This document describes the complete cycle of automatic mod conflict diagnostics
 5. Detection of crash/Fabric windows is prioritized to the launcher process (fallback is a general search) to avoid catching "foreign" system windows.
 6. If there is no crash and the session still has isolated mods, Recovery runs automatically (when enabled).
 7. A user dialog appears only when unresolved isolated mods remain, Recovery is disabled, or the launch outcome is ambiguous (Fabric/NoLaunch).
+8. For sessions ending with Fabric missing dependencies, the script shows a final choice: `continue` / `rollback` / `finish`.
 
 ## Stage 1: Baseline Analysis
 
@@ -114,7 +115,7 @@ Mods are added in exponential batches: 1, 2, 4, 8, ...
 
 **On Successful Launch:**
 
-- 20 seconds wait to confirm stability (60 with the `-ThoroughStabilityCheck` flag).
+- 20 seconds wait to confirm stability (60 with `-LongLaunchTimeout`; alias: `-ThoroughStabilityCheck`).
 - The client closes, and the script proceeds to the next layer.
 - If the player closes the game themselves, the batch is considered clean.
 - On the final batch of the last tier, the game remains running.
@@ -150,6 +151,7 @@ Default Isolation Mode:
   - Restores the removed missing dependency (if its removal caused the dialog).
   - Quick-isolates the requiring mod(s).
   - Continues the cycle.
+- If a confirmed culprit is in dependency Tier 2+, mods that depend on it are automatically added to the exclusion queue (transitively via the dependency map).
 
 ### Stopping Criterion
 

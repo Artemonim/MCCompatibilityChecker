@@ -44,6 +44,7 @@ Algoritmanın ayrıntılı açıklaması [doc/Algorithm.md](doc/Algorithm.md) do
 
 - **PSScriptAnalyzer** (PowerShell modülü, `checker.ps1` için gereklidir)
 - **Python 3.x** (`tools/Check-Localization.py` aracılığıyla yerelleştirme kontrolleri için gereklidir)
+- **Pester** (`-NoPester` kullanılmadığında `checker.ps1` testleri için gereken PowerShell modülü)
 
 `PSScriptAnalyzer` kurulumu:
 ```powershell
@@ -89,7 +90,7 @@ Ayarlar `config.ini` (varsayılanlar) ve `config.local.ini` (sizin özel ayarlar
 Şu anki mevcut yereller: `en`, `ru`.
 Şunlar için taslaklar hazırlandı: `tr_TR`, `pt_BR`, `vi`, `es_ES`, `id_ID`, `zh-CN`.
 Başlatıcının çökme penceresi araması otomatik olarak `scripts/locales/*.psd1` (`Ui.CrashWindowTitlePatterns`) içinden desenleri toplar.
-Şu anda `Something broke` / `Something went wrong` (en) ve `Что-то сломалось...` (ru) içerir. Yeni diller için bu listeyi ilgili locale dosyasına eklemek yeterlidir.
+Şu anda `Something broke...`, `Something went wrong...` ve `Что-то сломалось...` desenlerini içerir. Yeni diller için bu listeyi ilgili locale dosyasına eklemek yeterlidir.
 Başlatıcı pencerenizin başlığı farklıysa, `CrashWindowTitlePatterns` parametresini `[Profile:<isim>]` içinde açıkça belirtebilir ve `-Profile <isim>` ile çalıştırabilirsiniz.
 
 ## Ana Başlatma Parametreleri
@@ -108,6 +109,7 @@ Başlatıcı pencerenizin başlığı farklıysa, `CrashWindowTitlePatterns` par
 | `-Verbose` | Ayrıntılı günlükler (konsola ve `MCCC.log` dosyasına) |
 | `-UseLinearIsolation` | İkili yerine doğrusal arama (daha yavaş ama daha basit) |
 | `-NoCache` | Oturum önbelleğini kapat (daha önce başarılı olan yapılandırmaları bile tekrar kontrol et) |
+| `-OutcomeTimeoutSeconds <sec>` | Play'e bastıktan sonra sonuç bekleme süresi (varsayılan: 60) |
 | `-ThoroughStabilityCheck` | Başlatma kararlılığı kontrol süresini artır |
 | `-AutoHandleFabricDialog <bool>` | Hata ayıklama boru hattında eksik bağımlılık olmayan Fabric diyaloglarını otomatik yönlendir |
 | `-IgnoreModIds <id1,id2,...>` | Uyumluluk temizliğinde belirtilen mod id'lerini yoksay |
@@ -124,6 +126,8 @@ Başlatıcı pencerenizin başlığı farklıysa, `CrashWindowTitlePatterns` par
 ```powershell
 .\checker.ps1             # Tam kontrol (yerelleştirmeler dahil)
 .\checker.ps1 -NoLocales  # Yerelleştirme kontrolünü atla
+.\checker.ps1 -NoPester   # Pester testlerini atla
+.\checker.ps1 .\scripts\Shared-FileOps.ps1  # Yalnızca belirtilen dosya/yolu kontrol et
 ```
 
 Python eksik olduğunda davranış:
@@ -171,7 +175,7 @@ Tamamlandıktan sonra script bir rapor sunar: çalışma süresi, aşamalara gö
 - Sadece Windows (Pencere yönetimi için Win32 API)
 - Teşhis, oyunun defalarca başlatılmasını gerektirir — büyük mod paketlerinde bu önemli bir zaman alabilir
 - Büyük uyumsuzluk kümelerinde kararsız çalışmalar ve teşhisin erken durması mümkündür
-- Kurtarma aşaması şu an için deneyseldir ve varsayılan olarak kapalıdır
+- Kurtarma aşaması şu an için deneyseldir, ancak varsayılan olarak açıktır (`[Stages].EnableRecovery=true`)
 
 ## Destek
 
