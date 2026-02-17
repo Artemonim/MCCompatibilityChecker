@@ -20,29 +20,102 @@ if (-not $deleteFromGame) {
 
 $actions = New-Object System.Collections.Generic.List[object]
 
-foreach ($modId in $orderedModIds) {
-  $modIdVariants = @(Get-ModIdLookupVariantList -ModId $modId)
-  $modIdVariantKeys = @($modIdVariants | Where-Object { -not [string]::Equals([string]$_, [string]$modId, [System.StringComparison]::OrdinalIgnoreCase) })
+function Get-NormalizedModIdKey {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$ModId = ""
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ModId)) { return "" }
+  return $ModId.Trim().ToLowerInvariant()
+}
+
+function Get-DependentModIdClosure {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$RootModId,
+    [Parameter(Mandatory = $false)]
+    [hashtable]$DependentsByModId = @{}
+  )
+
+  $rootKey = Get-NormalizedModIdKey -ModId $RootModId
+  if ([string]::IsNullOrWhiteSpace($rootKey)) { return @() }
+  if ($null -eq $DependentsByModId -or $DependentsByModId.Count -eq 0) { return @() }
+  if (-not $DependentsByModId.ContainsKey($rootKey)) { return @() }
+
+  $queue = [System.Collections.Generic.Queue[string]]::new()
+  $visited = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $result = New-Object System.Collections.Generic.List[string]
+  $queue.Enqueue($rootKey)
+
+  while ($queue.Count -gt 0) {
+    $currentKey = [string]$queue.Dequeue()
+    if ([string]::IsNullOrWhiteSpace($currentKey)) { continue }
+    if (-not $DependentsByModId.ContainsKey($currentKey)) { continue }
+    foreach ($dependentId in @($DependentsByModId[$currentKey])) {
+      $dependentKey = Get-NormalizedModIdKey -ModId ([string]$dependentId)
+      if ([string]::IsNullOrWhiteSpace($dependentKey)) { continue }
+      if ([string]::Equals($dependentKey, $rootKey, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+      if (-not $visited.Add($dependentKey)) { continue }
+      $result.Add($dependentKey) | Out-Null
+      $queue.Enqueue($dependentKey)
+    }
+  }
+
+  if ($result.Count -eq 0) { return @() }
+  return @($result.ToArray() | Sort-Object -Unique)
+}
+
+$pendingModIds = New-Object System.Collections.Generic.List[string]
+$pendingModIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($orderedModId in @($orderedModIds)) {
+  $orderedModKey = Get-NormalizedModIdKey -ModId ([string]$orderedModId)
+  if ([string]::IsNullOrWhiteSpace($orderedModKey)) { continue }
+  if (-not $pendingModIdSet.Add($orderedModKey)) { continue }
+  $pendingModIds.Add($orderedModKey) | Out-Null
+}
+
+$processedModIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$autoDependentSourceByModId = @{}
+$autoExpandedDependentModIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+for ($pendingIndex = 0; $pendingIndex -lt $pendingModIds.Count; $pendingIndex++) {
+  $modId = [string]$pendingModIds[$pendingIndex]
+  $modIdKey = Get-NormalizedModIdKey -ModId $modId
+  if ([string]::IsNullOrWhiteSpace($modIdKey)) { continue }
+  $null = $pendingModIdSet.Remove($modIdKey)
+  if (-not $processedModIdSet.Add($modIdKey)) { continue }
+
+  $modIdVariants = @(Get-ModIdLookupVariantList -ModId $modIdKey)
+  $modIdVariantKeys = @($modIdVariants | Where-Object { -not [string]::Equals([string]$_, [string]$modIdKey, [System.StringComparison]::OrdinalIgnoreCase) })
 
   $modPriority = $null
-  if ($dependencyPriorityByModId.ContainsKey($modId)) {
-    $modPriority = $dependencyPriorityByModId[$modId]
+  if ($dependencyPriorityByModId.ContainsKey($modIdKey)) {
+    $modPriority = $dependencyPriorityByModId[$modIdKey]
   }
   $priorityTier = if ($null -ne $modPriority) { [int]$modPriority.Tier } else { 0 }
   $priorityDependents = if ($null -ne $modPriority) { [int]$modPriority.DependentCount } else { -1 }
   $priorityKnown = if ($null -ne $modPriority) { [bool]$modPriority.Known } else { $false }
   $priorityDecision = if ($null -ne $modPriority) { [string]$modPriority.PriorityDecision } else { "" }
+  if ([string]::IsNullOrWhiteSpace($priorityDecision) -and $autoDependentSourceByModId.ContainsKey($modIdKey)) {
+    $autoSourceIds = @($autoDependentSourceByModId[$modIdKey] | Sort-Object -Unique)
+    if ($autoSourceIds.Count -gt 0) {
+      $priorityDecision = ("auto-isolated dependent of: {0}" -f ($autoSourceIds -join ", "))
+    }
+  }
   $conflictScore = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ConflictScore").Count -gt 0) { [int]$modPriority.ConflictScore } else { 0 }
   $evidenceCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("EvidenceCount").Count -gt 0) { [int]$modPriority.EvidenceCount } else { 0 }
   $fabricSuggestionCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("FabricSuggestionCount").Count -gt 0) { [int]$modPriority.FabricSuggestionCount } else { 0 }
   $incompatibleDetailCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("IncompatibleDetailCount").Count -gt 0) { [int]$modPriority.IncompatibleDetailCount } else { 0 }
   $referencesOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencesOtherCount").Count -gt 0) { [int]$modPriority.ReferencesOtherCount } else { 0 }
   $referencedByOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencedByOtherCount").Count -gt 0) { [int]$modPriority.ReferencedByOtherCount } else { 0 }
+  $handledCurrentModId = $false
 
   $gameJarPaths = @()
   $resolvedByDirectGameId = $false
-  if ($gameIdToJars.ContainsKey($modId)) {
-    $gameJarPaths = @($gameIdToJars[$modId])
+  if ($gameIdToJars.ContainsKey($modIdKey)) {
+    $gameJarPaths = @($gameIdToJars[$modIdKey])
     if ($gameJarPaths.Count -gt 0) {
       $resolvedByDirectGameId = $true
     }
@@ -96,7 +169,7 @@ foreach ($modId in $orderedModIds) {
     $gameJarPaths = @(Resolve-GameJarPathsFromMixinEvidence `
         -ModId $modId `
         -ModsDir $GameModsDir `
-        -EvidenceLines @($evidenceByModId[$modId]) `
+        -EvidenceLines @($evidenceByModId[$modIdKey]) `
         -JarMixinConfigEntryCache $jarMixinConfigEntryCache)
   }
   if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
@@ -115,7 +188,7 @@ foreach ($modId in $orderedModIds) {
     $gameJarPaths = @(Select-GameJarPathsByMixinEvidence `
         -ModId $modId `
         -CandidateJarPaths @($gameJarPaths) `
-        -EvidenceLines @($evidenceByModId[$modId]) `
+        -EvidenceLines @($evidenceByModId[$modIdKey]) `
         -JarMixinConfigEntryCache $jarMixinConfigEntryCache)
   }
 
@@ -144,9 +217,9 @@ foreach ($modId in $orderedModIds) {
       )
       $alreadyHandledLabel = if ($alreadyHandledNames.Count -gt 0) { $alreadyHandledNames -join ", " } else { "<unknown>" }
       $actions.Add([pscustomobject]@{
-          modId = $modId
+          modId = $modIdKey
           status = "handled"
-          evidence = @($evidenceByModId[$modId])
+          evidence = @($evidenceByModId[$modIdKey])
           game = @("already handled by previous mod action: $alreadyHandledLabel")
           storage = @()
           dependencyTier = $priorityTier
@@ -160,49 +233,52 @@ foreach ($modId in $orderedModIds) {
           referencesOtherCount = $referencesOtherCount
           referencedByOtherCount = $referencedByOtherCount
         })
-      continue
+      $handledCurrentModId = $true
     }
 
-    $actions.Add([pscustomobject]@{
-        modId = $modId
-        status = "unresolved_in_game_mods"
-        evidence = @($evidenceByModId[$modId])
-        game = @()
-        storage = @()
-        dependencyTier = $priorityTier
-        dependentMods = $priorityDependents
-        dependentModsKnown = $priorityKnown
-        priorityDecision = $priorityDecision
-        conflictScore = $conflictScore
-        evidenceCount = $evidenceCount
-        fabricSuggestionCount = $fabricSuggestionCount
-        incompatibleDetailCount = $incompatibleDetailCount
-        referencesOtherCount = $referencesOtherCount
-        referencedByOtherCount = $referencedByOtherCount
-      })
-    Add-McccStageWarning `
-      -Accumulator $decisionStageResult `
-      -Category "mod_resolution" `
-      -Code "UNRESOLVED_IN_GAME_MODS" `
-      -Message "No removable mods found in game mods folder. Check missing dependencies or mod ids." `
-      -Context @{
-      ModId = $modId
-      GameModsDir = $GameModsDir
-      EvidenceCount = [int]@($evidenceByModId[$modId]).Count
-      ModIdVariants = @($modIdVariantKeys)
-    } | Out-Null
-    continue
+    if (-not $handledCurrentModId) {
+      $actions.Add([pscustomobject]@{
+          modId = $modIdKey
+          status = "unresolved_in_game_mods"
+          evidence = @($evidenceByModId[$modIdKey])
+          game = @()
+          storage = @()
+          dependencyTier = $priorityTier
+          dependentMods = $priorityDependents
+          dependentModsKnown = $priorityKnown
+          priorityDecision = $priorityDecision
+          conflictScore = $conflictScore
+          evidenceCount = $evidenceCount
+          fabricSuggestionCount = $fabricSuggestionCount
+          incompatibleDetailCount = $incompatibleDetailCount
+          referencesOtherCount = $referencesOtherCount
+          referencedByOtherCount = $referencedByOtherCount
+        })
+      Add-McccStageWarning `
+        -Accumulator $decisionStageResult `
+        -Category "mod_resolution" `
+        -Code "UNRESOLVED_IN_GAME_MODS" `
+        -Message "No removable mods found in game mods folder. Check missing dependencies or mod ids." `
+        -Context @{
+        ModId = $modIdKey
+        GameModsDir = $GameModsDir
+        EvidenceCount = [int]@($evidenceByModId[$modIdKey]).Count
+        ModIdVariants = @($modIdVariantKeys)
+      } | Out-Null
+      $gameJarPaths = @()
+    }
   }
 
-  foreach ($gameJarPath in $gameJarPaths) {
+  if ($gameJarPaths -and $gameJarPaths.Count -gt 0) {
+    foreach ($gameJarPath in $gameJarPaths) {
     $gameFileName = [System.IO.Path]::GetFileName($gameJarPath)
     $storageJarPath = $null
     $gameHandledNow = $false
     $storageKey = $gameFileName.ToLowerInvariant()
     if ($storageFileNameToPath.ContainsKey($storageKey)) {
       $storageJarPath = $storageFileNameToPath[$storageKey]
-    } elseif ($storageIdToJars.ContainsKey($modId) -and $storageIdToJars[$modId].Count -gt 0) {
-      $storageJarPath = $storageIdToJars[$modId][0]
+    } elseif ($storageIdToJars.ContainsKey($modIdKey) -and $storageIdToJars[$modIdKey].Count -gt 0) {
+      $storageJarPath = $storageIdToJars[$modIdKey][0]
     } elseif ($modIdVariantKeys.Count -gt 0) {
       foreach ($variantModId in @($modIdVariantKeys)) {
         $variantKey = [string]$variantModId
@@ -215,7 +291,7 @@ foreach ($modId in $orderedModIds) {
     } else {
       $storageFallbackJarPaths = @(Resolve-ModJarPathsByNestedFallback `
           -DirPath $StorageModsDir `
-          -ModId $modId `
+          -ModId $modIdKey `
           -ResolvedByModIdCache $nestedFallbackStoragePathsByModId `
           -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
           -MaxNestedJarDepth $nestedFallbackMaxDepth)
@@ -285,14 +361,14 @@ foreach ($modId in $orderedModIds) {
         if ($storageJarPath) {
             $storageResult = Move-OrDelete -SourcePath $storageJarPath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun $true
         } else {
-            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
+            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modIdKey)
             Add-McccStageWarning `
               -Accumulator $decisionStageResult `
               -Category "storage" `
               -Code "STORAGE_SOURCE_NOT_FOUND" `
               -Message $storageResult `
               -Context @{
-              ModId = $modId
+              ModId = $modIdKey
               JarName = $gameFileName
               StorageModsDir = $StorageModsDir
               DryRun = $true
@@ -311,7 +387,7 @@ foreach ($modId in $orderedModIds) {
                   -Code "STORAGE_MOVE_FAILED" `
                   -Message $storageResult `
                   -Context @{
-                  ModId = $modId
+                  ModId = $modIdKey
                   JarName = $gameFileName
                   StorageSourcePath = $storageJarPath
                   StorageLegacyVersionDir = $storageLegacyVersionDir
@@ -319,14 +395,14 @@ foreach ($modId in $orderedModIds) {
                 } | Out-Null
             }
         } else {
-            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
+            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modIdKey)
             Add-McccStageWarning `
               -Accumulator $decisionStageResult `
               -Category "storage" `
               -Code "STORAGE_SOURCE_NOT_FOUND" `
               -Message $storageResult `
               -Context @{
-              ModId = $modId
+              ModId = $modIdKey
               JarName = $gameFileName
               StorageModsDir = $StorageModsDir
               DryRun = $false
@@ -334,23 +410,42 @@ foreach ($modId in $orderedModIds) {
         }
     }
 
-    $actions.Add([pscustomobject]@{
-        modId = $modId
-        status = "handled"
-        evidence = @($evidenceByModId[$modId])
-        game = @($gameResult)
-        storage = @($storageResult)
-        dependencyTier = $priorityTier
-        dependentMods = $priorityDependents
-        dependentModsKnown = $priorityKnown
-        priorityDecision = $priorityDecision
-        conflictScore = $conflictScore
-        evidenceCount = $evidenceCount
-        fabricSuggestionCount = $fabricSuggestionCount
-        incompatibleDetailCount = $incompatibleDetailCount
-        referencesOtherCount = $referencesOtherCount
-        referencedByOtherCount = $referencedByOtherCount
-      })
+      $actions.Add([pscustomobject]@{
+          modId = $modIdKey
+          status = "handled"
+          evidence = @($evidenceByModId[$modIdKey])
+          game = @($gameResult)
+          storage = @($storageResult)
+          dependencyTier = $priorityTier
+          dependentMods = $priorityDependents
+          dependentModsKnown = $priorityKnown
+          priorityDecision = $priorityDecision
+          conflictScore = $conflictScore
+          evidenceCount = $evidenceCount
+          fabricSuggestionCount = $fabricSuggestionCount
+          incompatibleDetailCount = $incompatibleDetailCount
+          referencesOtherCount = $referencesOtherCount
+          referencedByOtherCount = $referencedByOtherCount
+        })
+      $handledCurrentModId = $true
+    }
+  }
+
+  if ($handledCurrentModId -and $priorityTier -ge 2 -and $dependencyDependentsByModId -and $dependencyDependentsByModId.Count -gt 0) {
+    $dependentModIds = @(Get-DependentModIdClosure -RootModId $modIdKey -DependentsByModId $dependencyDependentsByModId)
+    foreach ($dependentModId in @($dependentModIds)) {
+      $dependentKey = Get-NormalizedModIdKey -ModId ([string]$dependentModId)
+      if ([string]::IsNullOrWhiteSpace($dependentKey)) { continue }
+      if ([string]::Equals($dependentKey, $modIdKey, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+      if ($processedModIdSet.Contains($dependentKey) -or $pendingModIdSet.Contains($dependentKey)) { continue }
+      $pendingModIds.Add($dependentKey) | Out-Null
+      $null = $pendingModIdSet.Add($dependentKey)
+      $null = $autoExpandedDependentModIdSet.Add($dependentKey)
+      if (-not $autoDependentSourceByModId.ContainsKey($dependentKey)) {
+        $autoDependentSourceByModId[$dependentKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      }
+      $null = $autoDependentSourceByModId[$dependentKey].Add($modIdKey)
+    }
   }
 }
 
@@ -482,4 +577,5 @@ Set-McccStageResult -StageResults $checkCompatStageResults -StageResult (Complet
     HandledActionCount = [int]$handledActionCount
     UnresolvedActionCount = [int]$unresolvedActionCount
     NonFabricActionCount = [int]$nonFabricActionCount
+    AutoExpandedDependentModCount = [int]$autoExpandedDependentModIdSet.Count
   })

@@ -1222,27 +1222,50 @@ function Wait-ForLauncherWindowInteractive {
 function Request-LauncherRecoveryDecision {
   param(
     [Parameter(Mandatory = $false)]
-    [int]$PlayAttempts = 0
+    [int]$PlayAttempts = 0,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$PromptLines = @(),
+    [Parameter(Mandatory = $false)]
+    [string]$DialogTitle = "User action required"
   )
 
-  $attemptLabel = if ($PlayAttempts -gt 0) {
-    ("Launch attempts: {0}." -f $PlayAttempts)
-  } else {
-    "Launch attempt not detected."
+  $prompt = ""
+  if ($PromptLines -and $PromptLines.Count -gt 0) {
+    $normalizedPromptLines = @(
+      $PromptLines |
+        ForEach-Object { [string]$_ } |
+        Where-Object { $null -ne $_ }
+    )
+    if ($normalizedPromptLines.Count -gt 0) {
+      $prompt = ($normalizedPromptLines -join [Environment]::NewLine)
+    }
   }
 
-  $prompt = @(
-    "Unable to launch or detect the launcher. Please try restarting the launcher."
-    $attemptLabel
-    ""
-    "Yes — continue retrying."
-    "No — cancel."
-    "Cancel — cancel with rollback."
-  ) -join [Environment]::NewLine
+  if ([string]::IsNullOrWhiteSpace($prompt)) {
+    $attemptLabel = if ($PlayAttempts -gt 0) {
+      ("Launch attempts: {0}." -f $PlayAttempts)
+    } else {
+      "Launch attempt not detected."
+    }
+
+    $prompt = @(
+      "Unable to launch or detect the launcher. Please try restarting the launcher."
+      $attemptLabel
+      ""
+      "Yes — continue retrying."
+      "No — cancel."
+      "Cancel — cancel with rollback."
+    ) -join [Environment]::NewLine
+  }
+
+  if ([string]::IsNullOrWhiteSpace($DialogTitle)) {
+    $DialogTitle = "User action required"
+  }
 
   $result = [System.Windows.Forms.MessageBox]::Show(
     $prompt,
-    "User action required",
+    $DialogTitle,
     [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
     [System.Windows.Forms.MessageBoxIcon]::Warning
   )

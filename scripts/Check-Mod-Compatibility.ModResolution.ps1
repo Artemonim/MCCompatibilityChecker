@@ -64,6 +64,30 @@ if ($dependencyMap) {
   $dependencyPrioritySourceUsed = "Internal"
 }
 
+$dependencyDependentsByModId = @{}
+if ($dependencyMap -and ($dependencyMap.PSObject.Properties.Name -contains "Dependencies")) {
+  foreach ($edge in @($dependencyMap.Dependencies)) {
+    if ($null -eq $edge) { continue }
+    $depId = [string]$edge.DependencyId
+    $fromModId = [string]$edge.FromModId
+    if ([string]::IsNullOrWhiteSpace($depId) -or [string]::IsNullOrWhiteSpace($fromModId)) { continue }
+
+    $isRequired = $true
+    if ($edge.PSObject.Properties.Name -contains "IsRequired") {
+      $isRequired = [bool]$edge.IsRequired
+    }
+    if ($countMode -eq "RequiredOnly" -and (-not $isRequired)) { continue }
+
+    $depKey = $depId.ToLowerInvariant()
+    $fromKey = $fromModId.ToLowerInvariant()
+    if ([string]::Equals($depKey, $fromKey, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    if (-not $dependencyDependentsByModId.ContainsKey($depKey)) {
+      $dependencyDependentsByModId[$depKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    $null = $dependencyDependentsByModId[$depKey].Add($fromKey)
+  }
+}
+
 if ($DependencyMapSource -eq "File") {
   $dependencyPriorityMapJsonPath = $DependencyMapJsonPath
   if ([string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath)) {
@@ -212,4 +236,5 @@ Set-McccStageResult -StageResults $checkCompatStageResults -StageResult (Complet
     DependencyPrioritySource = $dependencyPrioritySourceUsed
     DependencyPriorityMapJsonPath = $dependencyPriorityMapJsonPath
     DependencyTieredJarCount = [int]$dependencyPriorityByJarName.Count
+    DependencyDependentModIdCount = [int]$dependencyDependentsByModId.Count
   })
