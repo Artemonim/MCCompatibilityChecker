@@ -1,3 +1,8 @@
+if ($null -eq $isolationStageResults -or -not ($isolationStageResults -is [hashtable])) {
+  $isolationStageResults = @{}
+}
+$baselineStageResult = New-McccStageAccumulator -Stage "Isolation.Baseline"
+
   if (-not $SkipBaselineRun) {
     Write-Host "Baseline attempt starting." -ForegroundColor Cyan
     $baselineAttemptStart = Get-Date
@@ -30,6 +35,15 @@
     if (Test-DependencyDialogBlock -Context "baseline" -Lines $baselineSnapshot.Lines) {
       $stopReason = "dependency_dialog_baseline"
       $skipIsolation = $true
+      Add-McccStageWarning `
+        -Accumulator $baselineStageResult `
+        -Category "dependency_dialog" `
+        -Code "DEPENDENCY_DIALOG_BASELINE" `
+        -Message "Isolation stopped due to dependency dialog in baseline." `
+        -Context @{
+        Context = "baseline"
+        BaselineOutcome = $baselineOutcome
+      } | Out-Null
     }
 
     $mcVersionForLegacy = Get-MinecraftVersionFromLog -Lines $baselineSnapshot.Lines
@@ -43,6 +57,15 @@
 
     if ([string]::IsNullOrWhiteSpace($baselineSignature)) {
       Write-Host "Baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
+      Add-McccStageWarning `
+        -Accumulator $baselineStageResult `
+        -Category "baseline_signature" `
+        -Code "BASELINE_SIGNATURE_EMPTY" `
+        -Message "Baseline signature is empty. Error change detection may be limited." `
+        -Context @{
+        BaselineOutcome = $baselineOutcome
+        BaselineEvidenceKey = $baselineEvidenceKey
+      } | Out-Null
     } else {
       Write-Verbose ("Baseline signature: {0}" -f $baselineSignature)
     }
@@ -56,6 +79,16 @@
         -CurrentBaselineEvidenceKey $baselineEvidenceKey
       if ($preSelection.EvidenceMismatch) {
         Write-Host "Fast-forward disabled: baseline evidence changed." -ForegroundColor Gray
+        Add-McccStageWarning `
+          -Accumulator $baselineStageResult `
+          -Category "fast_forward" `
+          -Code "FAST_FORWARD_BASELINE_MISMATCH" `
+          -Message "Fast-forward disabled: baseline evidence changed." `
+          -Context @{
+          PreviousBaselineEvidenceKey = $PreIsolateBaselineEvidenceKey
+          CurrentBaselineEvidenceKey = $baselineEvidenceKey
+          RequestedPreIsolateCount = [int]@($PreIsolateJarNames).Count
+        } | Out-Null
         Write-Verbose ("Previous baseline evidence: {0}" -f $PreIsolateBaselineEvidenceKey)
         Write-Verbose ("Current baseline evidence: {0}" -f $baselineEvidenceKey)
         $PreIsolateJarNames = @()
@@ -99,3 +132,21 @@
       $pinnedJarNames = @($pinnedJarNameSet.Values)
     }
   }
+
+  $baselinePinnedJarCount = 0
+  $pinnedJarNamesVar = Get-Variable -Name "pinnedJarNames" -Scope 0 -ErrorAction SilentlyContinue
+  if ($null -ne $pinnedJarNamesVar -and $null -ne $pinnedJarNamesVar.Value) {
+    $baselinePinnedJarCount = [int]@($pinnedJarNamesVar.Value).Count
+  }
+
+Set-McccStageResult -StageResults $isolationStageResults -StageResult (Complete-McccStageAccumulator `
+    -Accumulator $baselineStageResult `
+    -ExtraFields @{
+    BaselineOutcome = $baselineOutcome
+    BaselineSucceeded = [bool]$baselineSucceeded
+    BaselineSignature = $baselineSignature
+    BaselineEvidenceKey = $baselineEvidenceKey
+    SkipIsolation = [bool]$skipIsolation
+    StopReason = $stopReason
+    PinnedJarCount = [int]$baselinePinnedJarCount
+  })

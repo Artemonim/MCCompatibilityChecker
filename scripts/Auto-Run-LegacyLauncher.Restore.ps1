@@ -1,3 +1,9 @@
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) {
+  throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath)
+}
+. $sharedFileOpsPath
+ 
 function Restore-IsolationCulpritMod {
   <#
   .SYNOPSIS
@@ -20,56 +26,37 @@ function Restore-IsolationCulpritMod {
     [switch]$ReturnDetails
   )
 
-  function Invoke-WithRetry {
-    param(
-      [Parameter(Mandatory = $true)]
-      [scriptblock]$Action,
-      [int]$MaxRetries = $Retries,
-      [int]$WaitMs = $DelayMs
-    )
-    for ($i = 0; $i -le $MaxRetries; $i++) {
-      try {
-        & $Action
-        return $true
-      } catch [System.IO.IOException] {
-        if ($i -ge $MaxRetries) { throw }
-        Start-Sleep -Milliseconds $WaitMs
-        continue
-      } catch {
-        throw
-      }
-    }
-    return $false
-  }
-
   function Find-LegacySourcePath {
     param(
       [Parameter(Mandatory = $false)]
       [AllowEmptyString()]
       [string]$ModsRootDir = "",
       [Parameter(Mandatory = $false)]
-      [AllowEmptyString()]
-      [string]$LegacyFolderName = "",
+      [AllowEmptyCollection()]
+      [string[]]$LegacyFolderNames = @(),
       [Parameter(Mandatory = $true)]
       [string]$JarName
     )
 
     if ([string]::IsNullOrWhiteSpace($ModsRootDir)) { return "" }
-    if ([string]::IsNullOrWhiteSpace($LegacyFolderName)) { return "" }
+    if (-not $LegacyFolderNames -or $LegacyFolderNames.Count -eq 0) { return "" }
     if ([string]::IsNullOrWhiteSpace($JarName)) { return "" }
 
-    $legacyRoot = Join-Path -Path $ModsRootDir -ChildPath $LegacyFolderName
-    if (-not (Test-Path -LiteralPath $legacyRoot)) { return "" }
+    foreach ($legacyFolderName in @($LegacyFolderNames)) {
+      if ([string]::IsNullOrWhiteSpace($legacyFolderName)) { continue }
+      $legacyRoot = Join-Path -Path $ModsRootDir -ChildPath $legacyFolderName
+      if (-not (Test-Path -LiteralPath $legacyRoot)) { continue }
 
-    try {
-      $match = Get-ChildItem -LiteralPath $legacyRoot -Recurse -File -Filter $JarName -ErrorAction SilentlyContinue |
-        Sort-Object -Property LastWriteTime -Descending |
-        Select-Object -First 1
-      if ($null -ne $match -and -not [string]::IsNullOrWhiteSpace([string]$match.FullName)) {
-        return [string]$match.FullName
+      try {
+        $match = Get-ChildItem -LiteralPath $legacyRoot -Recurse -File -Filter $JarName -ErrorAction SilentlyContinue |
+          Sort-Object -Property LastWriteTime -Descending |
+          Select-Object -First 1
+        if ($null -ne $match -and -not [string]::IsNullOrWhiteSpace([string]$match.FullName)) {
+          return [string]$match.FullName
+        }
+      } catch {
+        continue
       }
-    } catch {
-      return ""
     }
 
     return ""
@@ -102,14 +89,13 @@ function Restore-IsolationCulpritMod {
     # * If explicit legacy paths are missing, try to discover likely source copies by jar name.
     $effectiveStorageLegacyPath = $storageLegacyPath
     if ([string]::IsNullOrWhiteSpace($effectiveStorageLegacyPath) -or -not (Test-Path -LiteralPath $effectiveStorageLegacyPath)) {
-      $effectiveStorageLegacyPath = Find-LegacySourcePath -ModsRootDir $storageModsDir -LegacyFolderName "Legacy" -JarName $jarName
-      if ([string]::IsNullOrWhiteSpace($effectiveStorageLegacyPath)) {
-        $effectiveStorageLegacyPath = Find-LegacySourcePath -ModsRootDir $storageModsDir -LegacyFolderName "legacy" -JarName $jarName
-      }
+      $storageLegacyCandidates = @(Get-McccLegacyFolderCandidates -Role "StorageLegacy")
+      $effectiveStorageLegacyPath = Find-LegacySourcePath -ModsRootDir $storageModsDir -LegacyFolderNames $storageLegacyCandidates -JarName $jarName
     }
     $effectiveGameLegacyPath = $gameLegacyPath
     if ([string]::IsNullOrWhiteSpace($effectiveGameLegacyPath) -or -not (Test-Path -LiteralPath $effectiveGameLegacyPath)) {
-      $effectiveGameLegacyPath = Find-LegacySourcePath -ModsRootDir $gameModsDir -LegacyFolderName "legacy" -JarName $jarName
+      $gameLegacyCandidates = @(Get-McccLegacyFolderCandidates -Role "GameLegacy")
+      $effectiveGameLegacyPath = Find-LegacySourcePath -ModsRootDir $gameModsDir -LegacyFolderNames $gameLegacyCandidates -JarName $jarName
     }
 
     try {
@@ -119,8 +105,10 @@ function Restore-IsolationCulpritMod {
           if (Test-Path -LiteralPath $storageTarget) {
             Write-Host ("Warning: storage target already exists, leaving legacy copy: {0}" -f $storageTarget) -ForegroundColor Yellow
           } else {
-            Invoke-WithRetry -Action { Move-Item -LiteralPath $effectiveStorageLegacyPath -Destination $storageTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
-            Write-Host ("Restored storage mod: {0}" -f $storageTarget) -ForegroundColor Green
+            $moveStorageResult = Move-McccItem -LiteralPath $effectiveStorageLegacyPath -DestinationPath $storageTarget -DryRun $false -Overwrite $true -RetryCount $Retries -RetryDelayMs $DelayMs
+            if ($moveStorageResult.Performed) {
+              Write-Host ("Restored storage mod: {0}" -f $storageTarget) -ForegroundColor Green
+            }
           }
         }
       }
@@ -135,27 +123,33 @@ function Restore-IsolationCulpritMod {
         }
 
         if (-not [string]::IsNullOrWhiteSpace($effectiveGameLegacyPath) -and (Test-Path -LiteralPath $effectiveGameLegacyPath)) {
-          Invoke-WithRetry -Action { Move-Item -LiteralPath $effectiveGameLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
-          Write-Host ("Restored game mod: {0}" -f $gameTarget) -ForegroundColor Green
-          $restoredThisJar = $true
-          $restoredJarNames.Add($jarName) | Out-Null
-          continue
+          $moveGameResult = Move-McccItem -LiteralPath $effectiveGameLegacyPath -DestinationPath $gameTarget -DryRun $false -Overwrite $true -RetryCount $Retries -RetryDelayMs $DelayMs
+          if ($moveGameResult.Performed) {
+            Write-Host ("Restored game mod: {0}" -f $gameTarget) -ForegroundColor Green
+            $restoredThisJar = $true
+            $restoredJarNames.Add($jarName) | Out-Null
+            continue
+          }
         }
 
         # * Fallback: copy from storage root (preferred) or from storage legacy.
         if ($storageTarget -and (Test-Path -LiteralPath $storageTarget)) {
-          Invoke-WithRetry -Action { Copy-Item -LiteralPath $storageTarget -Destination $gameTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
-          Write-Host ("Restored game mod (copied from storage): {0}" -f $gameTarget) -ForegroundColor Green
-          $restoredThisJar = $true
-          $restoredJarNames.Add($jarName) | Out-Null
-          continue
+          $copyStorageResult = Copy-McccItem -LiteralPath $storageTarget -DestinationPath $gameTarget -DryRun $false -Overwrite $true -RetryCount $Retries -RetryDelayMs $DelayMs
+          if ($copyStorageResult.Performed) {
+            Write-Host ("Restored game mod (copied from storage): {0}" -f $gameTarget) -ForegroundColor Green
+            $restoredThisJar = $true
+            $restoredJarNames.Add($jarName) | Out-Null
+            continue
+          }
         }
         if (-not [string]::IsNullOrWhiteSpace($effectiveStorageLegacyPath) -and (Test-Path -LiteralPath $effectiveStorageLegacyPath)) {
-          Invoke-WithRetry -Action { Copy-Item -LiteralPath $effectiveStorageLegacyPath -Destination $gameTarget -Force -ErrorAction Stop } -MaxRetries $Retries -WaitMs $DelayMs | Out-Null
-          Write-Host ("Restored game mod (copied from storage legacy): {0}" -f $gameTarget) -ForegroundColor Green
-          $restoredThisJar = $true
-          $restoredJarNames.Add($jarName) | Out-Null
-          continue
+          $copyLegacyResult = Copy-McccItem -LiteralPath $effectiveStorageLegacyPath -DestinationPath $gameTarget -DryRun $false -Overwrite $true -RetryCount $Retries -RetryDelayMs $DelayMs
+          if ($copyLegacyResult.Performed) {
+            Write-Host ("Restored game mod (copied from storage legacy): {0}" -f $gameTarget) -ForegroundColor Green
+            $restoredThisJar = $true
+            $restoredJarNames.Add($jarName) | Out-Null
+            continue
+          }
         }
 
         Write-Host ("Warning: could not restore game mod '{0}' (no legacy/source copy found)." -f $jarName) -ForegroundColor Yellow

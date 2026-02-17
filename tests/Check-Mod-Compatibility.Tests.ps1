@@ -44,12 +44,21 @@ Describe "Check-Mod-Compatibility safeguards" -Tag @("AvSensitive", "Integration
       Set-Content -LiteralPath $configLocalPath -Value "" -Encoding UTF8
 
       $scriptCopyMap = @{
+        "scripts\Shared-Bootstrap.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Bootstrap.ps1")
         "scripts\Shared-Localization.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Localization.ps1")
         "scripts\Shared-Config.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Config.ps1")
+        "scripts\Shared-FileOps.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-FileOps.ps1")
+        "scripts\Shared-JarTools.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-JarTools.ps1")
+        "scripts\Shared-JarMetadata.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-JarMetadata.ps1")
         "scripts\Shared-LogTools.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-LogTools.ps1")
         "scripts\Shared-Isolation-LogParsing.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Isolation-LogParsing.ps1")
         "scripts\Shared-Isolation-Legacy.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Isolation-Legacy.ps1")
         "scripts\Shared-Isolation-JarDependencies.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Isolation-JarDependencies.ps1")
+        "scripts\Shared-StageResult.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-StageResult.ps1")
+        "scripts\Check-Mod-Compatibility.Evidence.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Check-Mod-Compatibility.Evidence.ps1")
+        "scripts\Check-Mod-Compatibility.ModResolution.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Check-Mod-Compatibility.ModResolution.ps1")
+        "scripts\Check-Mod-Compatibility.Decision.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Check-Mod-Compatibility.Decision.ps1")
+        "scripts\Check-Mod-Compatibility.Reporting.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Check-Mod-Compatibility.Reporting.ps1")
         "scripts\Check-Mod-Compatibility.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Check-Mod-Compatibility.ps1")
         "scripts\locales\en.psd1" = (Join-Path -Path $localesDir -ChildPath "en.psd1")
       }

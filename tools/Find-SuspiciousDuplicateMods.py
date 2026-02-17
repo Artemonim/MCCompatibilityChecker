@@ -1,5 +1,4 @@
 import argparse
-import json
 import re
 import sys
 import zipfile
@@ -7,6 +6,8 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
+
+from shared.jar_metadata import extract_jar_metadata_from_archive
 
 # * User-tunable defaults.
 DEFAULT_NAME_SIMILARITY_THRESHOLD = 0.88
@@ -53,8 +54,6 @@ PACKAGE_EXCLUDE_PREFIXES = {
     "org/intellij/",
 }
 
-KEY_VALUE_RE = re.compile(r'^\s*([A-Za-z0-9_.-]+)\s*=\s*["\'](.*?)["\']')
-TABLE_HEADER_RE = re.compile(r"^\s*\[\[([^\]]+)\]\]\s*$")
 SPACES_RE = re.compile(r"\s+")
 
 
@@ -158,117 +157,25 @@ def jaccard_similarity(left: set[str], right: set[str]) -> float:
     return intersection / union
 
 
-def read_json_file(archive: zipfile.ZipFile, entry_name: str) -> Optional[dict]:
-    """Reads and decodes a json file from jar archive."""
-    if entry_name not in archive.namelist():
-        return None
-    try:
-        raw = archive.read(entry_name).decode("utf-8", errors="ignore")
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError, zipfile.BadZipFile):
-        return None
+def apply_metadata_to_record(metadata, record: ModRecord) -> None:
+    """Transfers canonical metadata fields into a ModRecord."""
+    raw_provided_ids = {item.lower() for item in metadata.jar_provided_ids}
+    is_forge_like = metadata.loader in ("Forge", "NeoForge")
 
+    for entry in metadata.records:
+        if entry.mod_id and not entry.is_fallback_mod_id:
+            record.ids.add(entry.mod_id)
 
-def read_text_file(archive: zipfile.ZipFile, entry_name: str) -> str:
-    """Reads and decodes a text file from jar archive."""
-    if entry_name not in archive.namelist():
-        return ""
-    try:
-        return archive.read(entry_name).decode("utf-8", errors="ignore")
-    except (OSError, zipfile.BadZipFile):
-        return ""
+        for provided_id in entry.provided_ids:
+            provided = str(provided_id).strip()
+            if not provided:
+                continue
+            if is_forge_like and provided.lower() not in raw_provided_ids:
+                continue
+            record.ids.add(provided)
 
-
-def extract_from_fabric_mod_json(mod_json: dict, record: ModRecord) -> None:
-    """Extracts ids and names from fabric.mod.json content."""
-    mod_id = str(mod_json.get("id", "")).strip()
-    if mod_id:
-        record.ids.add(mod_id)
-
-    mod_name = str(mod_json.get("name", "")).strip()
-    if mod_name:
-        record.names.add(mod_name)
-
-    provides = mod_json.get("provides")
-    if isinstance(provides, list):
-        for item in provides:
-            if isinstance(item, str) and item.strip():
-                record.ids.add(item.strip())
-            elif isinstance(item, dict):
-                provided_id = str(item.get("id", "")).strip()
-                if provided_id:
-                    record.ids.add(provided_id)
-
-
-def extract_from_quilt_mod_json(mod_json: dict, record: ModRecord) -> None:
-    """Extracts ids and names from quilt.mod.json content."""
-    loader = mod_json.get("quilt_loader")
-    if isinstance(loader, dict):
-        mod_id = str(loader.get("id", "")).strip()
-        if mod_id:
-            record.ids.add(mod_id)
-
-        provides = loader.get("provides")
-        if isinstance(provides, list):
-            for item in provides:
-                if isinstance(item, str) and item.strip():
-                    record.ids.add(item.strip())
-                elif isinstance(item, dict):
-                    provided_id = str(item.get("id", "")).strip()
-                    if provided_id:
-                        record.ids.add(provided_id)
-
-    metadata = mod_json.get("metadata")
-    if isinstance(metadata, dict):
-        mod_name = str(metadata.get("name", "")).strip()
-        if mod_name:
-            record.names.add(mod_name)
-
-
-def extract_from_mods_toml(toml_text: str, record: ModRecord) -> None:
-    """Extracts modId and displayName values from Forge-like TOML."""
-    in_mod_block = False
-    for line in toml_text.splitlines():
-        table_match = TABLE_HEADER_RE.match(line)
-        if table_match:
-            table_name = table_match.group(1).strip().lower()
-            in_mod_block = table_name == "mods"
-            continue
-
-        if not in_mod_block:
-            continue
-
-        match = KEY_VALUE_RE.match(line)
-        if not match:
-            continue
-        key = match.group(1).strip().lower()
-        value = match.group(2).strip()
-        if not value:
-            continue
-        if key == "modid":
-            record.ids.add(value)
-        elif key == "displayname":
-            record.names.add(value)
-
-
-def extract_from_mcmod_info(info_text: str, record: ModRecord) -> None:
-    """Extracts id/name values from legacy mcmod.info content."""
-    try:
-        data = json.loads(info_text)
-    except json.JSONDecodeError:
-        return
-
-    items = data if isinstance(data, list) else [data]
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        mod_id = str(item.get("modid", "")).strip()
-        if mod_id:
-            record.ids.add(mod_id)
-        mod_name = str(item.get("name", "")).strip()
-        if mod_name:
-            record.names.add(mod_name)
+        if entry.display_name and not entry.is_fallback_display_name:
+            record.names.add(entry.display_name)
 
 
 def collect_package_roots(archive: zipfile.ZipFile) -> set[str]:
@@ -303,22 +210,13 @@ def extract_mod_record(jar_path: Path) -> ModRecord:
     record = ModRecord(file_path=jar_path, fallback_name=jar_path.stem)
     try:
         with zipfile.ZipFile(jar_path, "r") as archive:
-            fabric_json = read_json_file(archive, "fabric.mod.json")
-            if fabric_json:
-                extract_from_fabric_mod_json(fabric_json, record)
-
-            quilt_json = read_json_file(archive, "quilt.mod.json")
-            if quilt_json:
-                extract_from_quilt_mod_json(quilt_json, record)
-
-            for toml_name in ("META-INF/mods.toml", "META-INF/neoforge.mods.toml"):
-                toml_text = read_text_file(archive, toml_name)
-                if toml_text:
-                    extract_from_mods_toml(toml_text, record)
-
-            mcmod_text = read_text_file(archive, "mcmod.info")
-            if mcmod_text:
-                extract_from_mcmod_info(mcmod_text, record)
+            metadata = extract_jar_metadata_from_archive(
+                archive=archive,
+                jar_path=jar_path,
+                throw_on_parse_error=False,
+            )
+            if metadata is not None:
+                apply_metadata_to_record(metadata, record)
 
             record.package_roots.update(collect_package_roots(archive))
     except (OSError, zipfile.BadZipFile):

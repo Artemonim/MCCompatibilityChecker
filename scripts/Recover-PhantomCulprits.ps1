@@ -21,13 +21,13 @@ param(
   [string]$GameModsDir = "",
 
   [Parameter(Mandatory = $false)]
-  [string]$GameLegacyFolderName = "legacy",
+  [string]$GameLegacyFolderName = "",
 
   [Parameter(Mandatory = $false)]
   [string]$StorageModsDir = "",
 
   [Parameter(Mandatory = $false)]
-  [string]$StorageLegacyFolderName = "Legacy",
+  [string]$StorageLegacyFolderName = "",
 
   [Parameter(Mandatory = $false)]
   [switch]$KeepCulpritInGameLegacy,
@@ -134,13 +134,18 @@ param(
   [switch]$DryRun
 )
 
-$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
-if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
-  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+$sharedBootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Bootstrap.ps1"
+if (-not (Test-Path -LiteralPath $sharedBootstrapPath)) {
+  throw ("Shared bootstrap helpers not found: {0}" -f $sharedBootstrapPath)
 }
-. $sharedLocalizationPath
-Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
-Enable-McccConsoleLocalization
+. $sharedBootstrapPath
+. Initialize-McccRuntimeBootstrap `
+  -StartDir $PSScriptRoot `
+  -LoadConfig `
+  -InitializeLocalization `
+  -EnableConsoleLocalization `
+  -ConfigNotFoundMessage "Shared config helpers not found: {0}" `
+  -LocalizationNotFoundMessage "Shared localization helpers not found: {0}" | Out-Null
 if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
   $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
 }
@@ -193,8 +198,6 @@ $useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmS
 # * Load shared modules.
 # ────────────────────────────────────────────────────────────────────────────
 
-$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
-. $sharedConfigPath
 $sharedUiPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LauncherUi.ps1"
 . $sharedUiPath
 $sharedLauncherPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Launcher.ps1"
@@ -209,6 +212,10 @@ if (-not (Test-Path -LiteralPath $sharedLogPath)) { throw ("Shared log helpers n
 $sharedLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
 if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy helpers not found: {0}" -f $sharedLegacyPath) }
 . $sharedLegacyPath
+
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) { throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath) }
+. $sharedFileOpsPath
 
 $sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
 if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
@@ -228,6 +235,12 @@ $StorageModsDir = $runtimeConfig.Paths.StorageModsDir
 $LogPath = $runtimeConfig.Paths.LogPath
 $LauncherExePath = $runtimeConfig.Paths.LauncherExePath
 $useStorage = $runtimeConfig.Paths.UseStorage
+
+$resolvedLegacyFolders = Resolve-McccLegacyFolderNames `
+  -GameLegacyFolderName $GameLegacyFolderName `
+  -StorageLegacyFolderName $StorageLegacyFolderName
+$GameLegacyFolderName = [string]$resolvedLegacyFolders.GameLegacyFolderName
+$StorageLegacyFolderName = [string]$resolvedLegacyFolders.StorageLegacyFolderName
 
 # ────────────────────────────────────────────────────────────────────────────
 # * Parse culprit data.
@@ -385,17 +398,24 @@ foreach ($group in $qualifiedGroups) {
     }
 
     # * Step 1: Quarantine root-cause JAR.
-    $tempDir = Join-Path -Path $GameModsDir -ChildPath ("{0}\temp\recovery-{1}" -f $GameLegacyFolderName, (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $tempRootDir = Get-McccLegacyTempRootPath -ModsDir $GameModsDir -GameLegacyFolderName $GameLegacyFolderName
+    $tempDir = Join-Path -Path $tempRootDir -ChildPath ("recovery-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
     if (-not (Test-Path -LiteralPath $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
     $rootTemp = Join-Path -Path $tempDir -ChildPath $rootJar
-    Move-Item -LiteralPath $rootGamePath -Destination $rootTemp -Force
+    $quarantineRootResult = Move-McccItem -LiteralPath $rootGamePath -DestinationPath $rootTemp -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+    if (-not $quarantineRootResult.Performed) {
+      throw ("Failed to quarantine root-cause mod: {0}" -f $rootGamePath)
+    }
     Write-Host ("  Quarantined root-cause: {0}" -f $rootJar) -ForegroundColor Gray
 
     $rootStorageTemp = $null
     $rootStoragePath = if ($useStorage) { Join-Path -Path $StorageModsDir -ChildPath $rootJar } else { $null }
     if ($useStorage -and $rootStoragePath -and (Test-Path -LiteralPath $rootStoragePath)) {
       $rootStorageTemp = Join-Path -Path $tempDir -ChildPath ("storage-{0}" -f $rootJar)
-      Move-Item -LiteralPath $rootStoragePath -Destination $rootStorageTemp -Force
+      $quarantineStorageResult = Move-McccItem -LiteralPath $rootStoragePath -DestinationPath $rootStorageTemp -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      if (-not $quarantineStorageResult.Performed) {
+        throw ("Failed to quarantine storage root-cause mod: {0}" -f $rootStoragePath)
+      }
     }
 
     # * Step 2: Restore all phantom culprits back to game mods.
@@ -407,10 +427,16 @@ foreach ($group in $qualifiedGroups) {
       # * Restore from storage legacy (copy).
       $sLeg = [string]$member.StorageLegacyPath
       if (-not [string]::IsNullOrWhiteSpace($sLeg) -and (Test-Path -LiteralPath $sLeg)) {
-        Copy-Item -LiteralPath $sLeg -Destination $gameTarget -Force
+        $copyToGameResult = Copy-McccItem -LiteralPath $sLeg -DestinationPath $gameTarget -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        if (-not $copyToGameResult.Performed) {
+          throw ("Failed to restore mod from storage legacy: {0}" -f $mJar)
+        }
         if ($useStorage) {
           $storageTarget = Join-Path -Path $StorageModsDir -ChildPath $mJar
-          Copy-Item -LiteralPath $sLeg -Destination $storageTarget -Force
+          $copyToStorageResult = Copy-McccItem -LiteralPath $sLeg -DestinationPath $storageTarget -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+          if (-not $copyToStorageResult.Performed) {
+            throw ("Failed to restore mod into storage root: {0}" -f $mJar)
+          }
         }
         $restoredPaths[$mJar] = $sLeg
         Write-Host ("  Restored: {0}" -f $mJar) -ForegroundColor Gray
@@ -420,7 +446,10 @@ foreach ($group in $qualifiedGroups) {
       # * Restore from game legacy.
       $gLeg = [string]$member.GameLegacyPath
       if (-not [string]::IsNullOrWhiteSpace($gLeg) -and (Test-Path -LiteralPath $gLeg)) {
-        Copy-Item -LiteralPath $gLeg -Destination $gameTarget -Force
+        $copyFromGameLegacyResult = Copy-McccItem -LiteralPath $gLeg -DestinationPath $gameTarget -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        if (-not $copyFromGameLegacyResult.Performed) {
+          throw ("Failed to restore mod from game legacy: {0}" -f $mJar)
+        }
         $restoredPaths[$mJar] = $gLeg
         Write-Host ("  Restored: {0}" -f $mJar) -ForegroundColor Gray
       }
@@ -524,20 +553,28 @@ foreach ($group in $qualifiedGroups) {
       foreach ($mJar in $restoredPaths.Keys) {
         $mGamePath = Join-Path -Path $GameModsDir -ChildPath $mJar
         if (Test-Path -LiteralPath $mGamePath) {
-          Remove-Item -LiteralPath $mGamePath -Force -ErrorAction SilentlyContinue
+          try {
+            $null = Remove-McccItem -LiteralPath $mGamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+          } catch { }
         }
         if ($useStorage) {
           $mStoragePath = Join-Path -Path $StorageModsDir -ChildPath $mJar
           if (Test-Path -LiteralPath $mStoragePath) {
-            Remove-Item -LiteralPath $mStoragePath -Force -ErrorAction SilentlyContinue
+            try {
+              $null = Remove-McccItem -LiteralPath $mStoragePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+            } catch { }
           }
         }
       }
       if (Test-Path -LiteralPath $rootTemp) {
-        Move-Item -LiteralPath $rootTemp -Destination $rootGamePath -Force -ErrorAction SilentlyContinue
+        try {
+          $null = Move-McccItem -LiteralPath $rootTemp -DestinationPath $rootGamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        } catch { }
       }
       if ($null -ne $rootStorageTemp -and (Test-Path -LiteralPath $rootStorageTemp) -and $null -ne $rootStoragePath) {
-        Move-Item -LiteralPath $rootStorageTemp -Destination $rootStoragePath -Force -ErrorAction SilentlyContinue
+        try {
+          $null = Move-McccItem -LiteralPath $rootStorageTemp -DestinationPath $rootStoragePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        } catch { }
       }
       throw
     } finally {
@@ -571,7 +608,9 @@ foreach ($group in $qualifiedGroups) {
       foreach ($mJar in $restoredPaths.Keys) {
         $legPath = $restoredPaths[$mJar]
         if (Test-Path -LiteralPath $legPath) {
-          Remove-Item -LiteralPath $legPath -Force -ErrorAction SilentlyContinue
+          try {
+            $null = Remove-McccItem -LiteralPath $legPath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+          } catch { }
         }
         $allRestoredJarNames.Add($mJar)
       }
@@ -579,9 +618,15 @@ foreach ($group in $qualifiedGroups) {
       $allNewCulpritJarNames.Add($rootJar)
 
       # * Clean temp.
-      if (Test-Path -LiteralPath $rootTemp) { Remove-Item -LiteralPath $rootTemp -Force -ErrorAction SilentlyContinue }
+      if (Test-Path -LiteralPath $rootTemp) {
+        try {
+          $null = Remove-McccItem -LiteralPath $rootTemp -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        } catch { }
+      }
       if ($null -ne $rootStorageTemp -and (Test-Path -LiteralPath $rootStorageTemp)) {
-        Remove-Item -LiteralPath $rootStorageTemp -Force -ErrorAction SilentlyContinue
+        try {
+          $null = Remove-McccItem -LiteralPath $rootStorageTemp -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        } catch { }
       }
       break
     } else {
@@ -591,31 +636,45 @@ foreach ($group in $qualifiedGroups) {
       foreach ($mJar in $restoredPaths.Keys) {
         $gamePath = Join-Path -Path $GameModsDir -ChildPath $mJar
         if (Test-Path -LiteralPath $gamePath) {
-          Remove-Item -LiteralPath $gamePath -Force -ErrorAction SilentlyContinue
+          try {
+            $null = Remove-McccItem -LiteralPath $gamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+          } catch { }
         }
         if ($useStorage) {
           $storagePath = Join-Path -Path $StorageModsDir -ChildPath $mJar
           if (Test-Path -LiteralPath $storagePath) {
-            Remove-Item -LiteralPath $storagePath -Force -ErrorAction SilentlyContinue
+            try {
+              $null = Remove-McccItem -LiteralPath $storagePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+            } catch { }
           }
         }
       }
 
       # * Restore root-cause.
-      Move-Item -LiteralPath $rootTemp -Destination $rootGamePath -Force
+      $restoreRootResult = Move-McccItem -LiteralPath $rootTemp -DestinationPath $rootGamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      if (-not $restoreRootResult.Performed) {
+        throw ("Failed to restore root-cause mod: {0}" -f $rootGamePath)
+      }
       if ($null -ne $rootStorageTemp -and (Test-Path -LiteralPath $rootStorageTemp)) {
-        Move-Item -LiteralPath $rootStorageTemp -Destination $rootStoragePath -Force
+        $restoreStorageRootResult = Move-McccItem -LiteralPath $rootStorageTemp -DestinationPath $rootStoragePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        if (-not $restoreStorageRootResult.Performed) {
+          throw ("Failed to restore storage root-cause mod: {0}" -f $rootStoragePath)
+        }
       }
     }
   }
 }
 
 # * Clean up empty temp dirs.
-$tempRoot = Join-Path -Path $GameModsDir -ChildPath ("{0}\temp" -f $GameLegacyFolderName)
+$tempRoot = Get-McccLegacyTempRootPath -ModsDir $GameModsDir -GameLegacyFolderName $GameLegacyFolderName
 if (Test-Path -LiteralPath $tempRoot) {
   Get-ChildItem -LiteralPath $tempRoot -Directory -Filter "recovery-*" -ErrorAction SilentlyContinue |
     Where-Object { @(Get-ChildItem -LiteralPath $_.FullName -ErrorAction SilentlyContinue).Count -eq 0 } |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    ForEach-Object {
+      try {
+        $null = Remove-McccItem -LiteralPath $_.FullName -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      } catch { }
+    }
 }
 
 # ────────────────────────────────────────────────────────────────────────────

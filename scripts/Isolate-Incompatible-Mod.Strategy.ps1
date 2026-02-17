@@ -1,3 +1,8 @@
+if ($null -eq $isolationStageResults -or -not ($isolationStageResults -is [hashtable])) {
+  $isolationStageResults = @{}
+}
+$strategyStageResult = New-McccStageAccumulator -Stage "Isolation.Strategy"
+
   if (-not $skipIsolation) {
     if ($effectiveIsolationStrategy -eq "Hybrid") {
       $hybridResult = Invoke-HybridIsolation -Mods $candidateMods `
@@ -55,7 +60,17 @@
         } else {
           # ! If the baseline issue does not reproduce at phase entry, isolation results are unreliable.
           # ! Stop early to prevent moving a random mod to Legacy.
-          Write-Host "Warning: baseline issue not reproduced in linear phase. Stopping Isolation to avoid false culprit selection." -ForegroundColor Yellow
+          $linearBaselineNotReproducedWarning = "Warning: baseline issue not reproduced in linear phase. Stopping Isolation to avoid false culprit selection."
+          Write-Host $linearBaselineNotReproducedWarning -ForegroundColor Yellow
+          Add-McccStageWarning `
+            -Accumulator $strategyStageResult `
+            -Category "linear_phase" `
+            -Code "BASELINE_NOT_REPRODUCED_LINEAR_PHASE" `
+            -Message $linearBaselineNotReproducedWarning `
+            -Context @{
+            LinearBaselineOutcome = $linearBaselineOutcome
+            CandidateCount = [int]@($candidateMods).Count
+          } | Out-Null
           $candidateMods = @()
         }
 
@@ -67,6 +82,15 @@
           $linearBaselineSnapshot = Get-ConfiguredLogSnapshot -SinceTimestamp $linearBaselineAttemptStart
           if (Test-DependencyDialogBlock -Context "linear phase baseline" -Lines $linearBaselineSnapshot.Lines) {
             $stopReason = "dependency_dialog_linear_baseline"
+            Add-McccStageWarning `
+              -Accumulator $strategyStageResult `
+              -Category "dependency_dialog" `
+              -Code "DEPENDENCY_DIALOG_LINEAR_BASELINE" `
+              -Message "Isolation stopped due to dependency dialog in linear phase baseline." `
+              -Context @{
+              Context = "linear phase baseline"
+              CandidateCount = [int]@($candidateMods).Count
+            } | Out-Null
             $candidateMods = @()
           }
           $activeBaselineSignature = Get-ErrorSignature -Lines $linearBaselineSnapshot.Lines `
@@ -75,6 +99,15 @@
           $script:activeBaselineEvidenceKey = Get-ErrorEvidenceKey -Lines $linearBaselineSnapshot.Lines -MaxLines $ErrorSignatureLineLimit
           if ([string]::IsNullOrWhiteSpace($activeBaselineSignature)) {
             Write-Host "Linear phase baseline signature is empty. Error change detection may be limited." -ForegroundColor Yellow
+            Add-McccStageWarning `
+              -Accumulator $strategyStageResult `
+              -Category "baseline_signature" `
+              -Code "LINEAR_BASELINE_SIGNATURE_EMPTY" `
+              -Message "Linear phase baseline signature is empty. Error change detection may be limited." `
+              -Context @{
+              BaselineEvidenceKey = $script:activeBaselineEvidenceKey
+              CandidateCount = [int]@($candidateMods).Count
+            } | Out-Null
           } else {
             Write-Verbose ("Linear phase baseline signature: {0}" -f $activeBaselineSignature)
           }
@@ -88,3 +121,12 @@
       }
     }
   }
+
+Set-McccStageResult -StageResults $isolationStageResults -StageResult (Complete-McccStageAccumulator `
+    -Accumulator $strategyStageResult `
+    -ExtraFields @{
+    SkipIsolation = [bool]$skipIsolation
+    CulpritCount = [int]@($culpritJarNames).Count
+    StopReason = $stopReason
+    RemainingCandidateCount = [int]@($candidateMods).Count
+  })

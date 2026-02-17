@@ -1,5 +1,11 @@
 # * Shared helpers for moving culprits into legacy folders.
 
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) {
+  throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath)
+}
+. $sharedFileOpsPath
+
 function Get-FirstExistingPath {
   param(
     [Parameter(Mandatory = $false)]
@@ -28,9 +34,9 @@ function Move-CulpritToLegacyAndAppendLog {
     [AllowEmptyString()]
     [string]$StorageModsDir = "",
     [Parameter(Mandatory = $false)]
-    [string]$GameLegacyFolderName = "legacy",
+    [string]$GameLegacyFolderName = "",
     [Parameter(Mandatory = $false)]
-    [string]$StorageLegacyFolderName = "Legacy",
+    [string]$StorageLegacyFolderName = "",
     [Parameter(Mandatory = $false)]
     [bool]$KeepCulpritInGameLegacy = $false,
     [Parameter(Mandatory = $false)]
@@ -59,6 +65,12 @@ function Move-CulpritToLegacyAndAppendLog {
   $storageMoved = $false
   $gameMoved = $false
 
+  $resolvedLegacyFolders = Resolve-McccLegacyFolderNames `
+    -GameLegacyFolderName $GameLegacyFolderName `
+    -StorageLegacyFolderName $StorageLegacyFolderName
+  $GameLegacyFolderName = [string]$resolvedLegacyFolders.GameLegacyFolderName
+  $StorageLegacyFolderName = [string]$resolvedLegacyFolders.StorageLegacyFolderName
+
   $useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
   $legacyLog = $LegacyLogPath
   if ([string]::IsNullOrWhiteSpace($legacyLog)) {
@@ -83,56 +95,61 @@ function Move-CulpritToLegacyAndAppendLog {
   if ($useStorage -and -not [string]::IsNullOrWhiteSpace($StorageSourcePath) -and (Test-Path -LiteralPath $StorageSourcePath)) {
     $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
     $storageLegacyVersionDir = Join-Path -Path $storageLegacyRoot -ChildPath $MinecraftVersion
-    New-DirectoryIfMissing -DirPath $storageLegacyVersionDir
-    $destPath = Join-Path -Path $storageLegacyVersionDir -ChildPath $JarName
+    $destPath = Join-McccDestinationPath -SourcePath $StorageSourcePath -DestinationDirectory $storageLegacyVersionDir
     if ($StorageTransferMode -eq "Copy") {
-      Copy-Item -LiteralPath $StorageSourcePath -Destination $destPath -Force
+      $copyResult = Copy-McccItem -LiteralPath $StorageSourcePath -DestinationPath $destPath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      $storageMoved = [bool]$copyResult.Performed
     } else {
-      Move-Item -LiteralPath $StorageSourcePath -Destination $destPath -Force -ErrorAction Stop
+      $moveResult = Move-McccItem -LiteralPath $StorageSourcePath -DestinationPath $destPath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      $storageMoved = [bool]$moveResult.Performed
     }
-    Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
-    $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
-    Add-LegacyMoveLogEntry -Message $legacyLogEntry
-    $storageLegacyPath = $destPath
-    $storageMoved = $true
+    if ($storageMoved) {
+      Write-Host ("Moved culprit to storage legacy: {0}" -f $destPath) -ForegroundColor Green
+      $legacyLogEntry = "Moved culprit to storage legacy: {0}" -f $destPath
+      Add-LegacyMoveLogEntry -Message $legacyLogEntry
+      $storageLegacyPath = $destPath
+    }
   }
 
   if ($KeepCulpritInGameLegacy) {
     if (-not [string]::IsNullOrWhiteSpace($GameSourcePath) -and (Test-Path -LiteralPath $GameSourcePath)) {
       $gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
       $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot -ChildPath $MinecraftVersion
-      New-DirectoryIfMissing -DirPath $gameLegacyVersionDir
-      $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $JarName
+      $destPath = Join-McccDestinationPath -SourcePath $GameSourcePath -DestinationDirectory $gameLegacyVersionDir
       if ($GameTransferMode -eq "Copy") {
-        Copy-Item -LiteralPath $GameSourcePath -Destination $destPath -Force
+        $copyResult = Copy-McccItem -LiteralPath $GameSourcePath -DestinationPath $destPath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        $gameMoved = [bool]$copyResult.Performed
       } else {
-        Move-Item -LiteralPath $GameSourcePath -Destination $destPath -Force -ErrorAction Stop
+        $moveResult = Move-McccItem -LiteralPath $GameSourcePath -DestinationPath $destPath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        $gameMoved = [bool]$moveResult.Performed
       }
-      Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
-      $legacyLogEntry = "Moved culprit to game legacy: {0}" -f $destPath
-      Add-LegacyMoveLogEntry -Message $legacyLogEntry
-      $gameLegacyPath = $destPath
-      $gameMoved = $true
+      if ($gameMoved) {
+        Write-Host ("Moved culprit to game legacy: {0}" -f $destPath) -ForegroundColor Green
+        $legacyLogEntry = "Moved culprit to game legacy: {0}" -f $destPath
+        Add-LegacyMoveLogEntry -Message $legacyLogEntry
+        $gameLegacyPath = $destPath
+      }
     }
   } elseif ($RemoveGameIfNotKeeping) {
     $canRemove = (-not $useStorage) -or (-not $RequireStorageMoveForGameRemoval) -or $storageMoved
     $preferFallbackToGameLegacy = $useStorage -and (-not $storageMoved)
     if ((-not $preferFallbackToGameLegacy) -and $canRemove -and -not [string]::IsNullOrWhiteSpace($GameSourcePath) -and (Test-Path -LiteralPath $GameSourcePath)) {
-      Remove-Item -LiteralPath $GameSourcePath -Force -ErrorAction Stop
-      $gameMoved = $true
+      $removeResult = Remove-McccItem -LiteralPath $GameSourcePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      $gameMoved = [bool]$removeResult.Performed
     } elseif (-not [string]::IsNullOrWhiteSpace($GameSourcePath) -and (Test-Path -LiteralPath $GameSourcePath)) {
       # * Safety fallback: if storage legacy copy is unavailable, keep an auditable game-legacy copy
       # * instead of deleting the only remaining culprit artifact.
       $gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
       $gameLegacyVersionDir = Join-Path -Path $gameLegacyRoot -ChildPath $MinecraftVersion
-      New-DirectoryIfMissing -DirPath $gameLegacyVersionDir
-      $destPath = Join-Path -Path $gameLegacyVersionDir -ChildPath $JarName
-      Move-Item -LiteralPath $GameSourcePath -Destination $destPath -Force -ErrorAction Stop
-      Write-Host ("Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath) -ForegroundColor Yellow
-      $legacyLogEntry = "Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath
-      Add-LegacyMoveLogEntry -Message $legacyLogEntry
-      $gameLegacyPath = $destPath
-      $gameMoved = $true
+      $destPath = Join-McccDestinationPath -SourcePath $GameSourcePath -DestinationDirectory $gameLegacyVersionDir
+      $moveFallbackResult = Move-McccItem -LiteralPath $GameSourcePath -DestinationPath $destPath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      if ($moveFallbackResult.Performed) {
+        Write-Host ("Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath) -ForegroundColor Yellow
+        $legacyLogEntry = "Storage legacy copy is unavailable. Moved culprit to game legacy fallback: {0}" -f $destPath
+        Add-LegacyMoveLogEntry -Message $legacyLogEntry
+        $gameLegacyPath = $destPath
+        $gameMoved = $true
+      }
     }
   }
 

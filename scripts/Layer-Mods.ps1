@@ -69,6 +69,7 @@ If set, also matches WARN mixin lines in the signature.
 
 .PARAMETER IgnoreModListForSignatureChange
 If true, signature change detection prefers evidence lines when present.
+DEPRECATED: explicit override is retained for compatibility; baseline flows use the default behavior.
 
 .PARAMETER LauncherExePath
 Optional path to Legacy Launcher executable.
@@ -159,6 +160,7 @@ Dependency map JSON path when DependencyMapSource=File.
 
 .PARAMETER DependencyMapToolPath
 Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool.
+DEPRECATED: custom tool path override is retained for compatibility; prefer the bundled default path.
 
 .PARAMETER DependencyMapOutDir
 Output directory for dependency map tool reports.
@@ -200,13 +202,13 @@ param(
   [string]$GameModsDir = "",
 
   [Parameter(Mandatory = $false)]
-  [string]$GameLegacyFolderName = "legacy",
+  [string]$GameLegacyFolderName = "",
 
   [Parameter(Mandatory = $false)]
   [string]$StorageModsDir = "",
 
   [Parameter(Mandatory = $false)]
-  [string]$StorageLegacyFolderName = "Legacy",
+  [string]$StorageLegacyFolderName = "",
 
   [Parameter(Mandatory = $false)]
   [switch]$KeepCulpritInGameLegacy,
@@ -253,6 +255,7 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$IncludeWarnMixinsAsIncompatible,
 
+  # ! DEPRECATED: Explicit override is retained for compatibility; baseline flows use the default ($true).
   [Parameter(Mandatory = $false)]
   [bool]$IgnoreModListForSignatureChange = $true,
 
@@ -346,6 +349,8 @@ param(
   [Parameter(Mandatory = $false)]
   [string]$DependencyMapJsonPath = "",
 
+  # ! DEPRECATED: Custom dependency-map tool path override is kept for backward compatibility.
+  # * Prefer the bundled default tool path unless troubleshooting requires an override.
   [Parameter(Mandatory = $false)]
   [string]$DependencyMapToolPath = "",
 
@@ -408,13 +413,18 @@ param(
   [switch]$Help
 )
 
-$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
-if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
-  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+$sharedBootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Bootstrap.ps1"
+if (-not (Test-Path -LiteralPath $sharedBootstrapPath)) {
+  throw ("Shared bootstrap helpers not found: {0}" -f $sharedBootstrapPath)
 }
-. $sharedLocalizationPath
-Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
-Enable-McccConsoleLocalization
+. $sharedBootstrapPath
+. Initialize-McccRuntimeBootstrap `
+  -StartDir $PSScriptRoot `
+  -LoadConfig `
+  -InitializeLocalization `
+  -EnableConsoleLocalization `
+  -ConfigNotFoundMessage "Shared config helpers not found: {0}" `
+  -LocalizationNotFoundMessage "Shared localization helpers not found: {0}" | Out-Null
 if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
   $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
 }
@@ -444,9 +454,9 @@ $sharedLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LogTools.ps1"
 if (-not (Test-Path -LiteralPath $sharedLogPath)) { throw ("Shared log helpers not found: {0}" -f $sharedLogPath) }
 . $sharedLogPath
 
-$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
-if (-not (Test-Path -LiteralPath $sharedConfigPath)) { throw ("Shared config helpers not found: {0}" -f $sharedConfigPath) }
-. $sharedConfigPath
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) { throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath) }
+. $sharedFileOpsPath
 
 $sharedIsolationLauncherPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Launcher.ps1"
 if (-not (Test-Path -LiteralPath $sharedIsolationLauncherPath)) { throw ("Shared isolation launcher helpers not found: {0}" -f $sharedIsolationLauncherPath) }
@@ -519,6 +529,12 @@ $LogPath = $runtimeConfig.Paths.LogPath
 $LauncherExePath = $runtimeConfig.Paths.LauncherExePath
 $useStorage = $runtimeConfig.Paths.UseStorage
 
+$resolvedLegacyFolders = Resolve-McccLegacyFolderNames `
+  -GameLegacyFolderName $GameLegacyFolderName `
+  -StorageLegacyFolderName $StorageLegacyFolderName
+$GameLegacyFolderName = [string]$resolvedLegacyFolders.GameLegacyFolderName
+$StorageLegacyFolderName = [string]$resolvedLegacyFolders.StorageLegacyFolderName
+
 if ($BinaryLinearThreshold -lt 1) { $BinaryLinearThreshold = 1 }
 $useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmSeconds")
 $useDynamicOutcomeTimeout = -not $PSBoundParameters.ContainsKey("OutcomeTimeoutSeconds")
@@ -569,8 +585,7 @@ if ($script:EnableSessionLaunchConfigCache) {
 # * Build candidate list and dependency map.
 # ────────────────────────────────────────────────────────────────────────────
 
-$candidateMods = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File -ErrorAction Stop |
-    Sort-Object -Property LastWriteTime)
+$candidateMods = @(Get-McccJarFiles -RootPaths @($GameModsDir) -SortBy "LastWriteTime" -Descending $false -EnumerationErrorAction "Stop")
 
 $script:dependencyAwareTierByJarName = @{}
 $script:dependencyAwareStatsByJarName = @{}
@@ -1635,7 +1650,7 @@ try {
   $hadError = $true
   $dumpDir = $gameQuarantineDir
   if ([string]::IsNullOrWhiteSpace($dumpDir)) {
-    $dumpDir = Join-Path -Path $GameModsDir -ChildPath "legacy\\temp"
+    $dumpDir = Get-McccLegacyTempRootPath -ModsDir $GameModsDir -GameLegacyFolderName $GameLegacyFolderName
   }
   $dumpPath = Write-ErrorDump -TargetDir $dumpDir -Phase $phase -ErrorRecord $_
   if ($dumpPath) {

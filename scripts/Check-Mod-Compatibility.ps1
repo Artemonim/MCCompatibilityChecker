@@ -85,7 +85,8 @@ Dependency map source: Tool, File, or Internal fallback parser.
 Dependency map JSON path when DependencyMapSource=File.
 
 .PARAMETER DependencyMapToolPath
-Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool.
+DEPRECATED: Optional override path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool.
+Prefer the bundled default tool path; keep override only for troubleshooting.
 
 .PARAMETER DependencyMapOutDir
 Output directory for dependency map tool reports.
@@ -122,11 +123,11 @@ param(
 
   # * Subfolder name inside StorageModsDir where legacy jars will be placed.
   [Parameter(Mandatory = $false)]
-  [string]$StorageLegacyFolderName = "Legacy",
+  [string]$StorageLegacyFolderName = "",
 
   # * Subfolder name inside GameModsDir where removed jars will be placed (keeps them recoverable).
   [Parameter(Mandatory = $false)]
-  [string]$GameLegacyFolderName = "legacy",
+  [string]$GameLegacyFolderName = "",
 
   # * If set, deletes legacy copies (no legacy storage or game).
   [Parameter(Mandatory = $false)]
@@ -206,7 +207,8 @@ param(
   [Parameter(Mandatory = $false)]
   [string]$DependencyMapJsonPath = "",
 
-  # * Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool.
+  # ! DEPRECATED: Custom dependency-map tool path override is kept for backward compatibility.
+  # * Prefer the bundled default tool path unless troubleshooting requires an override.
   [Parameter(Mandatory = $false)]
   [string]$DependencyMapToolPath = "",
 
@@ -219,13 +221,18 @@ param(
   [switch]$Help
 )
 
-$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
-if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
-  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+$sharedBootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Bootstrap.ps1"
+if (-not (Test-Path -LiteralPath $sharedBootstrapPath)) {
+  throw ("Shared bootstrap helpers not found: {0}" -f $sharedBootstrapPath)
 }
-. $sharedLocalizationPath
-Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
-Enable-McccConsoleLocalization
+. $sharedBootstrapPath
+$runtimeBootstrap = . Initialize-McccRuntimeBootstrap `
+  -StartDir $PSScriptRoot `
+  -LoadConfig `
+  -InitializeLocalization `
+  -EnableConsoleLocalization `
+  -ConfigNotFoundMessage "Shared config helpers not found: {0}" `
+  -LocalizationNotFoundMessage "Shared localization helpers not found: {0}"
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -236,13 +243,6 @@ if ($Help) {
 }
 
 $compatLogsEnabled = $PSBoundParameters.ContainsKey("Verbose")
-
-# * Load shared config helpers.
-$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
-if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
-  throw ("Shared config helpers not found: {0}" -f $sharedConfigPath)
-}
-. $sharedConfigPath
 
 $runtimeConfig = Initialize-McccRuntimeConfig `
   -StartDir $PSScriptRoot `
@@ -255,6 +255,7 @@ $runtimeConfig = Initialize-McccRuntimeConfig `
 $GameModsDir = $runtimeConfig.Paths.GameModsDir
 $StorageModsDir = $runtimeConfig.Paths.StorageModsDir
 $LogPath = $runtimeConfig.Paths.LogPath
+$projectRootPath = [string]$runtimeBootstrap.ProjectRoot
 
 # * Load shared log helpers.
 $sharedLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LogTools.ps1"
@@ -283,6 +284,46 @@ if (-not (Test-Path -LiteralPath $sharedIsolationJarDepPath)) {
   throw ("Shared isolation jar dependency helpers not found: {0}" -f $sharedIsolationJarDepPath)
 }
 . $sharedIsolationJarDepPath
+
+# * Load shared file operation and folder policy helpers.
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) {
+  throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath)
+}
+. $sharedFileOpsPath
+
+# * Load shared stage result helpers.
+$sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
+if (-not (Test-Path -LiteralPath $sharedStageResultPath)) {
+  throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath)
+}
+. $sharedStageResultPath
+
+$resolvedLegacyFolders = Resolve-McccLegacyFolderNames `
+  -GameLegacyFolderName $GameLegacyFolderName `
+  -StorageLegacyFolderName $StorageLegacyFolderName
+$GameLegacyFolderName = [string]$resolvedLegacyFolders.GameLegacyFolderName
+$StorageLegacyFolderName = [string]$resolvedLegacyFolders.StorageLegacyFolderName
+
+$checkCompatibilityEvidencePath = Join-Path -Path $PSScriptRoot -ChildPath "Check-Mod-Compatibility.Evidence.ps1"
+if (-not (Test-Path -LiteralPath $checkCompatibilityEvidencePath)) {
+  throw ("Check compatibility evidence stage script not found: {0}" -f $checkCompatibilityEvidencePath)
+}
+
+$checkCompatibilityModResolutionPath = Join-Path -Path $PSScriptRoot -ChildPath "Check-Mod-Compatibility.ModResolution.ps1"
+if (-not (Test-Path -LiteralPath $checkCompatibilityModResolutionPath)) {
+  throw ("Check compatibility mod resolution stage script not found: {0}" -f $checkCompatibilityModResolutionPath)
+}
+
+$checkCompatibilityDecisionPath = Join-Path -Path $PSScriptRoot -ChildPath "Check-Mod-Compatibility.Decision.ps1"
+if (-not (Test-Path -LiteralPath $checkCompatibilityDecisionPath)) {
+  throw ("Check compatibility decision stage script not found: {0}" -f $checkCompatibilityDecisionPath)
+}
+
+$checkCompatibilityReportingPath = Join-Path -Path $PSScriptRoot -ChildPath "Check-Mod-Compatibility.Reporting.ps1"
+if (-not (Test-Path -LiteralPath $checkCompatibilityReportingPath)) {
+  throw ("Check compatibility reporting stage script not found: {0}" -f $checkCompatibilityReportingPath)
+}
 
 function Get-SeverityFromEvidence {
   param(
@@ -445,21 +486,32 @@ function Build-ModIdToJarMap {
     [int]$NestedJarScanDepth = 2
   )
 
-  $excludeSet = @{}
-  foreach ($d in $ExcludeDirNames) { $excludeSet[$d.ToLowerInvariant()] = $true }
+  $files = @(Get-McccJarFiles -RootPaths @($DirPath) -SortBy "LastWriteTime" -Descending $true -ExcludeDirectoryNames $ExcludeDirNames -EnumerationErrorAction "Stop")
+  if (-not $files -or $files.Count -eq 0) { return @{} }
 
-  $map = @{}
-  $files = Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction Stop |
-    Sort-Object -Property LastWriteTime -Descending
-  foreach ($f in $files) {
-    $ids = Get-FabricModIdsFromJar -JarPath $f.FullName -IncludeNestedJarIds $IncludeNestedJarIds -MaxNestedJarDepth $NestedJarScanDepth
-    if (-not $ids -or $ids.Count -eq 0) { continue }
-    foreach ($id in $ids) {
-      if (-not $map.ContainsKey($id)) { $map[$id] = New-Object System.Collections.Generic.List[string] }
-      $map[$id].Add($f.FullName)
-    }
+  $metadataByJarPath = @{}
+  $rows = New-Object System.Collections.Generic.List[object]
+  foreach ($file in @($files)) {
+    if ($null -eq $file) { continue }
+    $jarPath = [string]$file.FullName
+    if ([string]::IsNullOrWhiteSpace($jarPath)) { continue }
+
+    $modIds = @(Get-McccCachedJarMetadata -JarPath $jarPath -Cache $metadataByJarPath -GetMetadata {
+        param($cachedJarPath)
+        @(Get-FabricModIdsFromJar -JarPath $cachedJarPath -IncludeNestedJarIds $IncludeNestedJarIds -MaxNestedJarDepth $NestedJarScanDepth)
+      })
+    if (-not $modIds -or $modIds.Count -eq 0) { continue }
+
+    $rows.Add([pscustomobject]@{
+        JarPath = $jarPath
+        ModIds = @($modIds)
+      }) | Out-Null
   }
-  return $map
+
+  return New-McccModIdJarPathIndex `
+    -Items @($rows.ToArray()) `
+    -GetJarPath { param($entry) [string]$entry.JarPath } `
+    -GetModIds { param($entry) @($entry.ModIds) }
 }
 
 function Resolve-ModJarPathsByNestedFallback {
@@ -486,36 +538,33 @@ function Resolve-ModJarPathsByNestedFallback {
   }
 
   $result = New-Object System.Collections.Generic.List[string]
-  $jarFiles = @(Get-ChildItem -LiteralPath $DirPath -Filter "*.jar" -File -ErrorAction SilentlyContinue |
-      Sort-Object -Property @{ Expression = { $_.LastWriteTime }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true })
+  $jarFiles = @(Get-McccJarFiles -RootPaths @($DirPath) -SortBy "LastWriteTime" -Descending $true -EnumerationErrorAction "SilentlyContinue")
   foreach ($jarFile in @($jarFiles)) {
     if ($null -eq $jarFile) { continue }
     $jarPath = [string]$jarFile.FullName
     if ([string]::IsNullOrWhiteSpace($jarPath)) { continue }
 
+    # * Keep fallback lightweight: read direct IDs and nested entry names only.
+    # * Parsing full nested jars here can be memory-heavy on large packs.
+    $cachedMetadata = Get-McccCachedJarMetadata -JarPath $jarPath -Cache $JarIdsByPathCache -GetMetadata {
+      param($cachedJarPath)
+      [pscustomobject]@{
+        Ids = @(Get-FabricModIdsFromJar -JarPath $cachedJarPath)
+        NestedJarEntryPaths = @(Get-FabricNestedJarEntryPathsFromJar -JarPath $cachedJarPath)
+      }
+    }
+
     $jarIds = @()
     $nestedJarEntryPaths = @()
-    if ($JarIdsByPathCache.ContainsKey($jarPath)) {
-      $cached = $JarIdsByPathCache[$jarPath]
-      if ($cached -is [pscustomobject]) {
-        if ($cached.PSObject.Properties.Match("Ids").Count -gt 0) {
-          $jarIds = @($cached.Ids)
-        }
-        if ($cached.PSObject.Properties.Match("NestedJarEntryPaths").Count -gt 0) {
-          $nestedJarEntryPaths = @($cached.NestedJarEntryPaths)
-        }
-      } else {
-        $jarIds = @($cached)
+    if ($cachedMetadata -is [pscustomobject]) {
+      if ($cachedMetadata.PSObject.Properties.Match("Ids").Count -gt 0) {
+        $jarIds = @($cachedMetadata.Ids)
+      }
+      if ($cachedMetadata.PSObject.Properties.Match("NestedJarEntryPaths").Count -gt 0) {
+        $nestedJarEntryPaths = @($cachedMetadata.NestedJarEntryPaths)
       }
     } else {
-      # * Keep fallback lightweight: read direct IDs and nested entry names only.
-      # * Parsing full nested jars here can be memory-heavy on large packs.
-      $jarIds = @(Get-FabricModIdsFromJar -JarPath $jarPath)
-      $nestedJarEntryPaths = @(Get-FabricNestedJarEntryPathsFromJar -JarPath $jarPath)
-      $JarIdsByPathCache[$jarPath] = [pscustomobject]@{
-        Ids = @($jarIds)
-        NestedJarEntryPaths = @($nestedJarEntryPaths)
-      }
+      $jarIds = @($cachedMetadata)
     }
     if ((-not $jarIds -or $jarIds.Count -eq 0) -and (-not $nestedJarEntryPaths -or $nestedJarEntryPaths.Count -eq 0)) { continue }
 
@@ -702,8 +751,7 @@ function Resolve-GameJarPathsFromMixinEvidence {
   if (-not $mixinHints -or $mixinHints.Count -eq 0) { return @() }
 
   $matchedPaths = New-Object System.Collections.Generic.List[string]
-  $jarFiles = @(Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue |
-      Sort-Object -Property @{ Expression = { $_.LastWriteTime }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true })
+  $jarFiles = @(Get-McccJarFiles -RootPaths @($ModsDir) -SortBy "LastWriteTime" -Descending $true -EnumerationErrorAction "SilentlyContinue")
   foreach ($jarFile in @($jarFiles)) {
     if ($null -eq $jarFile) { continue }
     $jarPath = [string]$jarFile.FullName
@@ -771,16 +819,27 @@ function Move-OrDelete {
     [bool]$IsDryRun
   )
 
-  if (-not (Test-Path -LiteralPath $SourcePath)) {
+  if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) {
     return $null
   }
 
   if ($DoDelete) {
+    $removeResult = Remove-McccItem `
+      -LiteralPath $SourcePath `
+      -DryRun $IsDryRun `
+      -Overwrite $true `
+      -RetryCount 0 `
+      -RetryDelayMs 0
+    if (-not $removeResult.SourceExists) {
+      return $null
+    }
     if ($IsDryRun) {
       return ("DRYRUN delete: {0}" -f $SourcePath)
     }
-    Remove-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
-    return ("deleted: {0}" -f $SourcePath)
+    if ($removeResult.Performed) {
+      return ("deleted: {0}" -f $SourcePath)
+    }
+    return $null
   }
 
   if (-not $DestDir) {
@@ -789,9 +848,17 @@ function Move-OrDelete {
   if ($IsDryRun) {
     return ("DRYRUN move: {0} -> {1}" -f $SourcePath, $DestDir)
   }
-  New-DirectoryIfMissing -DirPath $DestDir
-  $destPath = Join-Path -Path $DestDir -ChildPath ([System.IO.Path]::GetFileName($SourcePath))
-  Move-Item -LiteralPath $SourcePath -Destination $destPath -Force -ErrorAction Stop
+  $destPath = Join-McccDestinationPath -SourcePath $SourcePath -DestinationDirectory $DestDir
+  $moveResult = Move-McccItem `
+    -LiteralPath $SourcePath `
+    -DestinationPath $destPath `
+    -DryRun $false `
+    -Overwrite $true `
+    -RetryCount 0 `
+    -RetryDelayMs 0
+  if (-not $moveResult.Performed) {
+    return $null
+  }
   return ("moved: {0} -> {1}" -f $SourcePath, $destPath)
 }
 
@@ -851,158 +918,13 @@ if ($resolvedLogPaths.Count -gt 1) {
 }
 Write-Host ("Minecraft: {0}" -f $mcVersion) -ForegroundColor Cyan
 
-$evidenceByModId = Get-IncompatibleModEvidenceFromLog -Lines $allLogLines -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-$nonFabricJarNames = Get-NonFabricJarNamesFromLog -Lines $allLogLines
-if ($null -eq $nonFabricJarNames) {
-  $nonFabricJarNames = @()
-} else {
-  $nonFabricJarNames = @($nonFabricJarNames)
-}
-if ($nonFabricJarNames.Count -gt 0) {
-  $nonFabricJarNames = @($nonFabricJarNames | Select-Object -Unique)
-}
+# * Internal stage contracts shared between SRP stage scripts.
+$checkCompatStageResults = @{}
 
-$ignoreSet = @{}
-foreach ($id in $IgnoreModIds) {
-  $key = [string]$id
-  if ([string]::IsNullOrWhiteSpace($key)) { continue }
-  $ignoreSet[$key.ToLowerInvariant()] = $true
-}
-if ($ignoreSet.Count -gt 0) {
-  $ignored = New-Object System.Collections.Generic.List[string]
-  foreach ($id in @($evidenceByModId.Keys)) {
-    if ($ignoreSet.ContainsKey($id)) {
-      $null = $ignored.Add($id)
-      $evidenceByModId.Remove($id)
-    }
-  }
-  if ($ignored.Count -gt 0) {
-    $ignoredLabel = @($ignored | Sort-Object -Unique)
-    Write-Host ("Ignoring incompatible mod IDs: {0}" -f ($ignoredLabel -join ", ")) -ForegroundColor Gray
-  }
-}
-
-$patterns = Get-IncompatibleModPatternSet -IncludeWarnMixins ([bool]$IncludeWarnMixinsAsIncompatible)
-$fabricConflictDeferredModIds = @()
-$modConflictStats = @{}
-$modReferrersByTarget = @{}
-
-if ($evidenceByModId.Count -gt 0) {
-  foreach ($modId in @($evidenceByModId.Keys)) {
-    $rawEvidence = @($evidenceByModId[$modId])
-    $uniqueLineSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $uniqueEvidence = New-Object System.Collections.Generic.List[string]
-    foreach ($line in $rawEvidence) {
-      $text = [string]$line
-      if ([string]::IsNullOrWhiteSpace($text)) { continue }
-      $normalized = Get-NormalizedEvidenceLine -Line $text
-      if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
-      if ($uniqueLineSet.Add($normalized)) {
-        $uniqueEvidence.Add($text.Trim()) | Out-Null
-      }
-    }
-
-    $evidenceByModId[$modId] = @($uniqueEvidence.ToArray())
-
-    $fabricSuggestionCount = 0
-    $incompatibleDetailCount = 0
-    $referencesOtherSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-    foreach ($line in @($evidenceByModId[$modId])) {
-      $text = [string]$line
-      if ([string]::IsNullOrWhiteSpace($text)) { continue }
-      if (
-        [regex]::IsMatch($text, $patterns.FabricRemovePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) -or
-        [regex]::IsMatch($text, $patterns.FabricReplacePattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) -or
-        [regex]::IsMatch($text, "(?i)\bFix:\s+add\s+\[")
-      ) {
-        $fabricSuggestionCount++
-      }
-      if ([regex]::IsMatch($text, $patterns.IncompatibleDetailPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
-        $incompatibleDetailCount++
-      }
-
-      $mentionedIds = @(Get-ModIdSetFromLine -Line $text)
-      foreach ($mentionedId in $mentionedIds) {
-        if ([string]::IsNullOrWhiteSpace($mentionedId)) { continue }
-        if ($mentionedId -eq $modId) { continue }
-        $null = $referencesOtherSet.Add($mentionedId)
-        if (-not $modReferrersByTarget.ContainsKey($mentionedId)) {
-          $modReferrersByTarget[$mentionedId] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        }
-        $null = $modReferrersByTarget[$mentionedId].Add($modId)
-      }
-    }
-
-    $evidenceCount = @($evidenceByModId[$modId]).Count
-    $referencesOtherCount = $referencesOtherSet.Count
-    $conflictScore = [int]($evidenceCount + ($incompatibleDetailCount * 2) + ($referencesOtherCount * 2))
-
-    $modConflictStats[$modId] = [pscustomobject]@{
-      EvidenceCount = [int]$evidenceCount
-      FabricSuggestionCount = [int]$fabricSuggestionCount
-      IncompatibleDetailCount = [int]$incompatibleDetailCount
-      ReferencesOtherCount = [int]$referencesOtherCount
-      ReferencedByOtherCount = 0
-      ConflictScore = [int]$conflictScore
-    }
-  }
-
-  foreach ($modId in @($modConflictStats.Keys)) {
-    $referencedByCount = 0
-    if ($modReferrersByTarget.ContainsKey($modId)) {
-      $referencedByCount = [int]$modReferrersByTarget[$modId].Count
-    }
-    $stats = $modConflictStats[$modId]
-    $modConflictStats[$modId] = [pscustomobject]@{
-      EvidenceCount = [int]$stats.EvidenceCount
-      FabricSuggestionCount = [int]$stats.FabricSuggestionCount
-      IncompatibleDetailCount = [int]$stats.IncompatibleDetailCount
-      ReferencesOtherCount = [int]$stats.ReferencesOtherCount
-      ReferencedByOtherCount = [int]$referencedByCount
-      ConflictScore = [int]$stats.ConflictScore
-    }
-  }
-}
-
-$hasFabricDialogSignal = Test-HasFabricDialogSignal -Lines $allLogLines
-if ($hasFabricDialogSignal -and $evidenceByModId.Count -gt 1 -and $modConflictStats.Count -gt 0) {
-  $deferred = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($modId in @($modConflictStats.Keys)) {
-    $stats = $modConflictStats[$modId]
-    $onlyFabricSuggestion = ($stats.EvidenceCount -gt 0 -and $stats.EvidenceCount -eq $stats.FabricSuggestionCount)
-    if (-not $onlyFabricSuggestion) { continue }
-    if ($stats.ReferencedByOtherCount -le 0) { continue }
-    if (-not $modReferrersByTarget.ContainsKey($modId)) { continue }
-
-    $maxReferrerScore = -1
-    foreach ($referrer in @($modReferrersByTarget[$modId])) {
-      if (-not $modConflictStats.ContainsKey($referrer)) { continue }
-      $refScore = [int]$modConflictStats[$referrer].ConflictScore
-      if ($refScore -gt $maxReferrerScore) {
-        $maxReferrerScore = $refScore
-      }
-    }
-
-    if ($maxReferrerScore -gt [int]$stats.ConflictScore) {
-      $null = $deferred.Add($modId)
-    }
-  }
-
-  if ($deferred.Count -gt 0 -and $deferred.Count -lt $evidenceByModId.Count) {
-    $fabricConflictDeferredModIds = @($deferred | Sort-Object)
-    foreach ($modId in $fabricConflictDeferredModIds) {
-      if ($evidenceByModId.ContainsKey($modId)) {
-        $null = $evidenceByModId.Remove($modId)
-      }
-    }
-    Write-Host ("Fabric conflict-priority deferred secondary mod IDs: {0}" -f ($fabricConflictDeferredModIds -join ", ")) -ForegroundColor Gray
-  }
-}
+. $checkCompatibilityEvidencePath
 
 # * Legacy.log is now maintained as a persistent culprit-move log by Auto-Run-LegacyLauncher.
 # * Evidence logging removed; culprit entries are appended by Layer-Mods / Isolate scripts.
-
 if ($evidenceByModId.Count -eq 0 -and (-not $TreatNonFabricAsIncompatible)) {
   Write-Host "No incompatible mods detected from current log patterns." -ForegroundColor Green
   exit 0
@@ -1015,661 +937,12 @@ if (-not (Test-Path -LiteralPath $StorageModsDir)) {
   throw ("StorageModsDir not found: {0}" -f $StorageModsDir)
 }
 
-$deleteFromGame = [bool]$NoLegacy -or [bool]$DeleteFromGameMods -or (-not [bool]$GameLegacy)
-$deleteFromStorage = [bool]$NoLegacy
+. $checkCompatibilityModResolutionPath
+. $checkCompatibilityDecisionPath
+. $checkCompatibilityReportingPath
 
-$storageLegacyVersionDir = $null
-if (-not $deleteFromStorage) {
-  $storageLegacyDir = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-  $storageLegacyVersionDir = Join-Path -Path $storageLegacyDir -ChildPath $mcVersion
+if ($null -eq $script:checkCompatExitCode) {
+  $script:checkCompatExitCode = 0
 }
 
-$gameLegacyVersionDir = $null
-if (-not $deleteFromGame) {
-  $gameLegacyDir = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-  $gameLegacyVersionDir = Join-Path -Path $gameLegacyDir -ChildPath $mcVersion
-}
-
-# * Build mod id -> jar mapping for game mods dir.
-$gameIdToJars = Build-ModIdToJarMap -DirPath $GameModsDir
-
-# * For storage, prefer filename match, then fallback to id scan of root jars.
-$storageRootJars = Get-ChildItem -LiteralPath $StorageModsDir -Filter "*.jar" -File -ErrorAction Stop |
-  ForEach-Object { $_.FullName }
-$storageFileNameToPath = @{}
-foreach ($p in $storageRootJars) {
-  $storageFileNameToPath[[System.IO.Path]::GetFileName($p).ToLowerInvariant()] = $p
-}
-$storageIdToJars = Build-ModIdToJarMap -DirPath $StorageModsDir
-
-# * Nested fallback caches to resolve unresolved mod IDs without building a full nested map.
-$nestedFallbackMaxDepth = 1
-$nestedFallbackJarIdsByPathCache = @{}
-$nestedFallbackGamePathsByModId = @{}
-$nestedFallbackStoragePathsByModId = @{}
-$jarMixinConfigEntryCache = @{}
-
-# * Keeps track of game jar paths already handled in this run to avoid duplicate moves
-# * when multiple mod IDs resolve to the same physical jar.
-$handledGameJarPathKeySet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-$dependencyPriorityApplied = $false
-$dependencyPrioritySourceUsed = "none"
-$dependencyPriorityMapJsonPath = ""
-$dependencyPriorityByJarName = @{}
-$dependencyPriorityByModId = @{}
-
-if ($DependencyAwareTier2MaxDependents -lt 0) { $DependencyAwareTier2MaxDependents = 0 }
-if ($DependencyAwareTier3MaxDependents -lt $DependencyAwareTier2MaxDependents) {
-  $DependencyAwareTier3MaxDependents = $DependencyAwareTier2MaxDependents
-}
-
-$countMode = $DependencyAwareOrderingCountMode
-if ([string]::IsNullOrWhiteSpace($countMode)) { $countMode = "RequiredOnly" }
-
-$dependencyMap = $null
-if ($DependencyMapSource -ne "Internal") {
-  $dependencyMap = Get-DependencyMapFromSource -ScanPath $GameModsDir
-}
-
-$depCountMap = @{}
-if ($dependencyMap) {
-  Initialize-DependencyMapCache -DependencyMap $dependencyMap
-  $depCountMap = Get-DependentModCountsFromDependencyMap -DependencyMap $dependencyMap -CountMode $countMode
-  $dependencyPrioritySourceUsed = $DependencyMapSource
-} else {
-  if ($DependencyMapSource -ne "Internal") {
-    Write-Host ("Warning: dependency map unavailable from source '{0}'. Falling back to internal parser." -f $DependencyMapSource) -ForegroundColor Yellow
-  }
-  $depCountMap = Get-DependentModCountsByJarName -ModsDir $GameModsDir -CountMode $countMode
-  $dependencyPrioritySourceUsed = "Internal"
-}
-
-if ($DependencyMapSource -eq "File") {
-  $dependencyPriorityMapJsonPath = $DependencyMapJsonPath
-  if ([string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath)) {
-    $dependencyPriorityMapJsonPath = Join-Path -Path $PSScriptRoot -ChildPath "..\reports\jar-dependency-map.json"
-  }
-} elseif ($DependencyMapSource -eq "Tool") {
-  $mapOutDir = $DependencyMapOutDir
-  if ([string]::IsNullOrWhiteSpace($mapOutDir)) {
-    $mapOutDir = Join-Path -Path $PSScriptRoot -ChildPath "..\reports"
-  }
-  $dependencyPriorityMapJsonPath = Join-Path -Path $mapOutDir -ChildPath "jar-dependency-map.json"
-}
-if (-not [string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath) -and (Test-Path -LiteralPath $dependencyPriorityMapJsonPath)) {
-  $dependencyPriorityMapJsonPath = (Resolve-Path -LiteralPath $dependencyPriorityMapJsonPath).Path
-}
-
-$gameRootJars = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File -ErrorAction Stop)
-foreach ($jar in $gameRootJars) {
-  $jarKey = $jar.Name.ToLowerInvariant()
-  $depCount = -1
-  $known = $false
-  if ($depCountMap.ContainsKey($jarKey)) {
-    $depCount = [int]$depCountMap[$jarKey].DependentCount
-    $known = [bool]$depCountMap[$jarKey].Known
-  }
-  if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
-    $depCount = 0
-    $known = $true
-  }
-  $tier = Get-DependencyAwareTier -DependentCount $depCount -Known $known
-  $dependencyPriorityByJarName[$jarKey] = [pscustomobject]@{
-    Tier = [int]$tier
-    DependentCount = [int]$depCount
-    Known = [bool]$known
-    DependentCountSort = if ($depCount -ge 0) { [int]$depCount } else { [int]::MaxValue }
-  }
-}
-
-if ($dependencyPriorityByJarName.Count -gt 0) {
-  $dependencyPriorityApplied = $true
-  $sourceLabel = if ([string]::IsNullOrWhiteSpace($dependencyPriorityMapJsonPath)) { $dependencyPrioritySourceUsed } else { "{0} ({1})" -f $dependencyPrioritySourceUsed, $dependencyPriorityMapJsonPath }
-  Write-Host ("Dependency-priority ordering enabled. Source: {0}" -f $sourceLabel) -ForegroundColor Gray
-}
-
-$modIdOrder = New-Object System.Collections.Generic.List[object]
-foreach ($modId in $evidenceByModId.Keys) {
-  $conflictScore = 0
-  $evidenceCount = 0
-  $fabricSuggestionCount = 0
-  $incompatibleDetailCount = 0
-  $referencesOtherCount = 0
-  $referencedByOtherCount = 0
-  if ($modConflictStats.ContainsKey($modId)) {
-    $conflictStats = $modConflictStats[$modId]
-    $conflictScore = [int]$conflictStats.ConflictScore
-    $evidenceCount = [int]$conflictStats.EvidenceCount
-    $fabricSuggestionCount = [int]$conflictStats.FabricSuggestionCount
-    $incompatibleDetailCount = [int]$conflictStats.IncompatibleDetailCount
-    $referencesOtherCount = [int]$conflictStats.ReferencesOtherCount
-    $referencedByOtherCount = [int]$conflictStats.ReferencedByOtherCount
-  }
-
-  $latestWrite = [datetime]::MinValue
-  $bestTier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
-  $bestDependentCount = -1
-  $bestDependentSort = [int]::MaxValue
-  $bestKnown = $false
-  $bestFound = $false
-  $bestMtime = [datetime]::MinValue
-
-  if ($gameIdToJars.ContainsKey($modId)) {
-    foreach ($jarPath in @($gameIdToJars[$modId])) {
-      $mtime = Get-LastWriteTimeSafe -Path $jarPath
-      if ($mtime -gt $latestWrite) { $latestWrite = $mtime }
-
-      $jarName = [System.IO.Path]::GetFileName($jarPath).ToLowerInvariant()
-      $tier = if ([bool]$DependencyAwareTreatUnknownAsCore) { 4 } else { 1 }
-      $depCount = -1
-      $known = $false
-      $depSort = [int]::MaxValue
-      if ($dependencyPriorityByJarName.ContainsKey($jarName)) {
-        $jarPriority = $dependencyPriorityByJarName[$jarName]
-        $tier = [int]$jarPriority.Tier
-        $depCount = [int]$jarPriority.DependentCount
-        $known = [bool]$jarPriority.Known
-        $depSort = [int]$jarPriority.DependentCountSort
-      }
-
-      if ((-not $bestFound) -or $tier -lt $bestTier -or ($tier -eq $bestTier -and $depSort -lt $bestDependentSort) -or ($tier -eq $bestTier -and $depSort -eq $bestDependentSort -and $mtime -gt $bestMtime)) {
-        $bestTier = $tier
-        $bestDependentCount = $depCount
-        $bestDependentSort = $depSort
-        $bestKnown = $known
-        $bestFound = $true
-        $bestMtime = $mtime
-      }
-    }
-  }
-  $priorityDecision = if ($bestKnown) {
-    "selected by dependency priority: tier={0}, dependents={1}" -f $bestTier, $bestDependentCount
-  } else {
-    "selected by fallback order: dependency metadata unavailable"
-  }
-
-  $dependencyPriorityByModId[$modId] = [pscustomobject]@{
-    Tier = [int]$bestTier
-    DependentCount = [int]$bestDependentCount
-    Known = [bool]$bestKnown
-    DependentCountSort = [int]$bestDependentSort
-    PriorityDecision = $priorityDecision
-    ConflictScore = [int]$conflictScore
-    EvidenceCount = [int]$evidenceCount
-    FabricSuggestionCount = [int]$fabricSuggestionCount
-    IncompatibleDetailCount = [int]$incompatibleDetailCount
-    ReferencesOtherCount = [int]$referencesOtherCount
-    ReferencedByOtherCount = [int]$referencedByOtherCount
-  }
-
-  $null = $modIdOrder.Add([pscustomobject]@{
-      ModId = $modId
-      LastWriteTime = $latestWrite
-      ConflictScore = [int]$conflictScore
-      EvidenceCount = [int]$evidenceCount
-      PriorityTier = [int]$bestTier
-      PriorityDependentCount = [int]$bestDependentCount
-      PriorityDependentCountSort = [int]$bestDependentSort
-      PriorityKnown = [bool]$bestKnown
-      PriorityDecision = $priorityDecision
-    })
-}
-$modIdSortProps = @(
-  @{ Expression = { $_.ConflictScore }; Descending = $true }
-  @{ Expression = { $_.EvidenceCount }; Descending = $true }
-  @{ Expression = { $_.PriorityTier }; Ascending = $true }
-  @{ Expression = { $_.PriorityDependentCountSort }; Ascending = $true }
-  @{ Expression = { $_.LastWriteTime }; Descending = $true }
-  @{ Expression = { $_.ModId }; Ascending = $true }
-)
-$orderedModIds = @($modIdOrder | Sort-Object -Property $modIdSortProps | ForEach-Object { $_.ModId })
-
-$actions = New-Object System.Collections.Generic.List[object]
-
-foreach ($modId in $orderedModIds) {
-  $modIdVariants = @(Get-ModIdLookupVariantList -ModId $modId)
-  $modIdVariantKeys = @($modIdVariants | Where-Object { -not [string]::Equals([string]$_, [string]$modId, [System.StringComparison]::OrdinalIgnoreCase) })
-
-  $modPriority = $null
-  if ($dependencyPriorityByModId.ContainsKey($modId)) {
-    $modPriority = $dependencyPriorityByModId[$modId]
-  }
-  $priorityTier = if ($null -ne $modPriority) { [int]$modPriority.Tier } else { 0 }
-  $priorityDependents = if ($null -ne $modPriority) { [int]$modPriority.DependentCount } else { -1 }
-  $priorityKnown = if ($null -ne $modPriority) { [bool]$modPriority.Known } else { $false }
-  $priorityDecision = if ($null -ne $modPriority) { [string]$modPriority.PriorityDecision } else { "" }
-  $conflictScore = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ConflictScore").Count -gt 0) { [int]$modPriority.ConflictScore } else { 0 }
-  $evidenceCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("EvidenceCount").Count -gt 0) { [int]$modPriority.EvidenceCount } else { 0 }
-  $fabricSuggestionCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("FabricSuggestionCount").Count -gt 0) { [int]$modPriority.FabricSuggestionCount } else { 0 }
-  $incompatibleDetailCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("IncompatibleDetailCount").Count -gt 0) { [int]$modPriority.IncompatibleDetailCount } else { 0 }
-  $referencesOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencesOtherCount").Count -gt 0) { [int]$modPriority.ReferencesOtherCount } else { 0 }
-  $referencedByOtherCount = if ($null -ne $modPriority -and $modPriority.PSObject.Properties.Match("ReferencedByOtherCount").Count -gt 0) { [int]$modPriority.ReferencedByOtherCount } else { 0 }
-
-  $gameJarPaths = @()
-  $resolvedByDirectGameId = $false
-  if ($gameIdToJars.ContainsKey($modId)) {
-    $gameJarPaths = @($gameIdToJars[$modId])
-    if ($gameJarPaths.Count -gt 0) {
-      $resolvedByDirectGameId = $true
-    }
-  }
-  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0) -and $modIdVariantKeys.Count -gt 0) {
-    $variantGameJarPaths = New-Object System.Collections.Generic.List[string]
-    foreach ($variantModId in @($modIdVariantKeys)) {
-      $variantKey = [string]$variantModId
-      if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
-      if (-not $gameIdToJars.ContainsKey($variantKey)) { continue }
-      foreach ($variantJarPath in @($gameIdToJars[$variantKey])) {
-        $variantPath = [string]$variantJarPath
-        if ([string]::IsNullOrWhiteSpace($variantPath)) { continue }
-        $variantGameJarPaths.Add($variantPath) | Out-Null
-      }
-    }
-    if ($variantGameJarPaths.Count -gt 0) {
-      $gameJarPaths = @($variantGameJarPaths.ToArray() | Sort-Object -Unique)
-    }
-  }
-  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0)) {
-    $gameJarPaths = @(Resolve-ModJarPathsByNestedFallback `
-        -DirPath $GameModsDir `
-        -ModId $modId `
-        -ResolvedByModIdCache $nestedFallbackGamePathsByModId `
-        -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
-        -MaxNestedJarDepth $nestedFallbackMaxDepth)
-  }
-  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0) -and $modIdVariantKeys.Count -gt 0) {
-    $variantFallbackGameJarPaths = New-Object System.Collections.Generic.List[string]
-    foreach ($variantModId in @($modIdVariantKeys)) {
-      $variantKey = [string]$variantModId
-      if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
-      $variantResolved = @(Resolve-ModJarPathsByNestedFallback `
-          -DirPath $GameModsDir `
-          -ModId $variantKey `
-          -ResolvedByModIdCache $nestedFallbackGamePathsByModId `
-          -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
-          -MaxNestedJarDepth $nestedFallbackMaxDepth)
-      foreach ($variantJarPath in @($variantResolved)) {
-        $variantPath = [string]$variantJarPath
-        if ([string]::IsNullOrWhiteSpace($variantPath)) { continue }
-        $variantFallbackGameJarPaths.Add($variantPath) | Out-Null
-      }
-    }
-    if ($variantFallbackGameJarPaths.Count -gt 0) {
-      $gameJarPaths = @($variantFallbackGameJarPaths.ToArray() | Sort-Object -Unique)
-    }
-  }
-  if ((-not $gameJarPaths -or $gameJarPaths.Count -eq 0)) {
-    $gameJarPaths = @(Resolve-GameJarPathsFromMixinEvidence `
-        -ModId $modId `
-        -ModsDir $GameModsDir `
-        -EvidenceLines @($evidenceByModId[$modId]) `
-        -JarMixinConfigEntryCache $jarMixinConfigEntryCache)
-  }
-  if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
-    $gameJarSortProps = @(
-      @{ Expression = { Get-LastWriteTimeSafe -Path $_ }; Descending = $true }
-      @{ Expression = { $_ }; Ascending = $true }
-    )
-    $gameJarPaths = @($gameJarPaths | Sort-Object -Property $gameJarSortProps)
-  }
-  if ($resolvedByDirectGameId -and $gameJarPaths -and $gameJarPaths.Count -gt 1) {
-    # * Multiple root jars with the same mod id are handled one-by-one per attempt.
-    # * This keeps the isolation step minimal and avoids removing all duplicate versions at once.
-    $gameJarPaths = @($gameJarPaths | Select-Object -First 1)
-  }
-  if ($gameJarPaths -and $gameJarPaths.Count -gt 1) {
-    $gameJarPaths = @(Select-GameJarPathsByMixinEvidence `
-        -ModId $modId `
-        -CandidateJarPaths @($gameJarPaths) `
-        -EvidenceLines @($evidenceByModId[$modId]) `
-        -JarMixinConfigEntryCache $jarMixinConfigEntryCache)
-  }
-
-  $alreadyHandledGameJarPaths = New-Object System.Collections.Generic.List[string]
-  if ($gameJarPaths -and $gameJarPaths.Count -gt 0) {
-    $pendingGameJarPaths = New-Object System.Collections.Generic.List[string]
-    foreach ($candidateGameJarPath in @($gameJarPaths)) {
-      $candidatePath = [string]$candidateGameJarPath
-      if ([string]::IsNullOrWhiteSpace($candidatePath)) { continue }
-      if ($handledGameJarPathKeySet.Contains($candidatePath)) {
-        $alreadyHandledGameJarPaths.Add($candidatePath) | Out-Null
-        continue
-      }
-      $pendingGameJarPaths.Add($candidatePath) | Out-Null
-    }
-    $gameJarPaths = @($pendingGameJarPaths.ToArray())
-  }
-
-  if (-not $gameJarPaths -or $gameJarPaths.Count -eq 0) {
-    if ($alreadyHandledGameJarPaths.Count -gt 0) {
-      $alreadyHandledNames = @(
-        $alreadyHandledGameJarPaths |
-          ForEach-Object { [System.IO.Path]::GetFileName([string]$_) } |
-          Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-          Sort-Object -Unique
-      )
-      $alreadyHandledLabel = if ($alreadyHandledNames.Count -gt 0) { $alreadyHandledNames -join ", " } else { "<unknown>" }
-      $actions.Add([pscustomobject]@{
-          modId = $modId
-          status = "handled"
-          evidence = @($evidenceByModId[$modId])
-          game = @("already handled by previous mod action: $alreadyHandledLabel")
-          storage = @()
-          dependencyTier = $priorityTier
-          dependentMods = $priorityDependents
-          dependentModsKnown = $priorityKnown
-          priorityDecision = $priorityDecision
-          conflictScore = $conflictScore
-          evidenceCount = $evidenceCount
-          fabricSuggestionCount = $fabricSuggestionCount
-          incompatibleDetailCount = $incompatibleDetailCount
-          referencesOtherCount = $referencesOtherCount
-          referencedByOtherCount = $referencedByOtherCount
-        })
-      continue
-    }
-
-    $actions.Add([pscustomobject]@{
-        modId = $modId
-        status = "unresolved_in_game_mods"
-        evidence = @($evidenceByModId[$modId])
-        game = @()
-        storage = @()
-        dependencyTier = $priorityTier
-        dependentMods = $priorityDependents
-        dependentModsKnown = $priorityKnown
-        priorityDecision = $priorityDecision
-        conflictScore = $conflictScore
-        evidenceCount = $evidenceCount
-        fabricSuggestionCount = $fabricSuggestionCount
-        incompatibleDetailCount = $incompatibleDetailCount
-        referencesOtherCount = $referencesOtherCount
-        referencedByOtherCount = $referencedByOtherCount
-      })
-    continue
-  }
-
-  foreach ($gameJarPath in $gameJarPaths) {
-    $gameFileName = [System.IO.Path]::GetFileName($gameJarPath)
-    $storageJarPath = $null
-    $gameHandledNow = $false
-    $storageKey = $gameFileName.ToLowerInvariant()
-    if ($storageFileNameToPath.ContainsKey($storageKey)) {
-      $storageJarPath = $storageFileNameToPath[$storageKey]
-    } elseif ($storageIdToJars.ContainsKey($modId) -and $storageIdToJars[$modId].Count -gt 0) {
-      $storageJarPath = $storageIdToJars[$modId][0]
-    } elseif ($modIdVariantKeys.Count -gt 0) {
-      foreach ($variantModId in @($modIdVariantKeys)) {
-        $variantKey = [string]$variantModId
-        if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
-        if (-not $storageIdToJars.ContainsKey($variantKey)) { continue }
-        if ($storageIdToJars[$variantKey].Count -le 0) { continue }
-        $storageJarPath = $storageIdToJars[$variantKey][0]
-        break
-      }
-    } else {
-      $storageFallbackJarPaths = @(Resolve-ModJarPathsByNestedFallback `
-          -DirPath $StorageModsDir `
-          -ModId $modId `
-          -ResolvedByModIdCache $nestedFallbackStoragePathsByModId `
-          -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
-          -MaxNestedJarDepth $nestedFallbackMaxDepth)
-      if ($storageFallbackJarPaths.Count -eq 0 -and $modIdVariantKeys.Count -gt 0) {
-        $variantStorageFallbackPaths = New-Object System.Collections.Generic.List[string]
-        foreach ($variantModId in @($modIdVariantKeys)) {
-          $variantKey = [string]$variantModId
-          if ([string]::IsNullOrWhiteSpace($variantKey)) { continue }
-          $variantResolved = @(Resolve-ModJarPathsByNestedFallback `
-              -DirPath $StorageModsDir `
-              -ModId $variantKey `
-              -ResolvedByModIdCache $nestedFallbackStoragePathsByModId `
-              -JarIdsByPathCache $nestedFallbackJarIdsByPathCache `
-              -MaxNestedJarDepth $nestedFallbackMaxDepth)
-          foreach ($variantPath in @($variantResolved)) {
-            $value = [string]$variantPath
-            if ([string]::IsNullOrWhiteSpace($value)) { continue }
-            $variantStorageFallbackPaths.Add($value) | Out-Null
-          }
-        }
-        if ($variantStorageFallbackPaths.Count -gt 0) {
-          $storageFallbackJarPaths = @($variantStorageFallbackPaths.ToArray() | Sort-Object -Unique)
-        }
-      }
-      if ($storageFallbackJarPaths.Count -gt 0) {
-        $storageNameMatched = @($storageFallbackJarPaths | Where-Object { [string]::Equals([System.IO.Path]::GetFileName([string]$_), $gameFileName, [System.StringComparison]::OrdinalIgnoreCase) })
-        if ($storageNameMatched.Count -gt 0) {
-          $storageJarPath = $storageNameMatched[0]
-        } else {
-          $storageJarPath = $storageFallbackJarPaths[0]
-        }
-      }
-    }
-
-    $gameResult = $null
-    if ($DryRun) {
-        $gameResult = Move-OrDelete -SourcePath $gameJarPath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun $true
-        if (-not [string]::IsNullOrWhiteSpace([string]$gameResult)) {
-            $gameHandledNow = $true
-        }
-    } else {
-        $moveResult = Move-CulpritToLegacyAndAppendLog `
-            -JarName $gameFileName `
-            -MinecraftVersion $mcVersion `
-            -GameModsDir $GameModsDir `
-            -StorageModsDir $StorageModsDir `
-            -GameLegacyFolderName $GameLegacyFolderName `
-            -StorageLegacyFolderName $StorageLegacyFolderName `
-            -KeepCulpritInGameLegacy ([bool](-not $deleteFromGame)) `
-            -GameSourcePath $gameJarPath `
-            -StorageSourcePath $storageJarPath `
-            -RemoveGameIfNotKeeping $true `
-            -RequireStorageMoveForGameRemoval $false
-
-        if ($moveResult.GameMoved) {
-            $gameResult = if ($deleteFromGame) { "deleted: $gameJarPath" } else { "moved: $gameJarPath -> $gameLegacyVersionDir" }
-            $gameHandledNow = $true
-        }
-    }
-
-    if ($gameHandledNow) {
-        $null = $handledGameJarPathKeySet.Add([string]$gameJarPath)
-    }
-
-    $storageResult = $null
-    if ($DryRun) {
-        if ($storageJarPath) {
-            $storageResult = Move-OrDelete -SourcePath $storageJarPath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun $true
-        } else {
-            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
-        }
-    } else {
-        # * Storage result is already handled by Move-CulpritToLegacyAndAppendLog above.
-        if ($storageJarPath) {
-            if ($null -ne $moveResult -and $moveResult.StorageMoved) {
-                $storageResult = if ($deleteFromStorage) { "deleted: $storageJarPath" } else { "moved: $storageJarPath -> $storageLegacyVersionDir" }
-            } else {
-                $storageResult = "failed to move from storage"
-            }
-        } else {
-            $storageResult = ("not found in storage root for file '{0}' (modId '{1}')" -f $gameFileName, $modId)
-        }
-    }
-
-    $actions.Add([pscustomobject]@{
-        modId = $modId
-        status = "handled"
-        evidence = @($evidenceByModId[$modId])
-        game = @($gameResult)
-        storage = @($storageResult)
-        dependencyTier = $priorityTier
-        dependentMods = $priorityDependents
-        dependentModsKnown = $priorityKnown
-        priorityDecision = $priorityDecision
-        conflictScore = $conflictScore
-        evidenceCount = $evidenceCount
-        fabricSuggestionCount = $fabricSuggestionCount
-        incompatibleDetailCount = $incompatibleDetailCount
-        referencesOtherCount = $referencesOtherCount
-        referencedByOtherCount = $referencedByOtherCount
-      })
-  }
-}
-
-if ($TreatNonFabricAsIncompatible -and $nonFabricJarNames -and $nonFabricJarNames.Count -gt 0) {
-  $nonFabricOrder = New-Object System.Collections.Generic.List[object]
-  foreach ($jarName in $nonFabricJarNames) {
-    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
-    $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
-    $storagePath = Join-Path -Path $StorageModsDir -ChildPath $jarName
-    $mtime = Get-LastWriteTimeSafe -Path $gamePath
-    if ($mtime -eq [datetime]::MinValue) {
-      $mtime = Get-LastWriteTimeSafe -Path $storagePath
-    }
-    $null = $nonFabricOrder.Add([pscustomobject]@{
-        JarName = $jarName
-        LastWriteTime = $mtime
-      })
-  }
-  $nonFabricSortProps = @(
-    @{ Expression = { $_.LastWriteTime }; Descending = $true }
-    @{ Expression = { $_.JarName }; Ascending = $true }
-  )
-  $nonFabricJarNames = @($nonFabricOrder | Sort-Object -Property $nonFabricSortProps | ForEach-Object { $_.JarName })
-
-  foreach ($jarName in $nonFabricJarNames) {
-    $gamePath = Join-Path -Path $GameModsDir -ChildPath $jarName
-    $storagePath = Join-Path -Path $StorageModsDir -ChildPath $jarName
-
-    $gameResult = $null
-    $storageResult = $null
-
-    if ($DryRun) {
-        if (Test-Path -LiteralPath $gamePath) {
-            $gameResult = Move-OrDelete -SourcePath $gamePath -DestDir $gameLegacyVersionDir -DoDelete $deleteFromGame -IsDryRun $true
-        } else {
-            $gameResult = ("not present in game mods: {0}" -f $jarName)
-        }
-        if (Test-Path -LiteralPath $storagePath) {
-            $storageResult = Move-OrDelete -SourcePath $storagePath -DestDir $storageLegacyVersionDir -DoDelete $deleteFromStorage -IsDryRun $true
-        } else {
-            $storageResult = ("not present in storage root: {0}" -f $jarName)
-        }
-    } else {
-        $moveResult = Move-CulpritToLegacyAndAppendLog `
-            -JarName $jarName `
-            -MinecraftVersion $mcVersion `
-            -GameModsDir $GameModsDir `
-            -StorageModsDir $StorageModsDir `
-            -GameLegacyFolderName $GameLegacyFolderName `
-            -StorageLegacyFolderName $StorageLegacyFolderName `
-            -KeepCulpritInGameLegacy ([bool](-not $deleteFromGame)) `
-            -GameSourcePath $gamePath `
-            -StorageSourcePath $storagePath `
-            -RemoveGameIfNotKeeping $true `
-            -RequireStorageMoveForGameRemoval $false
-
-        if (Test-Path -LiteralPath $gamePath) {
-            if ($moveResult.GameMoved) {
-                $gameResult = if ($deleteFromGame) { "deleted: $gamePath" } else { "moved: $gamePath -> $gameLegacyVersionDir" }
-            } else {
-                $gameResult = "failed to move from game"
-            }
-        } else {
-            $gameResult = ("not present in game mods: {0}" -f $jarName)
-        }
-
-        if (Test-Path -LiteralPath $storagePath) {
-            if ($moveResult.StorageMoved) {
-                $storageResult = if ($deleteFromStorage) { "deleted: $storagePath" } else { "moved: $storagePath -> $storageLegacyVersionDir" }
-            } else {
-                $storageResult = "failed to move from storage"
-            }
-        } else {
-            $storageResult = ("not present in storage root: {0}" -f $jarName)
-        }
-    }
-
-    $actions.Add([pscustomobject]@{
-        modId = $null
-        status = "handled_non_fabric_by_filename"
-        evidence = @("non-fabric jar listed by Fabric loader")
-        game = @($gameResult)
-        storage = @($storageResult)
-        jar = $jarName
-      })
-  }
-}
-
-if ($dependencyPriorityApplied -and $modIdOrder.Count -gt 0) {
-  $preview = @($modIdOrder | Sort-Object -Property $modIdSortProps | Select-Object -First 8)
-  if ($preview.Count -gt 0) {
-    $previewLabel = $preview | ForEach-Object {
-      "{0}(conflicts={1},tier={2},dependents={3})" -f $_.ModId, $_.ConflictScore, $_.PriorityTier, $_.PriorityDependentCount
-    }
-    Write-Host ("Dependency-priority order (top): {0}" -f ($previewLabel -join " -> ")) -ForegroundColor Gray
-  }
-}
-
-$report = [pscustomobject]@{
-  minecraft = $mcVersion
-  log = $primaryLogPath
-  logs = $resolvedLogPaths
-  dryRun = [bool]$DryRun
-  deleteFromGameMods = [bool]$DeleteFromGameMods
-  noLegacy = [bool]$NoLegacy
-  gameLegacy = [bool]$GameLegacy
-  effectiveDeleteFromGameMods = [bool]$deleteFromGame
-  effectiveDeleteFromStorageMods = [bool]$deleteFromStorage
-  treatNonFabricAsIncompatible = [bool]$TreatNonFabricAsIncompatible
-  includeWarnMixinsAsIncompatible = [bool]$IncludeWarnMixinsAsIncompatible
-  dependencyPriorityApplied = [bool]$dependencyPriorityApplied
-  dependencyPrioritySource = $dependencyPrioritySourceUsed
-  dependencyPriorityMapJsonPath = $dependencyPriorityMapJsonPath
-  dependencyOrderingMode = $countMode
-  dependencyTier2MaxDependents = [int]$DependencyAwareTier2MaxDependents
-  dependencyTier3MaxDependents = [int]$DependencyAwareTier3MaxDependents
-  fabricConflictDeferredModIds = @($fabricConflictDeferredModIds)
-  count = $actions.Count
-  items = $actions
-}
-
-if ($compatLogsEnabled) {
-  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-  $projectRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
-  $compatReportDir = Join-Path -Path $projectRoot -ChildPath "logs"
-  New-DirectoryIfMissing -DirPath $compatReportDir
-  $outPath = Join-Path -Path $compatReportDir -ChildPath ("compat-report-{0}.json" -f $timestamp)
-  $report | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $outPath -Encoding UTF8
-
-  Write-Host ""
-  Write-Host ("Report: {0}" -f $outPath) -ForegroundColor Gray
-  Write-Host ("Items: {0}" -f $actions.Count) -ForegroundColor Cyan
-} else {
-  Write-Host ""
-  Write-Host ("Items: {0}" -f $actions.Count) -ForegroundColor Cyan
-}
-
-# * Compact console summary (mod ids only).
-$handled = $actions | Where-Object { $_.status -eq "handled" } | Select-Object -ExpandProperty modId -Unique
-if ($handled) {
-  Write-Host ("Incompatible mods (handled): {0}" -f (($handled | Sort-Object) -join ", ")) -ForegroundColor Green
-}
-
-$unresolved = $actions | Where-Object { $_.status -eq "unresolved_in_game_mods" } | Select-Object -ExpandProperty modId -Unique
-if ($unresolved) {
-  Write-Host ("Incompatible mods (unresolved in game mods): {0}" -f (($unresolved | Sort-Object) -join ", ")) -ForegroundColor Yellow
-}
-
-$handledNonFabric = $actions | Where-Object { $_.status -eq "handled_non_fabric_by_filename" } | Select-Object -ExpandProperty jar -Unique
-if ($handledNonFabric) {
-  Write-Host ("Non-fabric mods (handled by filename): {0}" -f (($handledNonFabric | Sort-Object) -join ", ")) -ForegroundColor Green
-}
-
-$handledActions = @($actions | Where-Object { $_.status -in @("handled", "handled_non_fabric_by_filename") })
-if ($actions.Count -gt 0 -and $handledActions.Count -eq 0) {
-  Write-Host "No removable mods found in game mods folder. Check missing dependencies or mod ids." -ForegroundColor Yellow
-  exit 3
-}
-
-exit 0
+exit ([int]$script:checkCompatExitCode)

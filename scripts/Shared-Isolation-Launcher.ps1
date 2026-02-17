@@ -1,3 +1,9 @@
+$sharedJarToolsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-JarTools.ps1"
+if (-not (Test-Path -LiteralPath $sharedJarToolsPath)) {
+  throw ("Shared jar helpers not found: {0}" -f $sharedJarToolsPath)
+}
+. $sharedJarToolsPath
+
 # * Kills game processes (java/javaw/Minecraft) started after a given time.
 # * Filters using Test-ProcessLooksLikeMinecraftGame to avoid killing the launcher wrapper.
 function Get-ActiveModCount {
@@ -8,7 +14,7 @@ function Get-ActiveModCount {
 
   if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
   if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
-  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+  $mods = @(Get-McccJarFiles -RootPaths @($ModsDir) -SortBy "None" -EnumerationErrorAction "SilentlyContinue")
   if ($null -eq $mods) { return 0 }
   return @($mods).Count
 }
@@ -220,7 +226,7 @@ function Get-SessionLaunchConfigKey {
   if (-not (Test-Path -LiteralPath $ModsDir)) { return "" }
 
   $jarNames = @(
-    Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue |
+    Get-McccJarFiles -RootPaths @($ModsDir) -SortBy "None" -EnumerationErrorAction "SilentlyContinue" |
       ForEach-Object { [string]$_.Name } |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
       ForEach-Object { $_.ToLowerInvariant() } |

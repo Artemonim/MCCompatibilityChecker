@@ -1,11 +1,12 @@
 import argparse
-import json
 import re
 import sys
 import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from shared.jar_metadata import extract_jar_metadata
 
 VERSION_RE = re.compile(r"\d+(?:\.\d+){0,2}")
 WILDCARD_RE = re.compile(r"^(\d+)\.(\d+)\.[xX\*]$")
@@ -193,127 +194,16 @@ def parse_versions_from_filename(jar_path: Path, expand_ranges: bool) -> List[st
     return [best]
 
 
-def parse_dependency_value(value, expand_ranges: bool) -> List[str]:
-    """Extracts versions from a dependency declaration field."""
-    specs: List[str] = []
-    if isinstance(value, str):
-        specs.append(value)
-    elif isinstance(value, list):
-        for entry in value:
-            if isinstance(entry, str):
-                specs.append(entry)
-            elif isinstance(entry, dict) and "version" in entry:
-                specs.append(str(entry.get("version", "")).strip())
-    elif isinstance(value, dict) and "version" in value:
-        specs.append(str(value.get("version", "")).strip())
-
+def extract_versions_from_metadata(metadata, expand_ranges: bool) -> List[str]:
+    """Extracts Minecraft versions from canonical dependency records."""
     versions: List[str] = []
-    for spec in specs:
-        versions.extend(parse_version_spec(spec, expand_ranges))
-
-    unique_versions = []
-    seen = set()
-    for version in versions:
-        if version not in seen:
-            seen.add(version)
-            unique_versions.append(version)
-    return unique_versions
-
-
-def extract_from_fabric_mod_json(mod_json: dict, expand_ranges: bool) -> List[str]:
-    """Extracts Minecraft versions from fabric.mod.json data."""
-    depends = mod_json.get("depends", {})
-    if not isinstance(depends, dict):
-        return []
-    if "minecraft" not in depends:
-        return []
-    return parse_dependency_value(depends.get("minecraft"), expand_ranges)
-
-
-def extract_from_quilt_mod_json(mod_json: dict, expand_ranges: bool) -> List[str]:
-    """Extracts Minecraft versions from quilt.mod.json data."""
-    loader = mod_json.get("quilt_loader")
-    if not isinstance(loader, dict):
-        return []
-    depends = loader.get("depends")
-    if isinstance(depends, dict):
-        minecraft_value = depends.get("minecraft")
-        if minecraft_value is None:
-            return []
-        return parse_dependency_value(minecraft_value, expand_ranges)
-    if not isinstance(depends, list):
-        return []
-
-    versions: List[str] = []
-    for dep in depends:
-        if not isinstance(dep, dict):
+    for dependency in metadata.dependency_records:
+        if str(dependency.mod_id).lower() != "minecraft":
             continue
-        if str(dep.get("id", "")).lower() != "minecraft":
+        version_range = str(dependency.version_range).strip()
+        if not version_range:
             continue
-        if "versions" in dep:
-            versions.extend(parse_dependency_value(dep.get("versions"), expand_ranges))
-        elif "version" in dep:
-            versions.extend(parse_dependency_value(dep.get("version"), expand_ranges))
-    return list(dict.fromkeys(versions))
-
-
-def extract_from_mods_toml(toml_text: str, expand_ranges: bool) -> List[str]:
-    """Extracts Minecraft versions from Forge/NeoForge mods.toml content."""
-    dependency_block_re = re.compile(r"^\s*\[\[dependencies\.[^\]]+\]\]")
-    key_value_re = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*["\'](.*?)["\']')
-
-    versions: List[str] = []
-    current_target = ""
-    current_range: Optional[str] = None
-
-    for line in toml_text.splitlines():
-        if dependency_block_re.match(line):
-            if current_target == "minecraft" and current_range:
-                versions.extend(parse_version_spec(current_range, expand_ranges))
-            current_target = ""
-            current_range = None
-            continue
-
-        kv_match = key_value_re.match(line)
-        if not kv_match:
-            continue
-        key = kv_match.group(1).lower()
-        value = kv_match.group(2).strip()
-        if key == "modid":
-            current_target = value.lower()
-        elif key == "versionrange":
-            current_range = value
-
-    if current_target == "minecraft" and current_range:
-        versions.extend(parse_version_spec(current_range, expand_ranges))
-
-    return list(dict.fromkeys(versions))
-
-
-def extract_from_mcmod_info(info_text: str, expand_ranges: bool) -> List[str]:
-    """Extracts Minecraft versions from legacy mcmod.info content."""
-    try:
-        data = json.loads(info_text)
-    except json.JSONDecodeError:
-        return []
-
-    items = data if isinstance(data, list) else [data]
-    versions: List[str] = []
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if "acceptedMinecraftVersions" in item:
-            versions.extend(
-                parse_version_spec(
-                    str(item.get("acceptedMinecraftVersions", "")).strip(),
-                    expand_ranges,
-                )
-            )
-        elif "mcversion" in item:
-            versions.extend(
-                parse_version_spec(str(item.get("mcversion", "")).strip(), expand_ranges)
-            )
+        versions.extend(parse_version_spec(version_range, expand_ranges))
     return list(dict.fromkeys(versions))
 
 
@@ -321,37 +211,15 @@ def extract_versions_from_jar(jar_path: Path, expand_ranges: bool) -> Set[str]:
     """Reads a jar and extracts Minecraft version targets."""
     found: Set[str] = set()
 
-    try:
-        with zipfile.ZipFile(jar_path, "r") as archive:
-            if "fabric.mod.json" in archive.namelist():
-                try:
-                    raw = archive.read("fabric.mod.json").decode("utf-8", errors="ignore")
-                    mod_json = json.loads(raw)
-                    found.update(extract_from_fabric_mod_json(mod_json, expand_ranges))
-                except json.JSONDecodeError:
-                    pass
-
-            if "quilt.mod.json" in archive.namelist():
-                try:
-                    raw = archive.read("quilt.mod.json").decode("utf-8", errors="ignore")
-                    mod_json = json.loads(raw)
-                    found.update(extract_from_quilt_mod_json(mod_json, expand_ranges))
-                except json.JSONDecodeError:
-                    pass
-
-            for toml_name in ("META-INF/mods.toml", "META-INF/neoforge.mods.toml"):
-                if toml_name in archive.namelist():
-                    raw = archive.read(toml_name).decode("utf-8", errors="ignore")
-                    found.update(extract_from_mods_toml(raw, expand_ranges))
-
-            if "mcmod.info" in archive.namelist():
-                try:
-                    raw = archive.read("mcmod.info").decode("utf-8", errors="ignore")
-                    found.update(extract_from_mcmod_info(raw, expand_ranges))
-                except json.JSONDecodeError:
-                    pass
-    except (zipfile.BadZipFile, OSError):
-        return set()
+    metadata = extract_jar_metadata(jar_path, throw_on_parse_error=False)
+    if metadata is None:
+        try:
+            with zipfile.ZipFile(jar_path, "r"):
+                pass
+        except (zipfile.BadZipFile, OSError):
+            return set()
+    else:
+        found.update(extract_versions_from_metadata(metadata, expand_ranges))
 
     if not found:
         found.update(parse_versions_from_filename(jar_path, expand_ranges))
