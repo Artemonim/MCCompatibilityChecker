@@ -216,12 +216,6 @@ function Get-BaseLauncherParam {
   if ($PlayClickOffsetY -ge 0) {
     $params["PlayClickOffsetY"] = $PlayClickOffsetY
   }
-  if (-not $UseEnterFallback) {
-    $params["UseEnterFallback"] = $false
-  }
-  if ($EnableBroadUiSearch) {
-    $params["EnableBroadUiSearch"] = $true
-  }
   if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) {
     $params["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns
   }

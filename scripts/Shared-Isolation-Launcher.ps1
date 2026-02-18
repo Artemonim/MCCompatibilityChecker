@@ -131,8 +131,6 @@ function Resolve-IsolationLauncherContext {
       PlayButtonNames = $PlayButtonNames
       PlayClickOffsetX = $PlayClickOffsetX
       PlayClickOffsetY = $PlayClickOffsetY
-      UseEnterFallback = [bool]$UseEnterFallback
-      EnableBroadUiSearch = [bool]$EnableBroadUiSearch
       CrashWindowTitlePatterns = $CrashWindowTitlePatterns
       FabricWindowTitlePatterns = $FabricWindowTitlePatterns
       CrashCloseClickOffsetX = $CrashCloseClickOffsetX
@@ -628,8 +626,6 @@ function Invoke-ConfiguredLaunchAttempt {
     -ButtonNames $ctx.Ui.PlayButtonNames `
     -ClickOffsetX $ctx.Ui.PlayClickOffsetX `
     -ClickOffsetY $ctx.Ui.PlayClickOffsetY `
-    -EnableEnterFallback $ctx.Ui.UseEnterFallback `
-    -AllowBroadSearch ([bool]$ctx.Ui.EnableBroadUiSearch) `
     -CrashPatterns $ctx.Ui.CrashWindowTitlePatterns `
     -FabricPatterns $ctx.Ui.FabricWindowTitlePatterns `
     -OutcomeTimeoutSeconds $ctx.Timeouts.OutcomeTimeoutSeconds `
@@ -1296,10 +1292,6 @@ function Invoke-LaunchAttempt {
     [Parameter(Mandatory = $true)]
     [int]$ClickOffsetY,
     [Parameter(Mandatory = $true)]
-    [bool]$EnableEnterFallback,
-    [Parameter(Mandatory = $true)]
-    [bool]$AllowBroadSearch,
-    [Parameter(Mandatory = $true)]
     [string[]]$CrashPatterns,
     [Parameter(Mandatory = $true)]
     [string[]]$FabricPatterns,
@@ -1378,8 +1370,6 @@ function Invoke-LaunchAttempt {
         -ButtonNames $ButtonNames `
         -ClickOffsetX $ClickOffsetX `
         -ClickOffsetY $ClickOffsetY `
-        -EnableEnterFallback $EnableEnterFallback `
-        -AllowBroadSearch $AllowBroadSearch `
         -PreClickDelayMs $PlayClickDelayMs
 
       $outcome = Wait-ForOutcome -CrashPatterns $CrashPatterns `

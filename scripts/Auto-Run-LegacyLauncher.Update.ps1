@@ -69,12 +69,6 @@ param(
   [bool]$RequireGameStartForTimeout = $true,
 
   [Parameter(Mandatory = $false)]
-  [bool]$UseEnterFallback = $true,
-
-  [Parameter(Mandatory = $false)]
-  [bool]$EnableBroadUiSearch = $false,
-
-  [Parameter(Mandatory = $false)]
   [int]$CrashCloseClickOffsetX = -1,
 
   [Parameter(Mandatory = $false)]
@@ -188,8 +182,6 @@ $profileTypeMap = @{
   PlayClickOffsetY = "int"
   PlayClickDelayMs = "int"
   PlayClickMaxAttempts = "int"
-  UseEnterFallback = "bool"
-  EnableBroadUiSearch = "bool"
   CrashWindowTitlePatterns = "string[]"
   FabricWindowTitlePatterns = "string[]"
   CrashCloseClickOffsetX = "int"
@@ -260,6 +252,11 @@ if (-not (Test-Path -LiteralPath $sharedIsolationLauncherPath)) { throw ("Shared
 $sharedIsolationLogPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-LogParsing.ps1"
 if (-not (Test-Path -LiteralPath $sharedIsolationLogPath)) { throw ("Shared isolation log helpers not found: {0}" -f $sharedIsolationLogPath) }
 . $sharedIsolationLogPath
+
+$SkipGameLogs = $false
+$LogMaxAgeMinutes = 30
+$LogReadRetryCount = 5
+$LogReadRetryDelayMs = 500
 
 function Write-UpdateStage {
   param(
@@ -558,12 +555,8 @@ function Get-UpdateLogSnapshot {
     }
   }
 
-  return Get-LogSnapshot -PrimaryLogPath $LogPath `
-    -GameModsDir $GameModsDir `
-    -SkipGameLogs:$false `
-    -LogMaxAgeMinutes 30 `
-    -LogReadRetryCount 5 `
-    -LogReadRetryDelayMs 500 `
+  return Get-ConfiguredLogSnapshot `
+    -PrimaryLogPath $LogPath `
     -SinceTimestamp $SinceTimestamp `
     -SinceTimestampSkewSeconds 120
 }
@@ -595,8 +588,6 @@ function Invoke-UpdateLaunchProbe {
     -ButtonNames $PlayButtonNames `
     -ClickOffsetX $PlayClickOffsetX `
     -ClickOffsetY $PlayClickOffsetY `
-    -EnableEnterFallback $UseEnterFallback `
-    -AllowBroadSearch ([bool]$EnableBroadUiSearch) `
     -CrashPatterns $CrashWindowTitlePatterns `
     -FabricPatterns $FabricWindowTitlePatterns `
     -OutcomeTimeoutSeconds $OutcomeTimeoutSeconds `
@@ -720,53 +711,86 @@ function Request-UpdateFallbackDecision {
   }
 }
 
+function Stop-UpdateTranscript {
+  if (-not [bool]$script:UpdateTranscriptStarted) { return }
+  try {
+    Stop-Transcript | Out-Null
+  } catch {
+    # * Keep fallback path resilient even if transcript shutdown fails.
+  } finally {
+    $script:UpdateTranscriptStarted = $false
+  }
+}
+
+function Convert-StandardPipelineParameterValue {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [object]$Value
+  )
+
+  if ($Value -is [System.Management.Automation.SwitchParameter]) {
+    return [bool]$Value
+  }
+  return $Value
+}
+
+function Test-ShouldForwardStandardPipelineParameter {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [object]$Value
+  )
+
+  if ($Value -is [System.Management.Automation.SwitchParameter]) {
+    return [bool]$Value
+  }
+  if ($null -eq $Value) { return $false }
+
+  switch ($Name) {
+    "PlayClickOffsetX" { return ([int]$Value -ge 0) }
+    "PlayClickOffsetY" { return ([int]$Value -ge 0) }
+  }
+
+  if ($Value -is [bool]) { return $true }
+  if ($Value -is [int]) { return ([int]$Value -gt 0) }
+  if ($Value -is [string]) { return (-not [string]::IsNullOrWhiteSpace([string]$Value)) }
+
+  if ($Value -is [System.Array]) {
+    return ($Value.Count -gt 0)
+  }
+  if ($Value -is [System.Collections.ICollection]) {
+    return ($Value.Count -gt 0)
+  }
+
+  return $true
+}
+
 function Invoke-StandardPipeline {
   $standardScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "Auto-Run-LegacyLauncher.ps1"
   if (-not (Test-Path -LiteralPath $standardScriptPath)) {
     throw ("Standard pipeline script not found: {0}" -f $standardScriptPath)
   }
 
+  $updateCommand = Get-Command -Name $PSCommandPath -ErrorAction Stop
+  $standardCommand = Get-Command -Name $standardScriptPath -ErrorAction Stop
   $params = @{}
-  if (-not [string]::IsNullOrWhiteSpace($LauncherExePath)) { $params["LauncherExePath"] = $LauncherExePath }
-  if ($LauncherArguments -and $LauncherArguments.Count -gt 0) { $params["LauncherArguments"] = $LauncherArguments }
-  $params["UseAutoLaunch"] = [bool]$UseAutoLaunch
-  if ($DisableAutoLaunch) { $params["DisableAutoLaunch"] = $true }
-  if (-not [string]::IsNullOrWhiteSpace($LauncherWindowTitlePattern)) { $params["LauncherWindowTitlePattern"] = $LauncherWindowTitlePattern }
-  if ($PlayButtonNames -and $PlayButtonNames.Count -gt 0) { $params["PlayButtonNames"] = $PlayButtonNames }
-  if ($PlayClickOffsetX -ge 0) { $params["PlayClickOffsetX"] = $PlayClickOffsetX }
-  if ($PlayClickOffsetY -ge 0) { $params["PlayClickOffsetY"] = $PlayClickOffsetY }
-  if ($PlayClickDelayMs -gt 0) { $params["PlayClickDelayMs"] = $PlayClickDelayMs }
-  if ($LaunchStartTimeoutSeconds -gt 0) { $params["LaunchStartTimeoutSeconds"] = $LaunchStartTimeoutSeconds }
-  if ($PlayClickMaxAttempts -gt 0) { $params["PlayClickMaxAttempts"] = $PlayClickMaxAttempts }
-  $params["RequireGameStartForTimeout"] = [bool]$RequireGameStartForTimeout
-  $params["UseEnterFallback"] = [bool]$UseEnterFallback
-  $params["EnableBroadUiSearch"] = [bool]$EnableBroadUiSearch
-  if ($CrashWindowTitlePatterns -and $CrashWindowTitlePatterns.Count -gt 0) { $params["CrashWindowTitlePatterns"] = $CrashWindowTitlePatterns }
-  if ($FabricWindowTitlePatterns -and $FabricWindowTitlePatterns.Count -gt 0) { $params["FabricWindowTitlePatterns"] = $FabricWindowTitlePatterns }
-  if ($CrashCloseClickOffsetX -ge 0) { $params["CrashCloseClickOffsetX"] = $CrashCloseClickOffsetX }
-  if ($CrashCloseClickOffsetY -ge 0) { $params["CrashCloseClickOffsetY"] = $CrashCloseClickOffsetY }
-  if ($CrashCloseDelaySeconds -gt 0) { $params["CrashCloseDelaySeconds"] = $CrashCloseDelaySeconds }
-  $params["AutoHandleFabricDialog"] = [bool]$AutoHandleFabricDialog
-  if (-not [string]::IsNullOrWhiteSpace($LogPath)) { $params["LogPath"] = $LogPath }
-  if ($LauncherWindowTimeoutSeconds -gt 0) { $params["LauncherWindowTimeoutSeconds"] = $LauncherWindowTimeoutSeconds }
-  if ($OutcomeTimeoutSeconds -gt 0) { $params["OutcomeTimeoutSeconds"] = $OutcomeTimeoutSeconds }
-  if ($PollIntervalSeconds -gt 0) { $params["PollIntervalSeconds"] = $PollIntervalSeconds }
-  if ($SuccessGraceSeconds -gt 0) { $params["SuccessGraceSeconds"] = $SuccessGraceSeconds }
-  if ($GameProcessNames -and $GameProcessNames.Count -gt 0) { $params["GameProcessNames"] = $GameProcessNames }
-  if ($WaitForGameExitSeconds -gt 0) { $params["WaitForGameExitSeconds"] = $WaitForGameExitSeconds }
-  if ($GameExitPollSeconds -gt 0) { $params["GameExitPollSeconds"] = $GameExitPollSeconds }
-  $params["DeleteFromGameMods"] = [bool]$DeleteFromGameMods
-  if ($NoLegacy) { $params["NoLegacy"] = $true }
-  if ($GameLegacy) { $params["GameLegacy"] = $true }
-  if ($UseLinearIsolation) { $params["UseLinearIsolation"] = $true }
-  if ($BinaryLinearThreshold -gt 0) { $params["BinaryLinearThreshold"] = $BinaryLinearThreshold }
-  if ($ThoroughStabilityCheck) { $params["ThoroughStabilityCheck"] = $true }
-  if ($NoCache) { $params["NoCache"] = $true }
-  if ($IgnoreModIds -and $IgnoreModIds.Count -gt 0) { $params["IgnoreModIds"] = $IgnoreModIds }
-  if ($CheckScriptArguments -and $CheckScriptArguments.Count -gt 0) { $params["CheckScriptArguments"] = $CheckScriptArguments }
-  if ($IsolateScriptArguments -and $IsolateScriptArguments.Count -gt 0) { $params["IsolateScriptArguments"] = $IsolateScriptArguments }
-  if (-not [string]::IsNullOrWhiteSpace($ProfileName)) { $params["ProfileName"] = $ProfileName }
-  if ($DryRun) { $params["DryRun"] = $true }
+  $excludedNames = @("UpdatePath", "RemainingArgs", "Help", "Verbose", "Debug")
+  foreach ($name in @($updateCommand.Parameters.Keys)) {
+    if ($excludedNames -contains [string]$name) { continue }
+    if (-not $standardCommand.Parameters.ContainsKey([string]$name)) { continue }
+
+    $valueVar = Get-Variable -Name ([string]$name) -Scope Script -ErrorAction SilentlyContinue
+    if ($null -eq $valueVar) { continue }
+    $value = $valueVar.Value
+    if (-not (Test-ShouldForwardStandardPipelineParameter -Name ([string]$name) -Value $value)) { continue }
+
+    $params[[string]$name] = Convert-StandardPipelineParameterValue -Value $value
+  }
+
+  $params["ContinueTranscript"] = $true
   if ($PSBoundParameters.ContainsKey("Verbose")) { $params["Verbose"] = $true }
   if ($PSBoundParameters.ContainsKey("Debug")) { $params["Debug"] = $true }
 
@@ -893,6 +917,18 @@ function Select-TargetedRollbackCandidates {
   if ($selected.Count -eq 0) { return @() }
   return @($selected.ToArray() | Sort-Object -Property @{ Expression = { [datetime]$_.LastWriteTime }; Descending = $true }, @{ Expression = { [string]$_.JarName }; Ascending = $true })
 }
+
+$projectRoot = [string]$runtimeBootstrap.ProjectRoot
+$script:UpdateTranscriptPath = Join-Path -Path $projectRoot -ChildPath "MCCC.log"
+$script:UpdateTranscriptStarted = $false
+
+try {
+  if (Test-Path -LiteralPath $script:UpdateTranscriptPath) {
+    Remove-Item -LiteralPath $script:UpdateTranscriptPath -Force -ErrorAction Stop
+  }
+  Start-Transcript -Path $script:UpdateTranscriptPath -Force | Out-Null
+  $script:UpdateTranscriptStarted = $true
+
 $effectiveAutoLaunch = ([bool]$UseAutoLaunch) -and (-not [bool]$DisableAutoLaunch)
 $sessionStartTime = Get-Date
 $updateBatchMcVersion = "unknown"
@@ -983,32 +1019,18 @@ if ($DryRun) {
   Write-Host "DRYRUN enabled. Preflight and file changes will be simulated." -ForegroundColor Gray
 } else {
   if ($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) {
-    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
-      -ExePath $LauncherExePath `
-      -ExeArguments $LauncherArguments `
+    $offsetResult = Resolve-LauncherPlayClickOffset -LauncherTitlePattern $LauncherWindowTitlePattern `
+      -LauncherExePath $LauncherExePath `
+      -LauncherArguments $LauncherArguments `
       -AppendAutoLaunch $effectiveAutoLaunch `
-      -TimeoutSeconds $LauncherWindowTimeoutSeconds `
-      -IsDryRun ([bool]$DryRun) `
-      -ShowWaitMessage $true
-    while ($null -eq $launcherWindow) {
-      Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds) -ForegroundColor Yellow
-      Start-Sleep -Seconds $PollIntervalSeconds
-      $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
-        -ExePath $LauncherExePath `
-        -ExeArguments $LauncherArguments `
-        -AppendAutoLaunch $effectiveAutoLaunch `
-        -TimeoutSeconds $LauncherWindowTimeoutSeconds `
-        -IsDryRun ([bool]$DryRun) `
-        -ShowWaitMessage $true
-    }
-    [void][MCCompatWin32]::SetForegroundWindow($launcherWindow.Handle)
-    Start-Sleep -Milliseconds 150
-
-    $offsets = Get-CursorOffsetRelativeToWindow -Handle $launcherWindow.Handle
-    Write-Host ("Captured cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY) -ForegroundColor Gray
-    $PlayClickOffsetX = $offsets.OffsetX
-    $PlayClickOffsetY = $offsets.OffsetY
-    Write-Host ("Using captured offsets for Play click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY) -ForegroundColor Cyan
+      -LauncherWindowTimeoutSeconds $LauncherWindowTimeoutSeconds `
+      -PollIntervalSeconds $PollIntervalSeconds `
+      -CurrentPlayClickOffsetX $PlayClickOffsetX `
+      -CurrentPlayClickOffsetY $PlayClickOffsetY `
+      -PrintProvidedOffsetMessage $false `
+      -IsDryRun ([bool]$DryRun)
+    $PlayClickOffsetX = [int]$offsetResult.PlayClickOffsetX
+    $PlayClickOffsetY = [int]$offsetResult.PlayClickOffsetY
   }
 
   Write-UpdateStage -Name "Preflight launch check"
@@ -1313,3 +1335,6 @@ if ($activeRollbackByJar.Count -gt 0) {
 }
 
 exit 0
+} finally {
+  Stop-UpdateTranscript
+}

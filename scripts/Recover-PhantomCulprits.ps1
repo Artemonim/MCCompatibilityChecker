@@ -85,12 +85,6 @@ param(
   [bool]$RequireGameStartForTimeout = $true,
 
   [Parameter(Mandatory = $false)]
-  [bool]$UseEnterFallback = $true,
-
-  [Parameter(Mandatory = $false)]
-  [bool]$EnableBroadUiSearch = $false,
-
-  [Parameter(Mandatory = $false)]
   [string[]]$CrashWindowTitlePatterns = @("Something broke"),
 
   [Parameter(Mandatory = $false)]
