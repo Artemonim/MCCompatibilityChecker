@@ -543,6 +543,12 @@
     "Mixin Analysis"    = "Mixin-анализ"
     "Layering"          = "Наслоение"
     "Isolation"         = "Изоляция"
+    "Candidate classification" = "Классификация кандидатов"
+    "Apply replaceable batch" = "Применение заменяемого батча"
+    "Post-replaceable launch check" = "Проверка запуска после заменяемого батча"
+    "Apply new-only batch" = "Применение батча новых модов"
+    "Post new-only launch check" = "Проверка запуска после батча новых модов"
+    "Final compatibility check" = "Финальная проверка совместимости"
   }
   Ui = @{
     CrashWindowTitlePatterns = @(

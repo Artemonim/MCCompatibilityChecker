@@ -13,6 +13,45 @@ This document describes the complete cycle of automatic mod conflict diagnostics
 7. A user dialog appears only when unresolved isolated mods remain, Recovery is disabled, or the launch outcome is ambiguous (Fabric/NoLaunch).
 8. For sessions ending with Fabric missing dependencies, the script shows a final choice: `continue` / `rollback` / `finish`.
 
+## Separate Update Mode (`.\run.ps1 -Update <path>`)
+
+A separate scenario for batch updating mods from `StorageModsDir` starting from a selected time anchor.
+
+### Steps
+
+1. Pre-launch check:
+- A trial launch is performed before any file changes.
+- If `CrashDialog` or `NoLaunch` occurs: a modal dialog shows `Fix / Cancel`.
+  - `Fix` → runs the standard pipeline (`Auto-Run-LegacyLauncher.ps1`).
+  - `Cancel` → exits update mode without changes.
+- If a Fabric dialog with missing dependencies occurs: a modal dialog shows `Fix / Cancel`.
+  - `Fix` → runs the standard pipeline (`Auto-Run-LegacyLauncher.ps1`).
+  - `Cancel` → exits update mode without changes.
+
+2. Selecting update candidates:
+- `UpdatePath` must point to a `.jar` in the root of `StorageModsDir` (non-recursive).
+- Processing includes the anchor itself and all newer `.jar` files: `LastWriteTime >= anchor.LastWriteTime`.
+
+3. Candidate classification:
+- For each candidate, jar metadata (`id`/`provides`) is read via jar analyzers.
+- Candidates are divided into groups:
+  - `replaceable` — an older version was found in `StorageModsDir` and/or `GameModsDir` (rollback source exists).
+  - `new-only` — no older versions found.
+
+4. Applying and stabilizing the `replaceable` batch:
+- For each `replaceable` candidate:
+  - Older versions in `StorageModsDir` (root only) are moved to `Updated/<MinecraftVersion>`,
+  - Older versions in `GameModsDir` are removed (with backup to `Updated/<MinecraftVersion>`),
+  - New version is copied to `GameModsDir`.
+- After applying, a post-check is performed:
+  - Targeted rollback by signals from logs (missing/requiring/incompatible mod IDs),
+  - Rollback-layering in batches `1, 2, 4, ...` until stabilization,
+  - Rollback-set minimization (one old version at a time).
+
+5. Applying `new-only` and final verification:
+- After `replaceable` stabilization, `new-only` mods are added (no old version rollback available for them).
+- Update mode then automatically switches to the standard pipeline (`Auto-Run-LegacyLauncher.ps1`) for final verification and isolation of problematic new mods.
+
 ## Stage 1: Baseline Analysis
 
 The script reads the crash log and searches for mod names in the error text.

@@ -630,6 +630,7 @@ function Request-UpdateFallbackDecision {
   param(
     [Parameter(Mandatory = $true)]
     [AllowEmptyCollection()]
+    [AllowEmptyString()]
     [string[]]$PromptLines,
     [Parameter(Mandatory = $false)]
     [string]$DialogTitle = "User action required"
@@ -918,6 +919,197 @@ function Select-TargetedRollbackCandidates {
   return @($selected.ToArray() | Sort-Object -Property @{ Expression = { [datetime]$_.LastWriteTime }; Descending = $true }, @{ Expression = { [string]$_.JarName }; Ascending = $true })
 }
 
+function Get-UpdateCandidateBuckets {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [object[]]$CandidateFiles = @(),
+    [Parameter(Mandatory = $true)]
+    [hashtable]$MetadataCache,
+    [Parameter(Mandatory = $true)]
+    [string]$StorageModsPath,
+    [Parameter(Mandatory = $true)]
+    [string]$GameModsPath,
+    [Parameter(Mandatory = $true)]
+    [System.Collections.Generic.HashSet[string]]$ExcludedPathSet
+  )
+
+  if (-not $CandidateFiles -or $CandidateFiles.Count -eq 0) {
+    return [pscustomobject]@{
+      Replaceable = @()
+      NewOnly = @()
+    }
+  }
+
+  $storageInfos = Get-UpdateJarInfoList -DirPath $StorageModsPath -MetadataCache $MetadataCache
+  $gameInfos = Get-UpdateJarInfoList -DirPath $GameModsPath -MetadataCache $MetadataCache
+
+  $replaceable = New-Object System.Collections.Generic.List[object]
+  $newOnly = New-Object System.Collections.Generic.List[object]
+
+  foreach ($candidateFile in @($CandidateFiles)) {
+    if ($null -eq $candidateFile) { continue }
+    if (-not (Test-Path -LiteralPath $candidateFile.FullName)) { continue }
+
+    $candidateInfo = New-UpdateJarInfo -File $candidateFile -MetadataCache $MetadataCache
+    $olderStorageMatches = @(Get-OlderStorageMatches -Candidate $candidateInfo -StorageJarInfos $storageInfos -ExcludedPathSet $ExcludedPathSet)
+    $gameMatches = @(Get-GameMatchesForReplacement -Candidate $candidateInfo -GameJarInfos $gameInfos)
+
+    if ($olderStorageMatches.Count -gt 0 -or $gameMatches.Count -gt 0) {
+      $replaceable.Add($candidateFile) | Out-Null
+    } else {
+      $newOnly.Add($candidateFile) | Out-Null
+    }
+  }
+
+  return [pscustomobject]@{
+    Replaceable = @($replaceable.ToArray())
+    NewOnly = @($newOnly.ToArray())
+  }
+}
+
+function Invoke-UpdateReplacementBatch {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [object[]]$CandidateFiles = @(),
+    [Parameter(Mandatory = $true)]
+    [hashtable]$MetadataCache,
+    [Parameter(Mandatory = $true)]
+    [string]$ResolvedStorageModsDir,
+    [Parameter(Mandatory = $true)]
+    [string]$ResolvedGameModsDir,
+    [Parameter(Mandatory = $true)]
+    [System.Collections.Generic.HashSet[string]]$UpdatePathSet,
+    [Parameter(Mandatory = $true)]
+    [string]$SessionUpdatedDir,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$RollbackByJar
+  )
+
+  $movedStorageOldCount = 0
+  $removedGameOldCount = 0
+  $copiedNewCount = 0
+
+  foreach ($candidateFile in @($CandidateFiles)) {
+    if ($null -eq $candidateFile) { continue }
+    if (-not (Test-Path -LiteralPath $candidateFile.FullName)) {
+      Write-Host ("Skipping missing update candidate: {0}" -f $candidateFile.FullName) -ForegroundColor Yellow
+      continue
+    }
+
+    $candidateInfo = New-UpdateJarInfo -File $candidateFile -MetadataCache $MetadataCache
+    Write-Host ("Processing update candidate: {0}" -f $candidateInfo.Name) -ForegroundColor Cyan
+
+    if (-not $candidateInfo.HasMetadata) {
+      Write-Host ("Warning: metadata parse failed for {0}. Old-version matching may be incomplete." -f $candidateInfo.Name) -ForegroundColor Yellow
+    }
+
+    $storageInfosNow = Get-UpdateJarInfoList -DirPath $ResolvedStorageModsDir -MetadataCache $MetadataCache
+    $gameInfosNow = Get-UpdateJarInfoList -DirPath $ResolvedGameModsDir -MetadataCache $MetadataCache
+
+    $olderStorageMatches = @(Get-OlderStorageMatches -Candidate $candidateInfo -StorageJarInfos $storageInfosNow -ExcludedPathSet $UpdatePathSet)
+    foreach ($oldStorage in @($olderStorageMatches)) {
+      $destPath = Join-McccDestinationPath -SourcePath ([string]$oldStorage.Path) -DestinationDirectory $SessionUpdatedDir
+      $moveResult = Move-McccItem -LiteralPath ([string]$oldStorage.Path) -DestinationPath $destPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      if ($DryRun) {
+        Write-Host ("DRYRUN move old storage version to Updated: {0}" -f $oldStorage.Name) -ForegroundColor Gray
+        Add-RollbackCandidate -RollbackByJar $RollbackByJar -JarName ([string]$oldStorage.Name) -UpdatedPath $destPath -ModIds @($oldStorage.ModIds) -LastWriteTime ([datetime]$oldStorage.LastWriteTime)
+        continue
+      }
+
+      if ($moveResult.Performed) {
+        Write-Host ("Moved old storage version to Updated: {0}" -f $oldStorage.Name) -ForegroundColor Gray
+        Add-RollbackCandidate -RollbackByJar $RollbackByJar -JarName ([string]$oldStorage.Name) -UpdatedPath $destPath -ModIds @($oldStorage.ModIds) -LastWriteTime ([datetime]$oldStorage.LastWriteTime)
+        $movedStorageOldCount++
+      }
+    }
+
+    $gameMatches = @(Get-GameMatchesForReplacement -Candidate $candidateInfo -GameJarInfos $gameInfosNow)
+    foreach ($oldGame in @($gameMatches)) {
+      if (-not $RollbackByJar.ContainsKey(([string]$oldGame.Name).ToLowerInvariant())) {
+        $backupPath = Join-McccDestinationPath -SourcePath ([string]$oldGame.Path) -DestinationDirectory $SessionUpdatedDir
+        $backupResult = Copy-McccItem -LiteralPath ([string]$oldGame.Path) -DestinationPath $backupPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        if ($DryRun) {
+          Add-RollbackCandidate -RollbackByJar $RollbackByJar -JarName ([string]$oldGame.Name) -UpdatedPath $backupPath -ModIds @($oldGame.ModIds) -LastWriteTime ([datetime]$oldGame.LastWriteTime) -Source "game"
+        } elseif ($backupResult.Performed) {
+          Add-RollbackCandidate -RollbackByJar $RollbackByJar -JarName ([string]$oldGame.Name) -UpdatedPath $backupPath -ModIds @($oldGame.ModIds) -LastWriteTime ([datetime]$oldGame.LastWriteTime) -Source "game"
+        }
+      }
+
+      $removeResult = Remove-McccItem -LiteralPath ([string]$oldGame.Path) -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      if ($DryRun) {
+        Write-Host ("DRYRUN remove old game version: {0}" -f $oldGame.Name) -ForegroundColor Gray
+        continue
+      }
+
+      if ($removeResult.Performed) {
+        Write-Host ("Removed old game version: {0}" -f $oldGame.Name) -ForegroundColor Gray
+        $removedGameOldCount++
+      }
+    }
+
+    $gameTargetPath = Join-Path -Path $ResolvedGameModsDir -ChildPath $candidateInfo.Name
+    $copyNewResult = Copy-McccItem -LiteralPath ([string]$candidateInfo.Path) -DestinationPath $gameTargetPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+    if ($DryRun) {
+      Write-Host ("DRYRUN copy new version to game mods: {0}" -f $candidateInfo.Name) -ForegroundColor Gray
+    } elseif ($copyNewResult.Performed) {
+      Write-Host ("Applied new version to game mods: {0}" -f $candidateInfo.Name) -ForegroundColor Green
+      $copiedNewCount++
+    }
+  }
+
+  return [pscustomobject]@{
+    CopiedNewCount = [int]$copiedNewCount
+    MovedStorageOldCount = [int]$movedStorageOldCount
+    RemovedGameOldCount = [int]$removedGameOldCount
+  }
+}
+
+function Invoke-UpdateNewOnlyBatch {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [object[]]$CandidateFiles = @(),
+    [Parameter(Mandatory = $true)]
+    [hashtable]$MetadataCache,
+    [Parameter(Mandatory = $true)]
+    [string]$ResolvedGameModsDir
+  )
+
+  $copiedNewCount = 0
+  foreach ($candidateFile in @($CandidateFiles)) {
+    if ($null -eq $candidateFile) { continue }
+    if (-not (Test-Path -LiteralPath $candidateFile.FullName)) {
+      Write-Host ("Skipping missing update candidate: {0}" -f $candidateFile.FullName) -ForegroundColor Yellow
+      continue
+    }
+
+    $candidateInfo = New-UpdateJarInfo -File $candidateFile -MetadataCache $MetadataCache
+    Write-Host ("Processing new-only candidate: {0}" -f $candidateInfo.Name) -ForegroundColor Cyan
+
+    if (-not $candidateInfo.HasMetadata) {
+      Write-Host ("Warning: metadata parse failed for {0}. New-only classification may be incomplete." -f $candidateInfo.Name) -ForegroundColor Yellow
+    }
+
+    $gameTargetPath = Join-Path -Path $ResolvedGameModsDir -ChildPath $candidateInfo.Name
+    $copyNewResult = Copy-McccItem -LiteralPath ([string]$candidateInfo.Path) -DestinationPath $gameTargetPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+    if ($DryRun) {
+      Write-Host ("DRYRUN copy new-only mod to game mods: {0}" -f $candidateInfo.Name) -ForegroundColor Gray
+      continue
+    }
+
+    if ($copyNewResult.Performed) {
+      Write-Host ("Applied new-only mod to game mods: {0}" -f $candidateInfo.Name) -ForegroundColor Green
+      $copiedNewCount++
+    }
+  }
+
+  return [pscustomobject]@{
+    CopiedNewCount = [int]$copiedNewCount
+  }
+}
+
 $projectRoot = [string]$runtimeBootstrap.ProjectRoot
 $script:UpdateTranscriptPath = Join-Path -Path $projectRoot -ChildPath "MCCC.log"
 $script:UpdateTranscriptStarted = $false
@@ -1015,6 +1207,26 @@ foreach ($item in @($updateCandidates)) {
 
 Write-Host ("Update candidate count (anchor included): {0}" -f $updateCandidates.Count) -ForegroundColor Cyan
 
+Write-UpdateStage -Name "Candidate classification"
+$candidateBuckets = Get-UpdateCandidateBuckets `
+  -CandidateFiles $updateCandidates `
+  -MetadataCache $metadataCache `
+  -StorageModsPath $resolvedStorageModsDir `
+  -GameModsPath $resolvedGameModsDir `
+  -ExcludedPathSet $updatePathSet
+$replaceableCandidates = @($candidateBuckets.Replaceable)
+$newOnlyCandidates = @($candidateBuckets.NewOnly)
+
+Write-Host ("Update candidate groups: replaceable={0}, new-only={1}" -f $replaceableCandidates.Count, $newOnlyCandidates.Count) -ForegroundColor Cyan
+if ($replaceableCandidates.Count -gt 0) {
+  $replaceableNames = @($replaceableCandidates | ForEach-Object { [string]$_.Name }) -join ", "
+  Write-Host ("Replaceable candidates: {0}" -f $replaceableNames) -ForegroundColor Gray
+}
+if ($newOnlyCandidates.Count -gt 0) {
+  $newOnlyNames = @($newOnlyCandidates | ForEach-Object { [string]$_.Name }) -join ", "
+  Write-Host ("New-only candidates: {0}" -f $newOnlyNames) -ForegroundColor Gray
+}
+
 if ($DryRun) {
   Write-Host "DRYRUN enabled. Preflight and file changes will be simulated." -ForegroundColor Gray
 } else {
@@ -1049,8 +1261,23 @@ if ($DryRun) {
 
   if ($preflightOutcomeType -eq "FabricDialog" -and $null -ne $preflightProbe.DepInfo -and [bool]$preflightProbe.DepInfo.HasMissingDeps) {
     Write-FabricMissingDependencyMessage -DepInfo $preflightProbe.DepInfo
+    $preflightPrompt = @(
+      "Preflight detected missing dependencies."
+      ""
+      "Run standard compatibility pipeline instead?"
+      "Eliminate - run standard pipeline."
+      "Cancel - stop update mode."
+    )
+    $runStandard = Request-UpdateFallbackDecision -PromptLines $preflightPrompt -DialogTitle "Preflight missing dependencies"
     Close-UpdateProbeOutcome -Probe $preflightProbe -SessionStartTime $sessionStartTime
-    exit 2
+    if ($runStandard) {
+      Write-Host "Switching to standard compatibility pipeline." -ForegroundColor Cyan
+      $standardExitCode = Invoke-StandardPipeline
+      exit $standardExitCode
+    }
+
+    Write-Host "Update mode canceled by user after preflight missing dependencies." -ForegroundColor Yellow
+    exit 0
   }
 
   if ($preflightOutcomeType -eq "CrashDialog" -or $preflightOutcomeType -eq "NoLaunch") {
@@ -1097,7 +1324,6 @@ if ($DryRun) {
   Close-UpdateProbeOutcome -Probe $preflightProbe -SessionStartTime $sessionStartTime
 }
 
-Write-UpdateStage -Name "Apply update batch"
 $updatedFolderName = Resolve-McccFolderName -Role "Updated"
 $sessionUpdatedRoot = Join-Path -Path $resolvedStorageModsDir -ChildPath $updatedFolderName
 $updatedVersionFolder = [string]$updateBatchMcVersion
@@ -1106,225 +1332,226 @@ $sessionUpdatedDir = Join-Path -Path $sessionUpdatedRoot -ChildPath $updatedVers
 
 $rollbackByJar = @{}
 $activeRollbackByJar = @{}
-$movedStorageOldCount = 0
-$removedGameOldCount = 0
-$copiedNewCount = 0
+if ($replaceableCandidates.Count -gt 0) {
+  Write-UpdateStage -Name "Apply replaceable batch"
+  $replaceBatchResult = Invoke-UpdateReplacementBatch `
+    -CandidateFiles $replaceableCandidates `
+    -MetadataCache $metadataCache `
+    -ResolvedStorageModsDir $resolvedStorageModsDir `
+    -ResolvedGameModsDir $resolvedGameModsDir `
+    -UpdatePathSet $updatePathSet `
+    -SessionUpdatedDir $sessionUpdatedDir `
+    -RollbackByJar $rollbackByJar
+  Write-Host ("Replaceable batch summary: new={0}, moved-old-storage={1}, removed-old-game={2}" -f $replaceBatchResult.CopiedNewCount, $replaceBatchResult.MovedStorageOldCount, $replaceBatchResult.RemovedGameOldCount) -ForegroundColor Cyan
 
-foreach ($candidateFile in @($updateCandidates)) {
-  if ($null -eq $candidateFile) { continue }
-  if (-not (Test-Path -LiteralPath $candidateFile.FullName)) {
-    Write-Host ("Skipping missing update candidate: {0}" -f $candidateFile.FullName) -ForegroundColor Yellow
-    continue
-  }
+  if (-not $DryRun) {
+    Write-UpdateStage -Name "Post-replaceable launch check"
+    $postProbe = Invoke-UpdateLaunchProbe -ContextLabel "post-replaceable"
+    Close-UpdateProbeOutcome -Probe $postProbe -SessionStartTime $sessionStartTime
 
-  $candidateInfo = New-UpdateJarInfo -File $candidateFile -MetadataCache $metadataCache
-  Write-Host ("Processing update candidate: {0}" -f $candidateInfo.Name) -ForegroundColor Cyan
+    if (-not (Test-LaunchProbeSuccess -Probe $postProbe)) {
+      if ($postProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $postProbe.DepInfo -and [bool]$postProbe.DepInfo.HasMissingDeps) {
+        Write-FabricMissingDependencyMessage -DepInfo $postProbe.DepInfo
+      }
 
-  if (-not $candidateInfo.HasMetadata) {
-    Write-Host ("Warning: metadata parse failed for {0}. Old-version matching may be incomplete." -f $candidateInfo.Name) -ForegroundColor Yellow
-  }
+      Write-UpdateStage -Name "Targeted rollback restore"
+      $targetedRestores = 0
+      $targetedMaxRounds = 8
+      $currentProbe = $postProbe
+      for ($round = 1; $round -le $targetedMaxRounds; $round++) {
+        $targetedCandidates = @(Select-TargetedRollbackCandidates -Probe $currentProbe -RollbackByJar $rollbackByJar -ActiveRollbackByJar $activeRollbackByJar)
+        if ($targetedCandidates.Count -eq 0) {
+          Write-Host "No targeted rollback candidates found for current logs." -ForegroundColor Gray
+          break
+        }
 
-  $storageInfosNow = Get-UpdateJarInfoList -DirPath $resolvedStorageModsDir -MetadataCache $metadataCache
-  $gameInfosNow = Get-UpdateJarInfoList -DirPath $resolvedGameModsDir -MetadataCache $metadataCache
+        Write-Host ("Targeted rollback round {0}: {1} candidate(s)." -f $round, $targetedCandidates.Count) -ForegroundColor Cyan
+        $restoredThisRound = 0
+        foreach ($candidate in @($targetedCandidates)) {
+          if ($null -eq $candidate) { continue }
+          $jarKey = Get-RollbackCandidateKey -JarName ([string]$candidate.JarName)
+          if ([string]::IsNullOrWhiteSpace($jarKey)) { continue }
+          if ($activeRollbackByJar.ContainsKey($jarKey)) { continue }
 
-  $olderStorageMatches = @(Get-OlderStorageMatches -Candidate $candidateInfo -StorageJarInfos $storageInfosNow -ExcludedPathSet $updatePathSet)
-  foreach ($oldStorage in @($olderStorageMatches)) {
-    $destPath = Join-McccDestinationPath -SourcePath ([string]$oldStorage.Path) -DestinationDirectory $sessionUpdatedDir
-    $moveResult = Move-McccItem -LiteralPath ([string]$oldStorage.Path) -DestinationPath $destPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
-    if ($DryRun) {
-      Write-Host ("DRYRUN move old storage version to Updated: {0}" -f $oldStorage.Name) -ForegroundColor Gray
-      Add-RollbackCandidate -RollbackByJar $rollbackByJar -JarName ([string]$oldStorage.Name) -UpdatedPath $destPath -ModIds @($oldStorage.ModIds) -LastWriteTime ([datetime]$oldStorage.LastWriteTime)
-      continue
-    }
+          if (Restore-RollbackCandidateToGame -Candidate $candidate) {
+            $activeRollbackByJar[$jarKey] = $candidate
+            $restoredThisRound++
+            $targetedRestores++
+          }
+        }
 
-    if ($moveResult.Performed) {
-      Write-Host ("Moved old storage version to Updated: {0}" -f $oldStorage.Name) -ForegroundColor Gray
-      Add-RollbackCandidate -RollbackByJar $rollbackByJar -JarName ([string]$oldStorage.Name) -UpdatedPath $destPath -ModIds @($oldStorage.ModIds) -LastWriteTime ([datetime]$oldStorage.LastWriteTime)
-      $movedStorageOldCount++
-    }
-  }
+        if ($restoredThisRound -le 0) {
+          break
+        }
 
-  $gameMatches = @(Get-GameMatchesForReplacement -Candidate $candidateInfo -GameJarInfos $gameInfosNow)
-  foreach ($oldGame in @($gameMatches)) {
-    if (-not $rollbackByJar.ContainsKey(([string]$oldGame.Name).ToLowerInvariant())) {
-      $backupPath = Join-McccDestinationPath -SourcePath ([string]$oldGame.Path) -DestinationDirectory $sessionUpdatedDir
-      $backupResult = Copy-McccItem -LiteralPath ([string]$oldGame.Path) -DestinationPath $backupPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
-      if ($DryRun) {
-        Add-RollbackCandidate -RollbackByJar $rollbackByJar -JarName ([string]$oldGame.Name) -UpdatedPath $backupPath -ModIds @($oldGame.ModIds) -LastWriteTime ([datetime]$oldGame.LastWriteTime) -Source "game"
-      } elseif ($backupResult.Performed) {
-        Add-RollbackCandidate -RollbackByJar $rollbackByJar -JarName ([string]$oldGame.Name) -UpdatedPath $backupPath -ModIds @($oldGame.ModIds) -LastWriteTime ([datetime]$oldGame.LastWriteTime) -Source "game"
+        $currentProbe = Invoke-UpdateLaunchProbe -ContextLabel ("targeted-rollback-{0}" -f $round)
+        Close-UpdateProbeOutcome -Probe $currentProbe -SessionStartTime $sessionStartTime
+        if (Test-LaunchProbeSuccess -Probe $currentProbe) {
+          Write-Host "Targeted rollback restored launch stability." -ForegroundColor Green
+          break
+        }
+
+        if ($currentProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $currentProbe.DepInfo -and [bool]$currentProbe.DepInfo.HasMissingDeps) {
+          Write-FabricMissingDependencyMessage -DepInfo $currentProbe.DepInfo
+        }
+      }
+
+      if (-not (Test-LaunchProbeSuccess -Probe $currentProbe)) {
+        Write-UpdateStage -Name "Additive rollback layering"
+        $remainingCandidates = @($rollbackByJar.Values | Where-Object {
+            $entry = $_
+            if ($null -eq $entry) { return $false }
+            $key = Get-RollbackCandidateKey -JarName ([string]$entry.JarName)
+            return (-not [string]::IsNullOrWhiteSpace($key) -and (-not $activeRollbackByJar.ContainsKey($key)))
+          } | Sort-Object -Property @{ Expression = { [datetime]$_.LastWriteTime }; Descending = $true }, @{ Expression = { [string]$_.JarName }; Ascending = $true })
+
+        if ($remainingCandidates.Count -eq 0) {
+          Write-Host "No remaining rollback candidates for additive layering." -ForegroundColor Gray
+        } else {
+          $index = 0
+          $batchSize = 1
+          $layerRound = 0
+          while ($index -lt $remainingCandidates.Count -and (-not (Test-LaunchProbeSuccess -Probe $currentProbe))) {
+            $layerRound++
+            $takeCount = [Math]::Min($batchSize, ($remainingCandidates.Count - $index))
+            $batch = @($remainingCandidates[$index..($index + $takeCount - 1)])
+            $batchLabel = @($batch | ForEach-Object { [string]$_.JarName }) -join ", "
+            Write-Host ("Layering round {0}: add {1}" -f $layerRound, $batchLabel) -ForegroundColor Cyan
+
+            foreach ($candidate in @($batch)) {
+              if ($null -eq $candidate) { continue }
+              $jarKey = Get-RollbackCandidateKey -JarName ([string]$candidate.JarName)
+              if ([string]::IsNullOrWhiteSpace($jarKey)) { continue }
+              if ($activeRollbackByJar.ContainsKey($jarKey)) { continue }
+              if (Restore-RollbackCandidateToGame -Candidate $candidate) {
+                $activeRollbackByJar[$jarKey] = $candidate
+              }
+            }
+
+            $currentProbe = Invoke-UpdateLaunchProbe -ContextLabel ("layering-rollback-{0}" -f $layerRound)
+            Close-UpdateProbeOutcome -Probe $currentProbe -SessionStartTime $sessionStartTime
+            if (Test-LaunchProbeSuccess -Probe $currentProbe) {
+              Write-Host "Additive rollback layering restored launch stability." -ForegroundColor Green
+              break
+            }
+
+            if ($currentProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $currentProbe.DepInfo -and [bool]$currentProbe.DepInfo.HasMissingDeps) {
+              Write-FabricMissingDependencyMessage -DepInfo $currentProbe.DepInfo
+            }
+
+            $index += $takeCount
+            $batchSize = [Math]::Min(($batchSize * 2), ($remainingCandidates.Count - $index))
+            if ($batchSize -lt 1) { $batchSize = 1 }
+          }
+        }
+      }
+
+      if (-not (Test-LaunchProbeSuccess -Probe $currentProbe)) {
+        Write-Host "Replaceable batch is still unstable even after rollback layering." -ForegroundColor Red
+        $replaceablePrompt = @(
+          ("Post-replaceable outcome: {0}." -f [string]$currentProbe.Outcome.Type)
+          ""
+          "Run standard compatibility pipeline instead?"
+          "Eliminate - run standard pipeline."
+          "Cancel - stop update mode."
+        )
+        $runStandard = Request-UpdateFallbackDecision -PromptLines $replaceablePrompt -DialogTitle "Replaceable batch failed"
+        if ($runStandard) {
+          Write-Host "Switching to standard compatibility pipeline." -ForegroundColor Cyan
+          $standardExitCode = Invoke-StandardPipeline
+          exit $standardExitCode
+        }
+
+        Write-Host "Update mode canceled by user after replaceable batch failure." -ForegroundColor Yellow
+        exit 3
       }
     }
 
-    $removeResult = Remove-McccItem -LiteralPath ([string]$oldGame.Path) -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
-    if ($DryRun) {
-      Write-Host ("DRYRUN remove old game version: {0}" -f $oldGame.Name) -ForegroundColor Gray
-      continue
-    }
+    if ($activeRollbackByJar.Count -gt 0) {
+      Write-UpdateStage -Name "Rollback minimization"
+      $activeOrdered = @($activeRollbackByJar.Values | Sort-Object -Property @{ Expression = { [datetime]$_.LastWriteTime }; Descending = $true }, @{ Expression = { [string]$_.JarName }; Ascending = $true })
+      foreach ($candidate in @($activeOrdered)) {
+        if ($null -eq $candidate) { continue }
+        $jarName = [string]$candidate.JarName
+        $jarKey = Get-RollbackCandidateKey -JarName $jarName
+        if ([string]::IsNullOrWhiteSpace($jarKey)) { continue }
+        if (-not $activeRollbackByJar.ContainsKey($jarKey)) { continue }
 
-    if ($removeResult.Performed) {
-      Write-Host ("Removed old game version: {0}" -f $oldGame.Name) -ForegroundColor Gray
-      $removedGameOldCount++
+        Write-Host ("Minimize: remove old version candidate '{0}' and re-test." -f $jarName) -ForegroundColor Cyan
+        if (-not (Deactivate-RollbackCandidateFromGame -Candidate $candidate -NewByJarName $newCandidateByJarName)) {
+          Write-Host ("Warning: failed to temporarily deactivate old version '{0}'." -f $jarName) -ForegroundColor Yellow
+          continue
+        }
+
+        $minProbe = Invoke-UpdateLaunchProbe -ContextLabel ("minimize-remove-{0}" -f $jarName)
+        Close-UpdateProbeOutcome -Probe $minProbe -SessionStartTime $sessionStartTime
+        if (Test-LaunchProbeSuccess -Probe $minProbe) {
+          $null = $activeRollbackByJar.Remove($jarKey)
+          Write-Host ("Old version '{0}' is not required." -f $jarName) -ForegroundColor Green
+          continue
+        }
+
+        if (Restore-RollbackCandidateToGame -Candidate $candidate) {
+          Write-Host ("Old version '{0}' is still required." -f $jarName) -ForegroundColor Yellow
+          $activeRollbackByJar[$jarKey] = $candidate
+        } else {
+          Write-Host ("Warning: failed to restore required old version '{0}'." -f $jarName) -ForegroundColor Red
+        }
+      }
     }
   }
-
-  $gameTargetPath = Join-Path -Path $resolvedGameModsDir -ChildPath $candidateInfo.Name
-  $copyNewResult = Copy-McccItem -LiteralPath ([string]$candidateInfo.Path) -DestinationPath $gameTargetPath -DryRun ([bool]$DryRun) -Overwrite $true -RetryCount 0 -RetryDelayMs 0
-  if ($DryRun) {
-    Write-Host ("DRYRUN copy new version to game mods: {0}" -f $candidateInfo.Name) -ForegroundColor Gray
-  } elseif ($copyNewResult.Performed) {
-    Write-Host ("Applied new version to game mods: {0}" -f $candidateInfo.Name) -ForegroundColor Green
-    $copiedNewCount++
-  }
+} else {
+  Write-Host "No replaceable update candidates were found." -ForegroundColor Gray
 }
 
-Write-Host ("Update batch summary: new={0}, moved-old-storage={1}, removed-old-game={2}" -f $copiedNewCount, $movedStorageOldCount, $removedGameOldCount) -ForegroundColor Cyan
+if ($newOnlyCandidates.Count -gt 0) {
+  Write-UpdateStage -Name "Apply new-only batch"
+  $newOnlyResult = Invoke-UpdateNewOnlyBatch `
+    -CandidateFiles $newOnlyCandidates `
+    -MetadataCache $metadataCache `
+    -ResolvedGameModsDir $resolvedGameModsDir
+  Write-Host ("New-only batch summary: new={0}" -f $newOnlyResult.CopiedNewCount) -ForegroundColor Cyan
+
+  if ($DryRun) {
+    Write-Host "DRYRUN complete." -ForegroundColor Green
+    exit 0
+  }
+
+  Write-UpdateStage -Name "Post new-only launch check"
+  $newOnlyProbe = Invoke-UpdateLaunchProbe -ContextLabel "post-new-only"
+  Close-UpdateProbeOutcome -Probe $newOnlyProbe -SessionStartTime $sessionStartTime
+  if (-not (Test-LaunchProbeSuccess -Probe $newOnlyProbe)) {
+    if ($newOnlyProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $newOnlyProbe.DepInfo -and [bool]$newOnlyProbe.DepInfo.HasMissingDeps) {
+      Write-FabricMissingDependencyMessage -DepInfo $newOnlyProbe.DepInfo
+    }
+
+    $newOnlyPrompt = @(
+      ("Post new-only outcome: {0}." -f [string]$newOnlyProbe.Outcome.Type)
+      ""
+      "Run standard compatibility pipeline instead?"
+      "Eliminate - run standard pipeline."
+      "Cancel - stop update mode."
+    )
+    $runStandard = Request-UpdateFallbackDecision -PromptLines $newOnlyPrompt -DialogTitle "New-only batch requires action"
+    if ($runStandard) {
+      Write-Host "Switching to standard compatibility pipeline." -ForegroundColor Cyan
+      $standardExitCode = Invoke-StandardPipeline
+      exit $standardExitCode
+    }
+
+    Write-Host "Update mode canceled by user after new-only batch issue." -ForegroundColor Yellow
+    exit 0
+  }
+
+  Write-UpdateStage -Name "Final compatibility check"
+  Write-Host "Switching to standard compatibility pipeline for final validation of new-only mods." -ForegroundColor Cyan
+  $standardExitCode = Invoke-StandardPipeline
+  exit $standardExitCode
+}
 
 if ($DryRun) {
   Write-Host "DRYRUN complete." -ForegroundColor Green
   exit 0
-}
-
-Write-UpdateStage -Name "Post-update launch check"
-$postProbe = Invoke-UpdateLaunchProbe -ContextLabel "post-update"
-Close-UpdateProbeOutcome -Probe $postProbe -SessionStartTime $sessionStartTime
-
-if (Test-LaunchProbeSuccess -Probe $postProbe) {
-  Write-Host "Update mode success: game launched after update batch." -ForegroundColor Green
-  exit 0
-}
-
-if ($postProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $postProbe.DepInfo -and [bool]$postProbe.DepInfo.HasMissingDeps) {
-  Write-FabricMissingDependencyMessage -DepInfo $postProbe.DepInfo
-}
-Write-UpdateStage -Name "Targeted rollback restore"
-$targetedRestores = 0
-$targetedMaxRounds = 8
-$currentProbe = $postProbe
-for ($round = 1; $round -le $targetedMaxRounds; $round++) {
-  $targetedCandidates = @(Select-TargetedRollbackCandidates -Probe $currentProbe -RollbackByJar $rollbackByJar -ActiveRollbackByJar $activeRollbackByJar)
-  if ($targetedCandidates.Count -eq 0) {
-    Write-Host "No targeted rollback candidates found for current logs." -ForegroundColor Gray
-    break
-  }
-
-  Write-Host ("Targeted rollback round {0}: {1} candidate(s)." -f $round, $targetedCandidates.Count) -ForegroundColor Cyan
-  $restoredThisRound = 0
-  foreach ($candidate in @($targetedCandidates)) {
-    if ($null -eq $candidate) { continue }
-    $jarKey = Get-RollbackCandidateKey -JarName ([string]$candidate.JarName)
-    if ([string]::IsNullOrWhiteSpace($jarKey)) { continue }
-    if ($activeRollbackByJar.ContainsKey($jarKey)) { continue }
-
-    if (Restore-RollbackCandidateToGame -Candidate $candidate) {
-      $activeRollbackByJar[$jarKey] = $candidate
-      $restoredThisRound++
-      $targetedRestores++
-    }
-  }
-
-  if ($restoredThisRound -le 0) {
-    break
-  }
-
-  $currentProbe = Invoke-UpdateLaunchProbe -ContextLabel ("targeted-rollback-{0}" -f $round)
-  Close-UpdateProbeOutcome -Probe $currentProbe -SessionStartTime $sessionStartTime
-  if (Test-LaunchProbeSuccess -Probe $currentProbe) {
-    Write-Host "Targeted rollback restored launch stability." -ForegroundColor Green
-    break
-  }
-
-  if ($currentProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $currentProbe.DepInfo -and [bool]$currentProbe.DepInfo.HasMissingDeps) {
-    Write-FabricMissingDependencyMessage -DepInfo $currentProbe.DepInfo
-  }
-}
-
-if (-not (Test-LaunchProbeSuccess -Probe $currentProbe)) {
-  Write-UpdateStage -Name "Additive rollback layering"
-  $remainingCandidates = @($rollbackByJar.Values | Where-Object {
-      $entry = $_
-      if ($null -eq $entry) { return $false }
-      $key = Get-RollbackCandidateKey -JarName ([string]$entry.JarName)
-      return (-not [string]::IsNullOrWhiteSpace($key) -and (-not $activeRollbackByJar.ContainsKey($key)))
-    } | Sort-Object -Property @{ Expression = { [datetime]$_.LastWriteTime }; Descending = $true }, @{ Expression = { [string]$_.JarName }; Ascending = $true })
-
-  if ($remainingCandidates.Count -eq 0) {
-    Write-Host "No remaining rollback candidates for additive layering." -ForegroundColor Gray
-  } else {
-    $index = 0
-    $batchSize = 1
-    $layerRound = 0
-    while ($index -lt $remainingCandidates.Count -and (-not (Test-LaunchProbeSuccess -Probe $currentProbe))) {
-      $layerRound++
-      $takeCount = [Math]::Min($batchSize, ($remainingCandidates.Count - $index))
-      $batch = @($remainingCandidates[$index..($index + $takeCount - 1)])
-      $batchLabel = @($batch | ForEach-Object { [string]$_.JarName }) -join ", "
-      Write-Host ("Layering round {0}: add {1}" -f $layerRound, $batchLabel) -ForegroundColor Cyan
-
-      foreach ($candidate in @($batch)) {
-        if ($null -eq $candidate) { continue }
-        $jarKey = Get-RollbackCandidateKey -JarName ([string]$candidate.JarName)
-        if ([string]::IsNullOrWhiteSpace($jarKey)) { continue }
-        if ($activeRollbackByJar.ContainsKey($jarKey)) { continue }
-        if (Restore-RollbackCandidateToGame -Candidate $candidate) {
-          $activeRollbackByJar[$jarKey] = $candidate
-        }
-      }
-
-      $currentProbe = Invoke-UpdateLaunchProbe -ContextLabel ("layering-rollback-{0}" -f $layerRound)
-      Close-UpdateProbeOutcome -Probe $currentProbe -SessionStartTime $sessionStartTime
-      if (Test-LaunchProbeSuccess -Probe $currentProbe) {
-        Write-Host "Additive rollback layering restored launch stability." -ForegroundColor Green
-        break
-      }
-
-      if ($currentProbe.Outcome.Type -eq "FabricDialog" -and $null -ne $currentProbe.DepInfo -and [bool]$currentProbe.DepInfo.HasMissingDeps) {
-        Write-FabricMissingDependencyMessage -DepInfo $currentProbe.DepInfo
-      }
-
-      $index += $takeCount
-      $batchSize = [Math]::Min(($batchSize * 2), ($remainingCandidates.Count - $index))
-      if ($batchSize -lt 1) { $batchSize = 1 }
-    }
-  }
-}
-
-if (-not (Test-LaunchProbeSuccess -Probe $currentProbe)) {
-  Write-Host "Update mode failed: launch is still unstable even after rollback layering." -ForegroundColor Red
-  exit 3
-}
-
-if ($activeRollbackByJar.Count -gt 0) {
-  Write-UpdateStage -Name "Rollback minimization"
-  $activeOrdered = @($activeRollbackByJar.Values | Sort-Object -Property @{ Expression = { [datetime]$_.LastWriteTime }; Descending = $true }, @{ Expression = { [string]$_.JarName }; Ascending = $true })
-  foreach ($candidate in @($activeOrdered)) {
-    if ($null -eq $candidate) { continue }
-    $jarName = [string]$candidate.JarName
-    $jarKey = Get-RollbackCandidateKey -JarName $jarName
-    if ([string]::IsNullOrWhiteSpace($jarKey)) { continue }
-    if (-not $activeRollbackByJar.ContainsKey($jarKey)) { continue }
-
-    Write-Host ("Minimize: remove old version candidate '{0}' and re-test." -f $jarName) -ForegroundColor Cyan
-    if (-not (Deactivate-RollbackCandidateFromGame -Candidate $candidate -NewByJarName $newCandidateByJarName)) {
-      Write-Host ("Warning: failed to temporarily deactivate old version '{0}'." -f $jarName) -ForegroundColor Yellow
-      continue
-    }
-
-    $minProbe = Invoke-UpdateLaunchProbe -ContextLabel ("minimize-remove-{0}" -f $jarName)
-    Close-UpdateProbeOutcome -Probe $minProbe -SessionStartTime $sessionStartTime
-    if (Test-LaunchProbeSuccess -Probe $minProbe) {
-      $null = $activeRollbackByJar.Remove($jarKey)
-      Write-Host ("Old version '{0}' is not required." -f $jarName) -ForegroundColor Green
-      continue
-    }
-
-    if (Restore-RollbackCandidateToGame -Candidate $candidate) {
-      Write-Host ("Old version '{0}' is still required." -f $jarName) -ForegroundColor Yellow
-      $activeRollbackByJar[$jarKey] = $candidate
-    } else {
-      Write-Host ("Warning: failed to restore required old version '{0}'." -f $jarName) -ForegroundColor Red
-    }
-  }
 }
 
 if ($activeRollbackByJar.Count -gt 0) {
