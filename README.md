@@ -114,6 +114,29 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 | `-AutoHandleFabricDialog <bool>` | Авто-маршрутизация Fabric-диалогов без missing deps в debug pipeline |
 | `-IgnoreModIds <id1,id2,...>` | Игнорировать указанные mod id в compatibility cleanup |
 | `-Profile <name>` | Применить профиль из `[Profile:<name>]` в `config.ini` / `config.local.ini` |
+| `-Update <path>` | Режим обновления: обрабатывает якорный `.jar` из `StorageModsDir` и все `.jar` новее/равные по `LastWriteTime` |
+
+## Режим обновления (`-Update`)
+
+Запуск:
+```powershell
+.\run.ps1 -Update "D:\ModsStorage\SomeMod-1.5.0.jar"
+```
+
+Что делает режим:
+- На старте выполняет проверочный запуск игры.
+- Если сразу получен crash/no-launch: показывает модальный выбор `Устранить / Отмена`.
+  - `Устранить` -> запускает стандартный пайплайн `Auto-Run-LegacyLauncher.ps1`.
+  - `Отмена` -> завершает update-режим без изменений.
+- Если получен Fabric-диалог с missing dependencies: выводит отсутствующие зависимости и завершается (без автозапуска стандартного пайплайна).
+- Берёт из `StorageModsDir` якорный файл и все `.jar` с `LastWriteTime >= anchor`.
+- Для каждого кандидата через jar-метаданные ищет более старые версии (только в корне `StorageModsDir`), переносит их в `Updated/<MinecraftVersion>`.
+- В папке игры удаляет старые версии совпадающих модов (их копии для rollback кладутся туда же, в `Updated/<MinecraftVersion>`), новую версию копирует в `GameModsDir`.
+- После батча делает post-check:
+  - прицельный rollback по логам,
+  - затем rollback-наслоение (1, 2, 4, ...),
+  - затем минимизацию (по одной старой версии), чтобы оставить минимально нужный набор.
+- Не для каждого обновляемого мода обязана находиться старая версия: это нормальный сценарий.
 
 ## Проверка скриптов и локализаций
 
@@ -142,6 +165,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 ├── checker.ps1              # Линтер + проверка локализаций
 ├── scripts/
 │   ├── Auto-Run-LegacyLauncher.ps1      # Оркестратор: запуск, мониторинг, цикл
+│   ├── Auto-Run-LegacyLauncher.Update.ps1 # Режим обновления (anchor + newer jars)
 │   ├── Check-Mod-Compatibility.ps1      # Базовый Анализ
 │   ├── Analyze-MixinErrors.ps1          # Mixin-анализ
 │   ├── Layer-Mods.ps1                   # Наслоение

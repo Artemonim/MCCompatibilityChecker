@@ -13,6 +13,7 @@ Configuration:
 
 Commonly used parameters:
   -LauncherExePath <path>  Path to Legacy Launcher executable.
+  -Update <path>          Update-mode entrypoint for staged mod updates from storage.
   -NoLegacy               Ignore legacy folders (Check-Mod-Compatibility).
   -GameLegacy             Use game-side legacy folders for isolation.
   -DryRun                 Print planned actions without executing them.
@@ -38,6 +39,9 @@ param(
 
   # * Show full technical help and exit.
   [switch]$HelpFull,
+
+  # * Run update-mode pipeline using the specified anchor file in StorageModsDir.
+  [string]$Update,
 
   # * Arguments to be forwarded to the underlying script.
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -66,10 +70,14 @@ if ($Help) {
 
   Write-Host "Usage:" -ForegroundColor White
   Write-Host "  .\run.ps1 [-LauncherExePath <path>] [-NoLegacy] [-GameLegacy] [-DryRun] [-Verbose] [-HelpFull]`n" -ForegroundColor Gray
+  Write-Host "  .\run.ps1 -Update <path-in-storage> [launcher/options]`n" -ForegroundColor Gray
 
   Write-Host "Commonly Used Parameters:" -ForegroundColor White
   Write-Host "  -LauncherExePath <path> " -NoNewline -ForegroundColor Yellow
   Write-Host ": Path to Legacy Launcher executable." -ForegroundColor Gray
+
+  Write-Host "  -Update <path>          " -NoNewline -ForegroundColor Yellow
+  Write-Host ": Run update mode for the anchor file and newer jars in StorageModsDir." -ForegroundColor Gray
 
   Write-Host "  -NoLegacy               " -NoNewline -ForegroundColor Yellow
   Write-Host ": Ignore legacy folders in storage." -ForegroundColor Gray
@@ -111,6 +119,16 @@ if ($PSBoundParameters.ContainsKey("Verbose")) {
 }
 if ($PSBoundParameters.ContainsKey("Debug")) {
   $forwardCommon["Debug"] = $true
+}
+
+if (-not [string]::IsNullOrWhiteSpace([string]$Update)) {
+  $updateScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "scripts\Auto-Run-LegacyLauncher.Update.ps1"
+  if (-not (Test-Path -LiteralPath $updateScriptPath)) {
+    throw ("Update entrypoint script not found: {0}" -f $updateScriptPath)
+  }
+
+  & $updateScriptPath -UpdatePath $Update @forwardCommon @RemainingArgs
+  exit $LASTEXITCODE
 }
 
 if ($null -eq $RemainingArgs) {
