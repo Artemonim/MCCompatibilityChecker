@@ -28,6 +28,130 @@ $regexChoiceRunRecovery = "^(?:{0}|recovery|recover)$" -f [regex]::Escape($input
 $regexChoiceRollbackExit = "^(?:{0}|restore|rollback|undo|{1}|no)$" -f [regex]::Escape($inputKeyRollbackExit), [regex]::Escape($inputKeyRetryNo)
 $regexChoiceAcceptExit = "^(?:{0}|accept|keep|skip|stop)$" -f [regex]::Escape($inputKeyAcceptExit)
 
+$script:autoRunSessionDepMapByJarName = @{}
+$script:autoRunSessionDepMapLoadedPath = ""
+
+function Get-SessionDependencyMapByJarName {
+  if ([bool]$script:sessionDependencyMapAvailable -and (-not [string]::IsNullOrWhiteSpace([string]$script:sessionDependencyMapJsonPath))) {
+    $mapPath = [string]$script:sessionDependencyMapJsonPath
+    if ([string]::Equals($script:autoRunSessionDepMapLoadedPath, $mapPath, [System.StringComparison]::OrdinalIgnoreCase) -and $script:autoRunSessionDepMapByJarName.Count -gt 0) {
+      return $script:autoRunSessionDepMapByJarName
+    }
+
+    $script:autoRunSessionDepMapByJarName = @{}
+    $script:autoRunSessionDepMapLoadedPath = $mapPath
+    if (-not (Test-Path -LiteralPath $mapPath)) {
+      return $script:autoRunSessionDepMapByJarName
+    }
+
+    try {
+      $depRaw = Get-Content -LiteralPath $mapPath -Raw -ErrorAction Stop
+      if ([string]::IsNullOrWhiteSpace($depRaw)) {
+        return $script:autoRunSessionDepMapByJarName
+      }
+      $depObj = $depRaw | ConvertFrom-Json -ErrorAction Stop
+      foreach ($mod in @($depObj.Mods)) {
+        if ($null -eq $mod) { continue }
+        $jarName = if ($mod.PSObject.Properties.Name -contains "JarName") { [string]$mod.JarName } else { "" }
+        if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+        $jarKey = $jarName.ToLowerInvariant()
+        if (-not $script:autoRunSessionDepMapByJarName.ContainsKey($jarKey)) {
+          $script:autoRunSessionDepMapByJarName[$jarKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
+        if ($mod.PSObject.Properties.Name -contains "ModId") {
+          $modId = [string]$mod.ModId
+          if (-not [string]::IsNullOrWhiteSpace($modId)) {
+            $null = $script:autoRunSessionDepMapByJarName[$jarKey].Add($modId.ToLowerInvariant())
+          }
+        }
+        if ($mod.PSObject.Properties.Name -contains "ProvidedModIds") {
+          foreach ($provided in @($mod.ProvidedModIds)) {
+            $providedId = [string]$provided
+            if ([string]::IsNullOrWhiteSpace($providedId)) { continue }
+            $null = $script:autoRunSessionDepMapByJarName[$jarKey].Add($providedId.ToLowerInvariant())
+          }
+        }
+      }
+    } catch {
+      $script:autoRunSessionDepMapByJarName = @{}
+      return $script:autoRunSessionDepMapByJarName
+    }
+
+    return $script:autoRunSessionDepMapByJarName
+  }
+
+  return @{}
+}
+
+function Get-SessionIsolatedProvidedModIds {
+  param(
+    [Parameter(Mandatory = $true)]
+    [hashtable]$SessionCulpritByJar
+  )
+
+  if ($null -eq $SessionCulpritByJar -or $SessionCulpritByJar.Count -eq 0) { return @() }
+  $depByJar = Get-SessionDependencyMapByJarName
+  if ($null -eq $depByJar -or $depByJar.Count -eq 0) { return @() }
+
+  $ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($move in @($SessionCulpritByJar.Values)) {
+    if ($null -eq $move) { continue }
+    $jarName = if ($move | Get-Member -Name "JarName" -MemberType NoteProperty, Property) { [string]$move.JarName } else { "" }
+    if ([string]::IsNullOrWhiteSpace($jarName)) { continue }
+    $jarKey = $jarName.ToLowerInvariant()
+    if (-not $depByJar.ContainsKey($jarKey)) { continue }
+    foreach ($modId in @($depByJar[$jarKey])) {
+      $value = [string]$modId
+      if ([string]::IsNullOrWhiteSpace($value)) { continue }
+      $null = $ids.Add($value.ToLowerInvariant())
+    }
+  }
+
+  if ($ids.Count -eq 0) { return @() }
+  return @($ids | Sort-Object)
+}
+
+function Get-SelfIntroducedMissingDependencyIds {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$MissingDepIds,
+    [Parameter(Mandatory = $true)]
+    [hashtable]$SessionCulpritByJar
+  )
+
+  $missingArr = @(
+    $MissingDepIds |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+      ForEach-Object { $_.ToLowerInvariant() } |
+      Sort-Object -Unique
+  )
+  if ($missingArr.Count -eq 0) { return @() }
+
+  $isolatedProvided = @(Get-SessionIsolatedProvidedModIds -SessionCulpritByJar $SessionCulpritByJar)
+  if ($isolatedProvided.Count -eq 0) { return @() }
+  $isolatedSet = @{}
+  foreach ($isolatedId in $isolatedProvided) {
+    $key = [string]$isolatedId
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    $isolatedSet[$key.ToLowerInvariant()] = $true
+  }
+  if ($isolatedSet.Count -eq 0) { return @() }
+
+  $result = New-Object System.Collections.Generic.List[string]
+  foreach ($missingId in $missingArr) {
+    $key = [string]$missingId
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    if ($isolatedSet.ContainsKey($key.ToLowerInvariant())) {
+      $result.Add($key) | Out-Null
+    }
+  }
+
+  if ($result.Count -eq 0) { return @() }
+  return @($result.ToArray() | Sort-Object -Unique)
+}
+
 function Invoke-PreLaunchOutcomeDialogCleanup {
   [CmdletBinding()]
   [OutputType([long[]])]
@@ -93,14 +217,33 @@ function Invoke-PreLaunchOutcomeDialogCleanup {
 
 function Invoke-PostSessionOutcomeDialogCleanup {
   if ($DryRun) { return }
-  $finalCrashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
-  if ($null -ne $finalCrashWindow) {
-    Write-Host ("Closing remaining crash window: {0}" -f $finalCrashWindow.Title) -ForegroundColor Gray
-    [void](Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $finalCrashWindow }) `
-      -DelaySeconds $CrashCloseDelaySeconds `
-      -OffsetX $CrashCloseClickOffsetX `
-      -OffsetY $CrashCloseClickOffsetY `
-      -CloseExtraFabricDialogs $true)
+  for ($cleanupPass = 1; $cleanupPass -le 4; $cleanupPass++) {
+    $closedAny = $false
+
+    $finalCrashWindow = Select-WindowByTitlePattern -Patterns $CrashWindowTitlePatterns
+    if ($null -ne $finalCrashWindow) {
+      Write-Host ("Closing remaining crash window: {0}" -f $finalCrashWindow.Title) -ForegroundColor Gray
+      [void](Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "CrashDialog"; Window = $finalCrashWindow }) `
+        -DelaySeconds $CrashCloseDelaySeconds `
+        -OffsetX $CrashCloseClickOffsetX `
+        -OffsetY $CrashCloseClickOffsetY `
+        -CloseExtraFabricDialogs $true)
+      $closedAny = $true
+    }
+
+    $finalFabricWindow = Select-WindowByTitlePattern -Patterns $FabricWindowTitlePatterns
+    if ($null -ne $finalFabricWindow) {
+      Write-Host ("Closing remaining Fabric window: {0}" -f $finalFabricWindow.Title) -ForegroundColor Gray
+      [void](Close-OutcomeWindowWithExtraDialog -Outcome ([pscustomobject]@{ Type = "FabricDialog"; Window = $finalFabricWindow }) `
+        -DelaySeconds 0 `
+        -OffsetX $CrashCloseClickOffsetX `
+        -OffsetY $CrashCloseClickOffsetY `
+        -CloseExtraFabricDialogs $true)
+      $closedAny = $true
+    }
+
+    if (-not $closedAny) { break }
+    Start-Sleep -Milliseconds 150
   }
 }
 
@@ -314,33 +457,44 @@ while ($true) {
         $fabricMissingDepsDetected = $true
         $fabricMissingDepIds = @($depInfo.MissingDepIds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
         $fabricRequiringModIds = @($depInfo.RequiringModIds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
-        $missLabel = if ($fabricMissingDepIds.Count -gt 0) { $fabricMissingDepIds -join ", " } else { "<none>" }
-        $reqLabel = if ($fabricRequiringModIds.Count -gt 0) { $fabricRequiringModIds -join ", " } else { "<none>" }
-        Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
-        Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
+        $selfIntroducedMissingDepIds = @(Get-SelfIntroducedMissingDependencyIds `
+            -MissingDepIds @($fabricMissingDepIds) `
+            -SessionCulpritByJar $sessionIsolationCulpritByJar)
+        if ($selfIntroducedMissingDepIds.Count -gt 0) {
+          Write-Host ("Detected missing dependency caused by removed library '{0}'. Restoring it and isolating requiring mod(s)." -f ($selfIntroducedMissingDepIds -join ", ")) -ForegroundColor Cyan
+          if ($fabricRequiringModIds.Count -gt 0) {
+            Write-Host ("Fabric dialog detected. Quick-isolating requiring mods: {0}" -f ($fabricRequiringModIds -join ", ")) -ForegroundColor Cyan
+          }
+          $fabricShouldRunCleanup = $true
+        } else {
+          $missLabel = if ($fabricMissingDepIds.Count -gt 0) { $fabricMissingDepIds -join ", " } else { "<none>" }
+          $reqLabel = if ($fabricRequiringModIds.Count -gt 0) { $fabricRequiringModIds -join ", " } else { "<none>" }
+          Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
+          Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
 
-        # * Mirror key Fabric dialog lines in console so the user can review details without switching windows.
-        $fabricDependencyDetailLines = @(
-          $logSnapshot.Lines |
-            ForEach-Object { [string]$_ } |
-            Where-Object {
-              $_ -match "(?i)^\s*-\s+(Remove|Replace)\s+mod\b" -or
-              $_ -match "(?i)requires\s+.+\s+which\s+is\s+missing" -or
-              $_ -match "(?i)Could\s+not\s+find\s+required\s+mod:" -or
-              $_ -match "(?i)is\s+required\s+to\s+run\s+the\s+following\s+mods?\b" -or
-              $_ -match "(?i)^\s*Some\s+of\s+your\s+mods\s+are\s+incompatible\b" -or
-              $_ -match "(?i)^\s*A\s+potential\s+solution\s+has\s+been\s+determined\b" -or
-              $_ -match "(?i)^\s*More\s+details:\s*$"
-            } |
-            ForEach-Object { ConvertTo-NormalizedLogLine -Line $_ } |
-            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-            Select-Object -Unique |
-            Select-Object -First 40
-        )
-        if ($fabricDependencyDetailLines.Count -gt 0) {
-          Write-Host "Key Fabric dialog lines (from logs):" -ForegroundColor Gray
-          foreach ($detailLine in $fabricDependencyDetailLines) {
-            Write-Host ("  - {0}" -f $detailLine) -ForegroundColor Gray
+          # * Mirror key Fabric dialog lines in console so the user can review details without switching windows.
+          $fabricDependencyDetailLines = @(
+            $logSnapshot.Lines |
+              ForEach-Object { [string]$_ } |
+              Where-Object {
+                $_ -match "(?i)^\s*-\s+(Remove|Replace)\s+mod\b" -or
+                $_ -match "(?i)requires\s+.+\s+which\s+is\s+missing" -or
+                $_ -match "(?i)Could\s+not\s+find\s+required\s+mod:" -or
+                $_ -match "(?i)is\s+required\s+to\s+run\s+the\s+following\s+mods?\b" -or
+                $_ -match "(?i)^\s*Some\s+of\s+your\s+mods\s+are\s+incompatible\b" -or
+                $_ -match "(?i)^\s*A\s+potential\s+solution\s+has\s+been\s+determined\b" -or
+                $_ -match "(?i)^\s*More\s+details:\s*$"
+              } |
+              ForEach-Object { ConvertTo-NormalizedLogLine -Line $_ } |
+              Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+              Select-Object -Unique |
+              Select-Object -First 40
+          )
+          if ($fabricDependencyDetailLines.Count -gt 0) {
+            Write-Host "Key Fabric dialog lines (from logs):" -ForegroundColor Gray
+            foreach ($detailLine in $fabricDependencyDetailLines) {
+              Write-Host ("  - {0}" -f $detailLine) -ForegroundColor Gray
+            }
           }
         }
       } else {
@@ -934,7 +1088,7 @@ while ($true) {
   }
   if (-not $DryRun) {
     if ($outcome.Type -eq "Timeout") {
-      Write-Host "No crash detected after clean launch; closing game before prompt so the terminal menu is visible." -ForegroundColor Gray
+      Write-Host "No crash detected after clean launch; closing game before finalization." -ForegroundColor Gray
     }
     $closedAfterNonCrashOutcome = Stop-GameProcess -Names $GameProcessNames -StartedAfter $sessionStartTime
     if ($closedAfterNonCrashOutcome -gt 0) {
@@ -953,19 +1107,41 @@ while ($true) {
     }
   }
   if ($outcome.Type -eq "FabricDialog" -and $fabricMissingDepsDetected) {
-    if ($hasSessionIsolants) {
-      Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
-      $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
-      if (-not $ok) {
-        Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
-        exit 1
-      }
-      $sessionIsolationCulpritByJar = @{}
-    }
     $missLabel = if ($fabricMissingDepIds.Count -gt 0) { $fabricMissingDepIds -join ", " } else { "<none>" }
     $reqLabel = if ($fabricRequiringModIds.Count -gt 0) { $fabricRequiringModIds -join ", " } else { "<none>" }
     Write-Host ("Fabric dialog shows missing dependencies: {0}. User action is required." -f $missLabel) -ForegroundColor Yellow
     Write-Host ("Requiring mods: {0}" -f $reqLabel) -ForegroundColor Gray
+
+    $decisionPromptLines = @(
+      ("Fabric dialog shows missing dependencies: {0}." -f $missLabel)
+      ("Requiring mods: {0}" -f $reqLabel)
+      ""
+      "Yes - continue (продолжить)."
+      "No - finish and keep current isolated state (завершить)."
+      "Cancel - rollback isolated mods and finish (откатить)."
+    )
+    $sessionDecision = [string](Request-LauncherRecoveryDecision -PromptLines $decisionPromptLines -DialogTitle "User action required")
+    if ([string]::IsNullOrWhiteSpace($sessionDecision)) {
+      $sessionDecision = "cancel_rollback"
+    }
+
+    if ([string]::Equals($sessionDecision, "continue", [System.StringComparison]::OrdinalIgnoreCase)) {
+      Start-Sleep -Seconds 2
+      continue
+    }
+
+    if ([string]::Equals($sessionDecision, "cancel_rollback", [System.StringComparison]::OrdinalIgnoreCase)) {
+      if ($hasSessionIsolants) {
+        Write-Host "Restoring isolated mods before exit..." -ForegroundColor Cyan
+        $ok = Restore-IsolationCulpritMod -CulpritMoves @($sessionIsolationCulpritByJar.Values)
+        if (-not $ok) {
+          Write-Host "Warning: some isolated mods could not be restored automatically. Please review Legacy folders." -ForegroundColor Yellow
+          exit 1
+        }
+        $sessionIsolationCulpritByJar = @{}
+      }
+    }
+
     Invoke-PostSessionOutcomeDialogCleanup
     exit 0
   }
@@ -1026,8 +1202,12 @@ while ($true) {
     $hasSessionIsolants = $sessionIsolationCulpritByJar.Count -gt 0
   }
 
-  if ($cleanOutcome -and (-not $hasSessionIsolants)) {
-    Write-Host "No blocking errors and no isolated mods pending. Continuing automatically." -ForegroundColor Cyan
+  if ($cleanOutcome) {
+    if ($hasSessionIsolants) {
+      Write-Host ("Success: game launched without crash/fabric dialogs. Keeping {0} isolated mod(s) as incompatible." -f $sessionIsolationCulpritByJar.Count) -ForegroundColor Green
+    } else {
+      Write-Host "Success: game launched without crash/fabric dialogs. No isolated mods remain." -ForegroundColor Green
+    }
     Invoke-PostSessionOutcomeDialogCleanup
     exit 0
   }
@@ -1051,7 +1231,7 @@ while ($true) {
   }
 
   if ($hasSessionIsolants) {
-    Write-Host $prompt -ForegroundColor Yellow
+    Write-Host $prompt -ForegroundColor Cyan
     Write-Host "Why this prompt appears: previous attempts isolated one or more mods into Legacy to test stability." -ForegroundColor Gray
     Write-Host "Choose final action: run Recovery, rollback isolated mods, or accept current isolated mods and stop." -ForegroundColor Gray
     Write-Host "  <KEY_CONTINUE_AS_IS> = run Recovery analysis and stop." -ForegroundColor Gray

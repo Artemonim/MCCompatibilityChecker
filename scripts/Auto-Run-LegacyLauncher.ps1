@@ -345,18 +345,23 @@ param(
   [switch]$Help
 )
 
-$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
-if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
-  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+$sharedBootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Bootstrap.ps1"
+if (-not (Test-Path -LiteralPath $sharedBootstrapPath)) {
+  throw ("Shared bootstrap helpers not found: {0}" -f $sharedBootstrapPath)
 }
-. $sharedLocalizationPath
-Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
-Enable-McccConsoleLocalization
+. $sharedBootstrapPath
+$runtimeBootstrap = . Initialize-McccRuntimeBootstrap `
+  -StartDir $PSScriptRoot `
+  -LoadConfig `
+  -InitializeLocalization `
+  -EnableConsoleLocalization `
+  -ConfigNotFoundMessage "Shared config helpers not found: {0}" `
+  -LocalizationNotFoundMessage "Shared localization helpers not found: {0}"
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$projectRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath ".."))
+$projectRoot = [string]$runtimeBootstrap.ProjectRoot
 $transcriptLogPath = Join-Path -Path $projectRoot -ChildPath "MCCC.log"
 $legacyLogPath = Join-Path -Path $projectRoot -ChildPath "legacy.log"
 $script:compatReportDir = Join-Path -Path $projectRoot -ChildPath "logs"
@@ -403,13 +408,6 @@ if ($Help) {
   Get-Help -Full -Name $PSCommandPath
   return
 }
-
-# * Load shared config helpers.
-$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
-if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
-  throw ("Shared config helpers not found: {0}" -f $sharedConfigPath)
-}
-. $sharedConfigPath
 
 # * Optional: MCCC.json hash cache helpers (used to speed up layering/isolation).
 $sharedIsolationHashCachePath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-HashCache.ps1"
@@ -596,7 +594,7 @@ $script:sessionDependencyMapPreparedReason = ""
 $script:sessionDependencyMapAvailable = $false
 $script:sessionDependencyMapJsonPath = ""
 $script:sessionDependencyMapToolPath = Join-Path -Path $PSScriptRoot -ChildPath "..\tools\Analyze-JarDependencyMap.ps1"
-$script:sessionDependencyMapOutDir = Join-Path -Path $PSScriptRoot -ChildPath "..\reports"
+$script:sessionDependencyMapOutDir = Join-Path -Path $projectRoot -ChildPath "reports"
 
 if (-not $stageMixinAnalysisEnabled) {
   Write-Host "Mixin analysis stage disabled in config ([Stages].EnableMixinAnalysis=false)." -ForegroundColor Gray

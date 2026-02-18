@@ -72,6 +72,7 @@ If set, also matches WARN mixin lines in the signature.
 If true (default), signature change detection prefers comparing selected error evidence lines (when present)
 and ignores changes in the extracted mod ID list. This avoids false positives caused by dependency cascades
 that change Fabric's incompatible mod listing without changing the underlying error.
+DEPRECATED: explicit override is retained for compatibility; baseline flows use the default behavior.
 
 .PARAMETER PreIsolateJarNames
 Optional list of jar file names to move into the quarantine AFTER the baseline is captured and BEFORE the iterative loop.
@@ -198,7 +199,7 @@ param(
 
   # * Folder name inside GameModsDir used to store quarantined mods.
   [Parameter(Mandatory = $false)]
-  [string]$GameLegacyFolderName = "legacy",
+  [string]$GameLegacyFolderName = "",
 
   # * Optional storage mods folder. If empty, storage operations are skipped.
   [Parameter(Mandatory = $false)]
@@ -206,7 +207,7 @@ param(
 
   # * Folder name inside StorageModsDir used to store quarantined mods.
   [Parameter(Mandatory = $false)]
-  [string]$StorageLegacyFolderName = "Legacy",
+  [string]$StorageLegacyFolderName = "",
 
   # * If set, keeps the culprit jar in game legacy folder too.
   # * Without this flag, the culprit is removed from the game side and only stored in Storage legacy (when available).
@@ -263,6 +264,7 @@ param(
 
   # * If true, signature-change detection prefers evidence lines when present.
   # * This avoids false positives when mod ID lists change due to dependency cascades.
+  # ! DEPRECATED: Explicit override is retained for compatibility; baseline flows use the default ($true).
   [Parameter(Mandatory = $false)]
   [bool]$IgnoreModListForSignatureChange = $true,
 
@@ -425,7 +427,8 @@ param(
   [Parameter(Mandatory = $false)]
   [string]$DependencyMapJsonPath = "",
 
-  # * Path to Analyze-JarDependencyMap.ps1 when DependencyMapSource=Tool (optional).
+  # ! DEPRECATED: Custom dependency-map tool path override is kept for backward compatibility.
+  # * Prefer the bundled default tool path unless troubleshooting requires an override.
   [Parameter(Mandatory = $false)]
   [string]$DependencyMapToolPath = "",
 
@@ -505,13 +508,18 @@ param(
   [switch]$Help
 )
 
-$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
-if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
-  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+$sharedBootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Bootstrap.ps1"
+if (-not (Test-Path -LiteralPath $sharedBootstrapPath)) {
+  throw ("Shared bootstrap helpers not found: {0}" -f $sharedBootstrapPath)
 }
-. $sharedLocalizationPath
-Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
-Enable-McccConsoleLocalization
+. $sharedBootstrapPath
+. Initialize-McccRuntimeBootstrap `
+  -StartDir $PSScriptRoot `
+  -LoadConfig `
+  -InitializeLocalization `
+  -EnableConsoleLocalization `
+  -ConfigNotFoundMessage "Shared config helpers not found: {0}" `
+  -LocalizationNotFoundMessage "Shared localization helpers not found: {0}" | Out-Null
 if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
   $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
 }
@@ -537,12 +545,12 @@ if (-not (Test-Path -LiteralPath $sharedLogPath)) {
 }
 . $sharedLogPath
 
-# * Load shared config helpers.
-$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
-if (-not (Test-Path -LiteralPath $sharedConfigPath)) {
-  throw ("Shared config helpers not found: {0}" -f $sharedConfigPath)
+# * Load shared file operation and folder policy helpers.
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) {
+  throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath)
 }
-. $sharedConfigPath
+. $sharedFileOpsPath
 
 # * Load isolation helpers.
 $sharedIsolationLauncherPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Launcher.ps1"
@@ -620,6 +628,16 @@ if (-not (Test-Path -LiteralPath $isolateCulpritFinalizePath)) {
   throw ("Isolation culprit finalize script not found: {0}" -f $isolateCulpritFinalizePath)
 }
 
+$isolateCandidatesPath = Join-Path -Path $PSScriptRoot -ChildPath "Isolate-Incompatible-Mod.Candidates.ps1"
+if (-not (Test-Path -LiteralPath $isolateCandidatesPath)) {
+  throw ("Isolation candidate ordering script not found: {0}" -f $isolateCandidatesPath)
+}
+
+$isolateCleanupPath = Join-Path -Path $PSScriptRoot -ChildPath "Isolate-Incompatible-Mod.Cleanup.ps1"
+if (-not (Test-Path -LiteralPath $isolateCleanupPath)) {
+  throw ("Isolation cleanup script not found: {0}" -f $isolateCleanupPath)
+}
+
 $runtimeConfig = Initialize-McccRuntimeConfig `
   -StartDir $PSScriptRoot `
   -BoundParameters $PSBoundParameters `
@@ -633,6 +651,12 @@ $GameModsDir = $runtimeConfig.Paths.GameModsDir
 $StorageModsDir = $runtimeConfig.Paths.StorageModsDir
 $LogPath = $runtimeConfig.Paths.LogPath
 $LauncherExePath = $runtimeConfig.Paths.LauncherExePath
+
+$resolvedLegacyFolders = Resolve-McccLegacyFolderNames `
+  -GameLegacyFolderName $GameLegacyFolderName `
+  -StorageLegacyFolderName $StorageLegacyFolderName
+$GameLegacyFolderName = [string]$resolvedLegacyFolders.GameLegacyFolderName
+$StorageLegacyFolderName = [string]$resolvedLegacyFolders.StorageLegacyFolderName
 
 $effectiveIsolationStrategy = if ($UseLinearIsolation) { "Linear" } else { "Exponential" }
 if (-not $UseLinearIsolation -and $UseDependencyAwareOrdering) {
@@ -678,8 +702,20 @@ if (-not (Test-Path -LiteralPath $GameModsDir)) {
 }
 
 $useStorage = -not [string]::IsNullOrWhiteSpace($StorageModsDir)
+$isolationStageResults = @{}
+$isolationMainStageResult = New-McccStageAccumulator -Stage "Isolation.Main"
 if ($useStorage -and (-not (Test-Path -LiteralPath $StorageModsDir))) {
-  Write-Host ("Warning: StorageModsDir not found, storage operations are skipped: {0}" -f $StorageModsDir) -ForegroundColor Yellow
+  $storageMissingWarning = ("Warning: StorageModsDir not found, storage operations are skipped: {0}" -f $StorageModsDir)
+  Write-Host $storageMissingWarning -ForegroundColor Yellow
+  Add-McccStageWarning `
+    -Accumulator $isolationMainStageResult `
+    -Category "storage" `
+    -Code "STORAGE_MODS_DIR_NOT_FOUND" `
+    -Message $storageMissingWarning `
+    -Context @{
+    StorageModsDir = $StorageModsDir
+    GameModsDir = $GameModsDir
+  } | Out-Null
   $useStorage = $false
 }
 
@@ -696,214 +732,7 @@ if ($script:EnableSessionLaunchConfigCache) {
   Write-Host "Session launch-config cache: disabled (NoCache mode)." -ForegroundColor Gray
 }
 
-$candidateMods = @(Get-ChildItem -LiteralPath $GameModsDir -Filter "*.jar" -File -ErrorAction Stop |
-    Sort-Object -Property LastWriteTime -Descending)
-
-$script:dependencyAwareTierByJarName = @{}
-$script:dependencyAwareStatsByJarName = @{}
-$script:dependencyPriorityDecisionByJarName = @{}
-$script:currentDependencyTier = 0
-$script:dependencyMapByModId = @{}
-$script:dependencyMapProvidedIdsByJar = @{}
-$script:dependencyMapScanPath = ""
-$script:blockedByDependency = $false
-$script:blockedDependencyMissing = @()
-$script:blockedDependencyRequiring = @()
-$script:blockedDependencyContext = ""
-
-if ($ExcludeJarNames -and $ExcludeJarNames.Count -gt 0) {
-  $excludeSet = @{}
-  foreach ($name in $ExcludeJarNames) {
-    if (-not [string]::IsNullOrWhiteSpace($name)) {
-      $excludeSet[$name.ToLowerInvariant()] = $true
-    }
-  }
-  $candidateMods = @($candidateMods | Where-Object { -not $excludeSet.ContainsKey($_.Name.ToLowerInvariant()) })
-}
-
-if ($MaxModsToTest -gt 0 -and $candidateMods.Count -gt $MaxModsToTest) {
-  $candidateMods = @($candidateMods | Select-Object -First $MaxModsToTest)
-}
-
-# * Optional: skip mods that already passed in prior sessions (MCCC.json SHA256 cache).
-$script:mcccCacheEnabled = $false
-$script:mcccCachePath = ""
-$script:mcccCache = $null
-$script:mcccKnownGoodJarNameSet = @{}
-
-if ((-not $DryRun) -and $UseHashCache) {
-  $script:mcccCachePath = Get-McccHashCachePath -GameModsDir $GameModsDir -FileName $HashCacheFileName
-  $script:mcccCache = Read-McccHashCache -Path $script:mcccCachePath
-  $script:mcccCacheEnabled = $true
-
-  # * Ensure the cache file exists so it can be inspected/edited by the user.
-  try {
-    if (-not [string]::IsNullOrWhiteSpace($script:mcccCachePath) -and -not (Test-Path -LiteralPath $script:mcccCachePath)) {
-      Write-McccHashCache -Path $script:mcccCachePath -Cache $script:mcccCache
-    }
-  } catch {
-    Write-Host ("Warning: failed to create hash cache file: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-    $script:mcccCacheEnabled = $false
-  }
-
-  $passedCount = 0
-  if ($script:mcccCacheEnabled -and $null -ne $script:mcccCache -and $script:mcccCache.ContainsKey("passed") -and ($script:mcccCache["passed"] -is [hashtable])) {
-    $passedCount = $script:mcccCache["passed"].Count
-  }
-
-  if ($script:mcccCacheEnabled -and $passedCount -gt 0 -and $candidateMods -and $candidateMods.Count -gt 0) {
-    foreach ($mod in $candidateMods) {
-      $hash = Get-Sha256LowerHex -Path $mod.FullName -Retries $HashCacheHashRetryCount -DelayMs $HashCacheHashRetryDelayMs
-      if ([string]::IsNullOrWhiteSpace($hash)) { continue }
-      if (Test-McccHashPassed -Cache $script:mcccCache -Sha256LowerHex $hash) {
-        $script:mcccKnownGoodJarNameSet[$mod.Name.ToLowerInvariant()] = $hash
-      }
-    }
-
-    if ($script:mcccKnownGoodJarNameSet.Count -gt 0) {
-      $candidateMods = @($candidateMods | Where-Object { -not $script:mcccKnownGoodJarNameSet.ContainsKey($_.Name.ToLowerInvariant()) })
-      Write-Host ("Hash cache: skipping {0} previously passed mod(s)." -f $script:mcccKnownGoodJarNameSet.Count) -ForegroundColor Gray
-    }
-  }
-}
-
-# * Apply dependency-aware ordering (tiers by number of incoming dependents).
-if ($UseDependencyAwareOrdering -and $candidateMods -and $candidateMods.Count -gt 0) {
-  try {
-    if ($DependencyAwareTier2MaxDependents -lt 0) { $DependencyAwareTier2MaxDependents = 0 }
-    if ($DependencyAwareTier3MaxDependents -lt $DependencyAwareTier2MaxDependents) {
-      $DependencyAwareTier3MaxDependents = $DependencyAwareTier2MaxDependents
-    }
-    if ($DependencyAwareExponentialMaxTier -lt 0) { $DependencyAwareExponentialMaxTier = 0 }
-    if ($DependencyAwareExponentialMaxTier -gt 4) { $DependencyAwareExponentialMaxTier = 4 }
-    if ($DependencyAwareQuickIsolateMaxTier -lt 0) { $DependencyAwareQuickIsolateMaxTier = 0 }
-    if ($DependencyAwareQuickIsolateMaxTier -gt 4) { $DependencyAwareQuickIsolateMaxTier = 4 }
-
-    $countMode = $DependencyAwareOrderingCountMode
-    if ([string]::IsNullOrWhiteSpace($countMode)) { $countMode = "RequiredOnly" }
-
-    $dependencyMap = $null
-    if ($DependencyMapSource -ne "Internal") {
-      $dependencyMap = Get-DependencyMapFromSource -ScanPath $GameModsDir
-    }
-
-    if ($dependencyMap) {
-      Initialize-DependencyMapCache -DependencyMap $dependencyMap
-      $depMap = Get-DependentModCountsFromDependencyMap -DependencyMap $dependencyMap -CountMode $countMode
-
-      $mapScanPath = ""
-      if ($dependencyMap.PSObject.Properties.Name -contains "Scan") {
-        $mapScanPath = [string]$dependencyMap.Scan.Path
-      }
-      if (-not [string]::IsNullOrWhiteSpace($mapScanPath) -and (-not [string]::Equals($mapScanPath, $GameModsDir, [System.StringComparison]::OrdinalIgnoreCase))) {
-        Write-Host ("Warning: dependency map scan path differs from GameModsDir: {0}" -f $mapScanPath) -ForegroundColor Yellow
-      } else {
-        Write-Host ("Dependency map loaded from source: {0}" -f $DependencyMapSource) -ForegroundColor Gray
-      }
-    } else {
-      if ($DependencyMapSource -ne "Internal") {
-        Write-Host ("Warning: dependency map unavailable from source '{0}'. Falling back to internal parser." -f $DependencyMapSource) -ForegroundColor Yellow
-      }
-      $depMap = Get-DependentModCountsByJarName -ModsDir $GameModsDir -CountMode $countMode
-    }
-    if ($depMap -and $depMap.Count -gt 0) {
-      foreach ($jarKey in $depMap.Keys) {
-        $depCount = [int]$depMap[$jarKey].DependentCount
-        $known = [bool]$depMap[$jarKey].Known
-        if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
-          $depCount = 0
-          $known = $true
-        }
-        $script:dependencyAwareTierByJarName[$jarKey] = Get-DependencyAwareTier -DependentCount $depCount -Known $known
-        $script:dependencyAwareStatsByJarName[$jarKey] = [pscustomobject]@{
-          DependentCount = [int]$depCount
-          Known = [bool]$known
-        }
-      }
-
-      foreach ($mod in $candidateMods) {
-        $jarKey = $mod.Name.ToLowerInvariant()
-        $depCount = -1
-        $known = $false
-        if ($depMap.ContainsKey($jarKey)) {
-          $depCount = [int]$depMap[$jarKey].DependentCount
-          $known = [bool]$depMap[$jarKey].Known
-        }
-
-        if (-not $known -and (-not [bool]$DependencyAwareTreatUnknownAsCore)) {
-          $depCount = 0
-          $known = $true
-        }
-
-        $tier = Get-DependencyAwareTier -DependentCount $depCount -Known $known
-
-        Add-Member -InputObject $mod -NotePropertyName DependentModCount -NotePropertyValue $depCount -Force
-        Add-Member -InputObject $mod -NotePropertyName DependentModTier -NotePropertyValue $tier -Force
-        Add-Member -InputObject $mod -NotePropertyName DependentModCountKnown -NotePropertyValue $known -Force
-        if (-not $script:dependencyAwareStatsByJarName.ContainsKey($jarKey)) {
-          $script:dependencyAwareStatsByJarName[$jarKey] = [pscustomobject]@{
-            DependentCount = [int]$depCount
-            Known = [bool]$known
-          }
-        }
-      }
-
-      $candidateMods = @($candidateMods | Sort-Object -Property `
-          @{ Expression = { $_.DependentModTier }; Ascending = $true }, `
-          @{ Expression = { $_.LastWriteTime }; Descending = $true }, `
-          @{ Expression = { $_.Name }; Ascending = $true })
-    } else {
-      Write-Host "Dependency-aware ordering enabled, but dependency map is empty. Using date ordering." -ForegroundColor Gray
-    }
-  } catch {
-    Write-Host ("Warning: dependency-aware ordering failed: {0}. Using date ordering." -f $_.Exception.Message) -ForegroundColor Yellow
-  }
-}
-
-if (-not $candidateMods -or $candidateMods.Count -eq 0) {
-  Write-Host "No jar mods found to test." -ForegroundColor Yellow
-  exit 0
-}
-
-$runId = Get-Date -Format "yyyyMMdd-HHmmss"
-$gameLegacyRoot = Join-Path -Path $GameModsDir -ChildPath $GameLegacyFolderName
-$gameLegacyTempRoot = Join-Path -Path $gameLegacyRoot -ChildPath "temp"
-$gameQuarantineDir = Join-Path -Path $gameLegacyTempRoot -ChildPath ("isolate-{0}" -f $runId)
-$storageQuarantineDir = $null
-if ($useStorage) {
-  $storageLegacyRoot = Join-Path -Path $StorageModsDir -ChildPath $StorageLegacyFolderName
-  $storageLegacyTempRoot = Join-Path -Path $storageLegacyRoot -ChildPath "temp"
-  $storageQuarantineDir = Join-Path -Path $storageLegacyTempRoot -ChildPath ("isolate-{0}" -f $runId)
-}
-
-Write-Host ("Mods to test: {0}" -f $candidateMods.Count) -ForegroundColor Cyan
-Write-Host ("Quarantine dir: {0}" -f $gameQuarantineDir) -ForegroundColor Gray
-if ($useStorage) {
-  Write-Host ("Storage quarantine dir: {0}" -f $storageQuarantineDir) -ForegroundColor Gray
-}
-Write-Host ("Isolation strategy: {0}" -f $effectiveIsolationStrategy) -ForegroundColor Gray
-if ($effectiveIsolationStrategy -eq "Exponential") {
-  Write-Host ("Binary refinement threshold: {0}" -f $BinaryLinearThreshold) -ForegroundColor Gray
-}
-if ($effectiveIsolationStrategy -eq "Hybrid") {
-  $linearTierStart = if ($DependencyAwareExponentialMaxTier -lt 1) { 1 } else { [Math]::Min(4, $DependencyAwareExponentialMaxTier + 1) }
-  Write-Host ("Hybrid tiers: exponential<= {0}, linear>= {1}" -f $DependencyAwareExponentialMaxTier, $linearTierStart) -ForegroundColor Gray
-  if ($DependencyAwareExponentialMaxTier -gt 0) {
-    Write-Host ("Binary refinement threshold: {0}" -f $BinaryLinearThreshold) -ForegroundColor Gray
-  }
-}
-
-if ($DryRun) {
-  foreach ($mod in $candidateMods) {
-    if ($mod.PSObject.Properties.Name -contains "DependentModTier") {
-      Write-Host ("Plan: {0} | tier={1} | dependents={2} | known={3} | mtime={4}" -f $mod.Name, $mod.DependentModTier, $mod.DependentModCount, $mod.DependentModCountKnown, $mod.LastWriteTime) -ForegroundColor Gray
-    } else {
-      Write-Host ("Plan: {0} ({1})" -f $mod.Name, $mod.LastWriteTime) -ForegroundColor Gray
-    }
-  }
-  Write-Host "Dry run complete. No changes made." -ForegroundColor Green
-  exit 0
-}
+. $isolateCandidatesPath
 
 if ($PrintCursorOffset) {
   $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
@@ -958,12 +787,24 @@ try {
 } catch [System.OperationCanceledException] {
   $hadError = $true
   $cancelMessage = [string]$_.Exception.Message
+  $cancelDiagnosticMessage = "Launch canceled by user. Rolling back current mod changes."
   if ($cancelMessage -match "^MCCompatUserCancelKeepChanges:") {
     $KeepMovedModsOnFailure = $true
-    Write-Host "Launch canceled by user. Keeping current mod isolation state." -ForegroundColor Yellow
+    $cancelDiagnosticMessage = "Launch canceled by user. Keeping current mod isolation state."
+    Write-Host $cancelDiagnosticMessage -ForegroundColor Yellow
   } else {
-    Write-Host "Launch canceled by user. Rolling back current mod changes." -ForegroundColor Yellow
+    Write-Host $cancelDiagnosticMessage -ForegroundColor Yellow
   }
+  Add-McccStageError `
+    -Accumulator $isolationMainStageResult `
+    -Category "launch" `
+    -Code "USER_CANCELLED" `
+    -Message $cancelDiagnosticMessage `
+    -Context @{
+    Phase = $phase
+    KeepMovedModsOnFailure = [bool]$KeepMovedModsOnFailure
+  } `
+    -ExceptionType $_.Exception.GetType().FullName | Out-Null
   $exitCode = 130
 } catch [System.Management.Automation.PipelineStoppedException] {
   # * User pressed Ctrl+C. Restore all mods; skip error dump.
@@ -971,12 +812,21 @@ try {
   # * The user-facing message is emitted from the finally block instead.
   $hadError = $true
   $wasCtrlC = $true
+  Add-McccStageError `
+    -Accumulator $isolationMainStageResult `
+    -Category "runtime" `
+    -Code "PIPELINE_STOPPED" `
+    -Message "Isolation interrupted by user (Ctrl+C). Restoring mods..." `
+    -Context @{
+    Phase = $phase
+  } `
+    -ExceptionType $_.Exception.GetType().FullName | Out-Null
   $exitCode = 1
 } catch {
   $hadError = $true
   $dumpDir = $gameQuarantineDir
   if ([string]::IsNullOrWhiteSpace($dumpDir)) {
-    $dumpDir = Join-Path -Path $GameModsDir -ChildPath "legacy\\temp"
+    $dumpDir = Get-McccLegacyTempRootPath -ModsDir $GameModsDir -GameLegacyFolderName $GameLegacyFolderName
   }
   $dumpPath = Write-ErrorDump -TargetDir $dumpDir -Phase $phase -ErrorRecord $_
   if ($dumpPath) {
@@ -987,61 +837,20 @@ try {
     Write-Host ("Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
     Write-Host ("Phase: {0}" -f $phase) -ForegroundColor Gray
   }
+  Add-McccStageError `
+    -Accumulator $isolationMainStageResult `
+    -Category "runtime" `
+    -Code "UNHANDLED_EXCEPTION" `
+    -Message ("Error: {0}" -f $_.Exception.Message) `
+    -Context @{
+    Phase = $phase
+    ErrorDumpPath = $dumpPath
+    GameQuarantineDir = $gameQuarantineDir
+  } `
+    -ExceptionType $_.Exception.GetType().FullName | Out-Null
   $exitCode = 1
 } finally {
-  if ($wasCtrlC) {
-    Write-Host "" -ForegroundColor Yellow
-    Write-Host "Isolation interrupted by user (Ctrl+C). Restoring mods..." -ForegroundColor Yellow
-    Write-Host ("Phase at interruption: {0}" -f $phase) -ForegroundColor Gray
-  }
-  if (-not $DryRun) {
-    # * Ensure the game is closed before restore/exit.
-    [void](Stop-ConfiguredGameProcess -StartedAfter $isolationStartTime)
-    [void](Wait-ConfiguredGameExit -StartedAfter $isolationStartTime -WarningContext "Isolation cleanup")
-  }
-  if (-not $DryRun -and $movedItems.Count -gt 0) {
-    if ($hadError -and $KeepMovedModsOnFailure) {
-      Write-Host "Keeping moved mods due to failure." -ForegroundColor Yellow
-    } else {
-      # * On unexpected errors, restore everything. Culprit selection is unreliable in this state.
-      $excludeSet = @{}
-      if (-not $hadError) {
-        foreach ($name in $culpritJarNames) {
-          if (-not [string]::IsNullOrWhiteSpace($name)) { $excludeSet[$name] = $true }
-        }
-      }
-      $restoreCount = 0
-      foreach ($item in $movedItems) {
-        if ($excludeSet.Count -gt 0 -and $excludeSet.ContainsKey($item.JarName)) {
-          continue
-        }
-        if (-not [string]::IsNullOrWhiteSpace($item.GameQuarantine)) {
-          $restoreGame = Restore-FromQuarantine -SourcePath $item.GameQuarantine `
-            -DestDir $GameModsDir `
-            -IsDryRun $false `
-            -AllowOverwrite ([bool]$ForceRestore)
-          if ($restoreGame) {
-            $restoreCount++
-            Write-Verbose ("Restored game mod: {0}" -f $restoreGame)
-          }
-        }
-        if ($useStorage -and -not [string]::IsNullOrWhiteSpace($item.StorageQuarantine)) {
-          $restoreStorage = Restore-FromQuarantine -SourcePath $item.StorageQuarantine `
-            -DestDir $StorageModsDir `
-            -IsDryRun $false `
-            -AllowOverwrite ([bool]$ForceRestore)
-          if ($restoreStorage) {
-            Write-Verbose ("Restored storage mod: {0}" -f $restoreStorage)
-          }
-        }
-      }
-      if ($restoreCount -gt 0) {
-        Write-Host ("Restored {0} mod(s) from quarantine." -f $restoreCount) -ForegroundColor Green
-      }
-    }
-  }
-
-  . $isolateCulpritFinalizePath
+  . $isolateCleanupPath
 }
 
 if ($script:blockedByDependency) {
@@ -1068,6 +877,19 @@ if (-not $script:blockedByDependency) {
     $exitCode = 2
   }
 }
+
+Set-McccStageResult -StageResults $isolationStageResults -StageResult (Complete-McccStageAccumulator `
+    -Accumulator $isolationMainStageResult `
+    -ExtraFields @{
+    ExitCode = [int]$exitCode
+    StopReason = $stopReason
+    BaselineOutcome = $baselineOutcome
+    BaselineSucceeded = [bool]$baselineSucceeded
+    BlockedByDependency = [bool]$script:blockedByDependency
+    HadError = [bool]$hadError
+    WasCtrlC = [bool]$wasCtrlC
+  })
+$isolationDiagnosticSummary = Get-McccStageDiagnosticsSummary -StageResults $isolationStageResults
 
 if ($EmitResultObject) {
   $culpritSet = @{}
@@ -1107,9 +929,13 @@ if ($EmitResultObject) {
     BaselineSignature = $baselineSignature
     BaselineEvidenceKey = $baselineEvidenceKey
     StopReason = $stopReason
+    Warnings = @($isolationDiagnosticSummary.Warnings)
+    Errors = @($isolationDiagnosticSummary.Errors)
+    Diagnostics = @($isolationDiagnosticSummary.Diagnostics)
     ExtraFields = @{
       FastForwardJarNames = @($fastForward.ToArray())
       PreIsolateJarNames  = @($PreIsolateJarNames)
+      StageResults = $isolationStageResults
     }
   }
   Write-Output (New-StageResult @stageResultParams)

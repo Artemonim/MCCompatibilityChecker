@@ -1,3 +1,9 @@
+$sharedJarToolsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-JarTools.ps1"
+if (-not (Test-Path -LiteralPath $sharedJarToolsPath)) {
+  throw ("Shared jar helpers not found: {0}" -f $sharedJarToolsPath)
+}
+. $sharedJarToolsPath
+
 # * Kills game processes (java/javaw/Minecraft) started after a given time.
 # * Filters using Test-ProcessLooksLikeMinecraftGame to avoid killing the launcher wrapper.
 function Get-ActiveModCount {
@@ -8,7 +14,7 @@ function Get-ActiveModCount {
 
   if ([string]::IsNullOrWhiteSpace($ModsDir)) { return 0 }
   if (-not (Test-Path -LiteralPath $ModsDir)) { return 0 }
-  $mods = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue
+  $mods = @(Get-McccJarFiles -RootPaths @($ModsDir) -SortBy "None" -EnumerationErrorAction "SilentlyContinue")
   if ($null -eq $mods) { return 0 }
   return @($mods).Count
 }
@@ -220,7 +226,7 @@ function Get-SessionLaunchConfigKey {
   if (-not (Test-Path -LiteralPath $ModsDir)) { return "" }
 
   $jarNames = @(
-    Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue |
+    Get-McccJarFiles -RootPaths @($ModsDir) -SortBy "None" -EnumerationErrorAction "SilentlyContinue" |
       ForEach-Object { [string]$_.Name } |
       Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
       ForEach-Object { $_.ToLowerInvariant() } |
@@ -1216,27 +1222,50 @@ function Wait-ForLauncherWindowInteractive {
 function Request-LauncherRecoveryDecision {
   param(
     [Parameter(Mandatory = $false)]
-    [int]$PlayAttempts = 0
+    [int]$PlayAttempts = 0,
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$PromptLines = @(),
+    [Parameter(Mandatory = $false)]
+    [string]$DialogTitle = "User action required"
   )
 
-  $attemptLabel = if ($PlayAttempts -gt 0) {
-    ("Launch attempts: {0}." -f $PlayAttempts)
-  } else {
-    "Launch attempt not detected."
+  $prompt = ""
+  if ($PromptLines -and $PromptLines.Count -gt 0) {
+    $normalizedPromptLines = @(
+      $PromptLines |
+        ForEach-Object { [string]$_ } |
+        Where-Object { $null -ne $_ }
+    )
+    if ($normalizedPromptLines.Count -gt 0) {
+      $prompt = ($normalizedPromptLines -join [Environment]::NewLine)
+    }
   }
 
-  $prompt = @(
-    "Unable to launch or detect the launcher. Please try restarting the launcher."
-    $attemptLabel
-    ""
-    "Yes — continue retrying."
-    "No — cancel."
-    "Cancel — cancel with rollback."
-  ) -join [Environment]::NewLine
+  if ([string]::IsNullOrWhiteSpace($prompt)) {
+    $attemptLabel = if ($PlayAttempts -gt 0) {
+      ("Launch attempts: {0}." -f $PlayAttempts)
+    } else {
+      "Launch attempt not detected."
+    }
+
+    $prompt = @(
+      "Unable to launch or detect the launcher. Please try restarting the launcher."
+      $attemptLabel
+      ""
+      "Yes — continue retrying."
+      "No — cancel."
+      "Cancel — cancel with rollback."
+    ) -join [Environment]::NewLine
+  }
+
+  if ([string]::IsNullOrWhiteSpace($DialogTitle)) {
+    $DialogTitle = "User action required"
+  }
 
   $result = [System.Windows.Forms.MessageBox]::Show(
     $prompt,
-    "User action required",
+    $DialogTitle,
     [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
     [System.Windows.Forms.MessageBoxIcon]::Warning
   )

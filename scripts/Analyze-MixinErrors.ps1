@@ -17,13 +17,13 @@ param(
   [string]$GameModsDir = "",
 
   [Parameter(Mandatory = $false)]
-  [string]$GameLegacyFolderName = "legacy",
+  [string]$GameLegacyFolderName = "",
 
   [Parameter(Mandatory = $false)]
   [string]$StorageModsDir = "",
 
   [Parameter(Mandatory = $false)]
-  [string]$StorageLegacyFolderName = "Legacy",
+  [string]$StorageLegacyFolderName = "",
 
   [Parameter(Mandatory = $false)]
   [switch]$KeepCulpritInGameLegacy,
@@ -166,13 +166,18 @@ param(
   [switch]$DryRun
 )
 
-$sharedLocalizationPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Localization.ps1"
-if (-not (Test-Path -LiteralPath $sharedLocalizationPath)) {
-  throw ("Shared localization helpers not found: {0}" -f $sharedLocalizationPath)
+$sharedBootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Bootstrap.ps1"
+if (-not (Test-Path -LiteralPath $sharedBootstrapPath)) {
+  throw ("Shared bootstrap helpers not found: {0}" -f $sharedBootstrapPath)
 }
-. $sharedLocalizationPath
-Initialize-McccLocalization -StartDir $PSScriptRoot | Out-Null
-Enable-McccConsoleLocalization
+. $sharedBootstrapPath
+. Initialize-McccRuntimeBootstrap `
+  -StartDir $PSScriptRoot `
+  -LoadConfig `
+  -InitializeLocalization `
+  -EnableConsoleLocalization `
+  -ConfigNotFoundMessage "Shared config helpers not found: {0}" `
+  -LocalizationNotFoundMessage "Shared localization helpers not found: {0}" | Out-Null
 if (-not $PSBoundParameters.ContainsKey("CrashWindowTitlePatterns")) {
   $CrashWindowTitlePatterns = Get-McccLocaleCrashWindowTitlePatternSet -StartDir $PSScriptRoot -FallbackPatterns $CrashWindowTitlePatterns
 }
@@ -191,8 +196,6 @@ $useDynamicSuccessConfirm = -not $PSBoundParameters.ContainsKey("SuccessConfirmS
 # * Load shared modules.
 # ────────────────────────────────────────────────────────────────────────────
 
-$sharedConfigPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Config.ps1"
-. $sharedConfigPath
 $sharedUiPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-LauncherUi.ps1"
 . $sharedUiPath
 $sharedLauncherPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Launcher.ps1"
@@ -207,6 +210,10 @@ if (-not (Test-Path -LiteralPath $sharedLogPath)) { throw ("Shared log helpers n
 $sharedLegacyPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-Isolation-Legacy.ps1"
 if (-not (Test-Path -LiteralPath $sharedLegacyPath)) { throw ("Shared legacy helpers not found: {0}" -f $sharedLegacyPath) }
 . $sharedLegacyPath
+
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) { throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath) }
+. $sharedFileOpsPath
 
 $sharedStageResultPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-StageResult.ps1"
 if (-not (Test-Path -LiteralPath $sharedStageResultPath)) { throw ("Shared stage result helpers not found: {0}" -f $sharedStageResultPath) }
@@ -229,6 +236,12 @@ $StorageModsDir = $runtimeConfig.Paths.StorageModsDir
 $LogPath = $runtimeConfig.Paths.LogPath
 $LauncherExePath = $runtimeConfig.Paths.LauncherExePath
 $useStorage = $runtimeConfig.Paths.UseStorage
+
+$resolvedLegacyFolders = Resolve-McccLegacyFolderNames `
+  -GameLegacyFolderName $GameLegacyFolderName `
+  -StorageLegacyFolderName $StorageLegacyFolderName
+$GameLegacyFolderName = [string]$resolvedLegacyFolders.GameLegacyFolderName
+$StorageLegacyFolderName = [string]$resolvedLegacyFolders.StorageLegacyFolderName
 
 function Add-FirstLookupValue {
   param(
@@ -481,8 +494,7 @@ function Build-MixinFallbackLookup {
   }
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $jarFiles = Get-ChildItem -LiteralPath $ModsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue |
-    Sort-Object -Property @{ Expression = { $_.LastWriteTime }; Descending = $true }, @{ Expression = { $_.Name }; Descending = $false }
+  $jarFiles = Get-McccJarFiles -RootPaths @($ModsDir) -SortBy "LastWriteTime" -Descending $true -EnumerationErrorAction "SilentlyContinue"
 
   foreach ($jarFile in @($jarFiles)) {
     if ($null -eq $jarFile) { continue }
@@ -1076,7 +1088,8 @@ if ($orderedCandidates.Count -eq 0) {
 } elseif ($DryRun) {
   Write-Host ("DRYRUN: staged Mixin analysis would quarantine {0} candidate mod(s), run one batch probe, then layer candidates back." -f $orderedCandidates.Count) -ForegroundColor Gray
 } else {
-  $batchTempDir = Join-Path -Path $GameModsDir -ChildPath ("{0}\temp\mixin-batch-{1}" -f $GameLegacyFolderName, (Get-Date -Format "yyyyMMdd-HHmmss"))
+  $batchTempRoot = Get-McccLegacyTempRootPath -ModsDir $GameModsDir -GameLegacyFolderName $GameLegacyFolderName
+  $batchTempDir = Join-Path -Path $batchTempRoot -ChildPath ("mixin-batch-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
   if (-not (Test-Path -LiteralPath $batchTempDir)) {
     New-Item -ItemType Directory -Path $batchTempDir -Force | Out-Null
   }
@@ -1113,12 +1126,18 @@ if ($orderedCandidates.Count -eq 0) {
         continue
       }
 
-      Move-Item -LiteralPath $gamePath -Destination $tempGamePath -Force
+      $quarantineGameResult = Move-McccItem -LiteralPath $gamePath -DestinationPath $tempGamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      if (-not $quarantineGameResult.Performed) {
+        throw ("Failed to quarantine candidate mod from game: {0}" -f $jarName)
+      }
       $state.WasQuarantined = $true
 
       if ($useStorage -and -not [string]::IsNullOrWhiteSpace($storagePath) -and (Test-Path -LiteralPath $storagePath)) {
-        Move-Item -LiteralPath $storagePath -Destination $tempStoragePath -Force
-        $state.HasStorageBackup = $true
+        $quarantineStorageResult = Move-McccItem -LiteralPath $storagePath -DestinationPath $tempStoragePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        if (-not $quarantineStorageResult.Performed) {
+          throw ("Failed to quarantine candidate mod from storage: {0}" -f $jarName)
+        }
+        $state.HasStorageBackup = [bool]$quarantineStorageResult.Performed
       }
     }
 
@@ -1143,10 +1162,16 @@ if ($orderedCandidates.Count -eq 0) {
         foreach ($state in $layerOrderedCandidates) {
           if ($state.IsCulprit) { continue }
           if (Test-Path -LiteralPath $state.TempGamePath) {
-            Move-Item -LiteralPath $state.TempGamePath -Destination $state.GamePath -Force
+            $restoreGameResult = Move-McccItem -LiteralPath $state.TempGamePath -DestinationPath $state.GamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+            if (-not $restoreGameResult.Performed) {
+              throw ("Failed to restore candidate into game before probe: {0}" -f $state.JarName)
+            }
           }
           if ([bool]$state.HasStorageBackup -and (Test-Path -LiteralPath $state.TempStoragePath) -and -not [string]::IsNullOrWhiteSpace([string]$state.StoragePath)) {
-            Move-Item -LiteralPath $state.TempStoragePath -Destination $state.StoragePath -Force
+            $restoreStorageResult = Move-McccItem -LiteralPath $state.TempStoragePath -DestinationPath $state.StoragePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+            if (-not $restoreStorageResult.Performed) {
+              throw ("Failed to restore candidate into storage before probe: {0}" -f $state.JarName)
+            }
           }
 
           Write-Host ("    Layering probe: add back {0}" -f $state.JarName) -ForegroundColor Cyan
@@ -1227,21 +1252,29 @@ if ($orderedCandidates.Count -eq 0) {
     foreach ($state in @($candidateStates | Where-Object { [bool]$_.WasQuarantined })) {
       if ([bool]$state.IsCulprit) { continue }
       if (Test-Path -LiteralPath $state.TempGamePath) {
-        Move-Item -LiteralPath $state.TempGamePath -Destination $state.GamePath -Force -ErrorAction SilentlyContinue
+        try {
+          $null = Move-McccItem -LiteralPath $state.TempGamePath -DestinationPath $state.GamePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        } catch { }
       }
       if ([bool]$state.HasStorageBackup -and (Test-Path -LiteralPath $state.TempStoragePath) -and -not [string]::IsNullOrWhiteSpace([string]$state.StoragePath)) {
-        Move-Item -LiteralPath $state.TempStoragePath -Destination $state.StoragePath -Force -ErrorAction SilentlyContinue
+        try {
+          $null = Move-McccItem -LiteralPath $state.TempStoragePath -DestinationPath $state.StoragePath -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+        } catch { }
       }
     }
   }
 }
 
 # * Clean up empty temp dirs.
-$tempRoot = Join-Path -Path $GameModsDir -ChildPath ("{0}\temp" -f $GameLegacyFolderName)
+$tempRoot = Get-McccLegacyTempRootPath -ModsDir $GameModsDir -GameLegacyFolderName $GameLegacyFolderName
 if (Test-Path -LiteralPath $tempRoot) {
   Get-ChildItem -LiteralPath $tempRoot -Directory -Filter "mixin-*" -ErrorAction SilentlyContinue |
     Where-Object { @(Get-ChildItem -LiteralPath $_.FullName -ErrorAction SilentlyContinue).Count -eq 0 } |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    ForEach-Object {
+      try {
+        $null = Remove-McccItem -LiteralPath $_.FullName -DryRun $false -Overwrite $true -RetryCount 0 -RetryDelayMs 0
+      } catch { }
+    }
 }
 
 # ────────────────────────────────────────────────────────────────────────────

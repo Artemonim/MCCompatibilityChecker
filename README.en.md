@@ -44,6 +44,7 @@ Detailed algorithm description — in [doc/Algorithm.md](doc/Algorithm.md).
 
 - **PSScriptAnalyzer** (PowerShell module, needed for `checker.ps1`)
 - **Python 3.x** (needed for localization checks via `tools/Check-Localization.py`)
+- **Pester** (PowerShell module, needed for `checker.ps1` tests unless `-NoPester` is used)
 
 Installing `PSScriptAnalyzer`:
 ```powershell
@@ -89,7 +90,7 @@ Settings are defined in `config.ini` (defaults) and `config.local.ini` (your ove
 Available locales: `en`, `ru`.
 Stubs prepared for: `tr_TR`, `pt_BR`, `vi`, `es_ES`, `id_ID`, `zh-CN`.
 The search for the launcher's crash window automatically gathers patterns from `scripts/locales/*.psd1` (`Ui.CrashWindowTitlePatterns`).
-Currently includes `Something broke` / `Something went wrong` (en) and `Что-то сломалось...` (ru). For new languages, just add this list to the corresponding locale file.
+Currently includes title patterns `Something broke...`, `Something went wrong...`, and `Что-то сломалось...`. For new languages, just add this list to the corresponding locale file.
 If your launcher window has a different title, you can explicitly set `CrashWindowTitlePatterns` in `[Profile:<name>]` and run with `-Profile <name>`.
 
 ## Main Launch Parameters
@@ -108,6 +109,7 @@ If your launcher window has a different title, you can explicitly set `CrashWind
 | `-Verbose` | Detailed logs (to console and `MCCC.log`) |
 | `-UseLinearIsolation` | Linear search instead of binary (slower but simpler) |
 | `-NoCache` | Disable session cache (re-verify even previously successful configurations) |
+| `-OutcomeTimeoutSeconds <sec>` | Time to wait for launch outcome after clicking Play (default: 60) |
 | `-ThoroughStabilityCheck` | Increase the stability check window for launches |
 | `-AutoHandleFabricDialog <bool>` | Auto-route Fabric dialogs without missing deps in the debug pipeline |
 | `-IgnoreModIds <id1,id2,...>` | Ignore specified mod IDs in compatibility cleanup |
@@ -124,6 +126,8 @@ Examples:
 ```powershell
 .\checker.ps1             # Full check (including locales)
 .\checker.ps1 -NoLocales  # Skip locale check
+.\checker.ps1 -NoPester   # Skip Pester tests
+.\checker.ps1 .\scripts\Shared-FileOps.ps1  # Check only the specified file/path
 ```
 
 Behavior when Python is missing:
@@ -171,7 +175,7 @@ Upon completion, the script outputs a report: execution time, list of culprits b
 - Windows only (Win32 API for window management)
 - Diagnostics require multiple game launches — on large modpacks, this can take significant time
 - With large clusters of incompatibilities, unstable runs and early fallback/stop of diagnostics are possible
-- The Recovery stage is currently experimental and disabled by default
+- The Recovery stage is currently experimental, but enabled by default (`[Stages].EnableRecovery=true`)
 
 ## Support
 

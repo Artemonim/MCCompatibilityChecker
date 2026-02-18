@@ -1,3 +1,9 @@
+$sharedFileOpsPath = Join-Path -Path $PSScriptRoot -ChildPath "Shared-FileOps.ps1"
+if (-not (Test-Path -LiteralPath $sharedFileOpsPath)) {
+  throw ("Shared file operation helpers not found: {0}" -f $sharedFileOpsPath)
+}
+. $sharedFileOpsPath
+ 
 function Move-ToQuarantine {
   param(
     [Parameter(Mandatory = $true)]
@@ -19,19 +25,16 @@ function Move-ToQuarantine {
   if ($IsDryRun) {
     return ("DRYRUN move: {0} -> {1}" -f $SourcePath, $DestDir)
   }
-  New-DirectoryIfMissing -DirPath $DestDir
-  $destPath = Join-Path -Path $DestDir -ChildPath ([System.IO.Path]::GetFileName($SourcePath))
-  for ($i = 0; $i -le $Retries; $i++) {
-    try {
-      Move-Item -LiteralPath $SourcePath -Destination $destPath -Force -ErrorAction Stop
-      return $destPath
-    } catch [System.IO.IOException] {
-      if ($i -ge $Retries) { throw }
-      Start-Sleep -Milliseconds $DelayMs
-      continue
-    } catch {
-      throw
-    }
+  $destPath = Join-McccDestinationPath -SourcePath $SourcePath -DestinationDirectory $DestDir
+  $moveResult = Move-McccItem `
+    -LiteralPath $SourcePath `
+    -DestinationPath $destPath `
+    -DryRun $false `
+    -Overwrite $true `
+    -RetryCount $Retries `
+    -RetryDelayMs $DelayMs
+  if (-not $moveResult.Performed) {
+    return $null
   }
   return $destPath
 }
@@ -55,12 +58,20 @@ function Restore-FromQuarantine {
   if ($IsDryRun) {
     return ("DRYRUN restore: {0} -> {1}" -f $SourcePath, $DestDir)
   }
-  New-DirectoryIfMissing -DirPath $DestDir
-  $destPath = Join-Path -Path $DestDir -ChildPath ([System.IO.Path]::GetFileName($SourcePath))
-  if ((Test-Path -LiteralPath $destPath) -and (-not $AllowOverwrite)) {
+  $destPath = Join-McccDestinationPath -SourcePath $SourcePath -DestinationDirectory $DestDir
+  $restoreResult = Move-McccItem `
+    -LiteralPath $SourcePath `
+    -DestinationPath $destPath `
+    -DryRun $false `
+    -Overwrite ([bool]$AllowOverwrite) `
+    -RetryCount 0 `
+    -RetryDelayMs 0
+  if ($restoreResult.Skipped -and (-not $AllowOverwrite) -and (Test-Path -LiteralPath $destPath)) {
     return ("restore skipped (exists): {0}" -f $destPath)
   }
-  Move-Item -LiteralPath $SourcePath -Destination $destPath -Force -ErrorAction Stop
+  if (-not $restoreResult.Performed) {
+    return $null
+  }
   return $destPath
 }
 

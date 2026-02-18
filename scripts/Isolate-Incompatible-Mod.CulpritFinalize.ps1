@@ -1,9 +1,24 @@
+if ($null -eq $isolationStageResults -or -not ($isolationStageResults -is [hashtable])) {
+  $isolationStageResults = @{}
+}
+$culpritFinalizeStageResult = New-McccStageAccumulator -Stage "Isolation.CulpritFinalize"
+
   if (-not $DryRun -and (-not $hadError) -and $culpritJarNames -and $culpritJarNames.Count -gt 0) {
     # * Prefer moving culprits into Storage legacy (source of truth).
     # * Keep a game-legacy copy only when explicitly requested (or when storage is unavailable).
     $keepGameLegacyEffective = [bool]$KeepCulpritInGameLegacy
     if (-not $useStorage -and (-not $keepGameLegacyEffective)) {
-      Write-Host "Warning: storage is disabled/unavailable; keeping culprit in game legacy to avoid data loss." -ForegroundColor Yellow
+      $storageDisabledWarning = "Warning: storage is disabled/unavailable; keeping culprit in game legacy to avoid data loss."
+      Write-Host $storageDisabledWarning -ForegroundColor Yellow
+      Add-McccStageWarning `
+        -Accumulator $culpritFinalizeStageResult `
+        -Category "storage" `
+        -Code "STORAGE_UNAVAILABLE_KEEP_GAME_LEGACY" `
+        -Message $storageDisabledWarning `
+        -Context @{
+        UseStorage = [bool]$useStorage
+        KeepCulpritInGameLegacyRequested = [bool]$KeepCulpritInGameLegacy
+      } | Out-Null
       $keepGameLegacyEffective = $true
     }
 
@@ -19,7 +34,17 @@
           (Join-Path -Path $StorageModsDir -ChildPath $culpritName)
         )
         if ([string]::IsNullOrWhiteSpace($storageSourcePath)) {
-          Write-Host ("Warning: culprit jar not found in storage for legacy move: {0}" -f $culpritName) -ForegroundColor Yellow
+          $storageMissingWarning = ("Warning: culprit jar not found in storage for legacy move: {0}" -f $culpritName)
+          Write-Host $storageMissingWarning -ForegroundColor Yellow
+          Add-McccStageWarning `
+            -Accumulator $culpritFinalizeStageResult `
+            -Category "storage" `
+            -Code "CULPRIT_STORAGE_SOURCE_NOT_FOUND" `
+            -Message $storageMissingWarning `
+            -Context @{
+            JarName = $culpritName
+            StorageModsDir = $StorageModsDir
+          } | Out-Null
         }
       }
       $gameSourcePath = Get-FirstExistingPath -Candidates @(
@@ -44,10 +69,32 @@
 
       $storageOk = (-not $useStorage) -or $moveResult.StorageMoved
       if ($keepGameLegacyEffective -and (-not $moveResult.GameMoved) -and (-not $storageOk)) {
-        Write-Host ("Warning: culprit jar was not moved to any legacy location: {0}" -f $culpritName) -ForegroundColor Yellow
+        $noLegacyMoveWarning = ("Warning: culprit jar was not moved to any legacy location: {0}" -f $culpritName)
+        Write-Host $noLegacyMoveWarning -ForegroundColor Yellow
+        Add-McccStageWarning `
+          -Accumulator $culpritFinalizeStageResult `
+          -Category "legacy_move" `
+          -Code "CULPRIT_NOT_MOVED_TO_LEGACY" `
+          -Message $noLegacyMoveWarning `
+          -Context @{
+          JarName = $culpritName
+          KeepGameLegacyEffective = [bool]$keepGameLegacyEffective
+          UseStorage = [bool]$useStorage
+        } | Out-Null
       }
       if (-not $keepGameLegacyEffective -and (-not $storageOk)) {
-        Write-Host ("Warning: storage legacy move did not happen; keeping culprit in quarantine: {0}" -f $culpritName) -ForegroundColor Yellow
+        $storageLegacyMissWarning = ("Warning: storage legacy move did not happen; keeping culprit in quarantine: {0}" -f $culpritName)
+        Write-Host $storageLegacyMissWarning -ForegroundColor Yellow
+        Add-McccStageWarning `
+          -Accumulator $culpritFinalizeStageResult `
+          -Category "legacy_move" `
+          -Code "CULPRIT_STORAGE_LEGACY_MOVE_MISSED" `
+          -Message $storageLegacyMissWarning `
+          -Context @{
+          JarName = $culpritName
+          KeepGameLegacyEffective = [bool]$keepGameLegacyEffective
+          StorageSourcePath = $storageSourcePath
+        } | Out-Null
         continue
       }
 
@@ -92,3 +139,13 @@
         })
     }
   }
+
+Set-McccStageResult -StageResults $isolationStageResults -StageResult (Complete-McccStageAccumulator `
+    -Accumulator $culpritFinalizeStageResult `
+    -ExtraFields @{
+    DryRun = [bool]$DryRun
+    HadError = [bool]$hadError
+    CulpritCount = [int]@($culpritJarNames).Count
+    CulpritMoveCount = [int]$culpritMoves.Count
+    UseStorage = [bool]$useStorage
+  })

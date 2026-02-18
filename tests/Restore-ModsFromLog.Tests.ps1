@@ -41,10 +41,13 @@ Describe "Restore-ModsFromLog" {
       Set-Content -LiteralPath $legacyLogPath -Value "" -Encoding UTF8
 
       $scriptCopyMap = @{
+        "scripts\Shared-Bootstrap.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Bootstrap.ps1")
         "scripts\Shared-Localization.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Localization.ps1")
         "scripts\Shared-Config.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-Config.ps1")
+        "scripts\Shared-FileOps.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Shared-FileOps.ps1")
         "scripts\Auto-Run-LegacyLauncher.Restore.ps1" = (Join-Path -Path $scriptsDir -ChildPath "Auto-Run-LegacyLauncher.Restore.ps1")
         "tools\Restore-ModsFromLog.ps1" = (Join-Path -Path $toolsDir -ChildPath "Restore-ModsFromLog.ps1")
+        "tools\Shared-Restore-ModsFromLog.ps1" = (Join-Path -Path $toolsDir -ChildPath "Shared-Restore-ModsFromLog.ps1")
       }
       foreach ($relativeSource in $scriptCopyMap.Keys) {
         $sourcePath = Join-Path -Path $repoRoot -ChildPath $relativeSource

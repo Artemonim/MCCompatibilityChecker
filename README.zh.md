@@ -44,6 +44,7 @@ MCCompatibilityChecker 自动完成你手动进行的操作：移除模组、启
 
 - **PSScriptAnalyzer** (PowerShell 模块，`checker.ps1` 运行所需)
 - **Python 3.x** (通过 `tools/Check-Localization.py` 进行本地化检查所需)
+- **Pester** (PowerShell 模块；若不使用 `-NoPester`，`checker.ps1` 测试需要它)
 
 安装 `PSScriptAnalyzer`:
 ```powershell
@@ -89,7 +90,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 目前可用的本地化：`en`, `ru`。
 已准备占位符：`tr_TR`, `pt_BR`, `vi`, `es_ES`, `id_ID`, `zh-CN`。
 搜索启动器崩溃窗口会自动从 `scripts/locales/*.psd1` (`Ui.CrashWindowTitlePatterns`) 中收集模式。
-目前包含 `Something broke` / `Something went wrong` (en) 和 `Что-то сломалось...` (ru)。对于新语言，只需将此列表添加到相应的本地化文件中。
+目前包含标题模式 `Something broke...`、`Something went wrong...` 和 `Что-то сломалось...`。对于新语言，只需将此列表添加到相应的本地化文件中。
 如果你的启动器窗口标题不同，可以在 `[Profile:<名称>]` 中显式设置 `CrashWindowTitlePatterns` 并使用 `-Profile <名称>` 运行。
 
 ## 主要启动参数
@@ -108,6 +109,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 | `-Verbose` | 详细日志（输出到控制台和 `MCCC.log`） |
 | `-UseLinearIsolation` | 使用线性搜索代替二分搜索（较慢但更简单） |
 | `-NoCache` | 禁用会话缓存（重新验证即使是之前成功的配置） |
+| `-OutcomeTimeoutSeconds <sec>` | 点击 Play 后等待结果的时间（默认：60） |
 | `-ThoroughStabilityCheck` | 增加启动稳定性检查窗口 |
 | `-AutoHandleFabricDialog <bool>` | 在调试流水线中自动处理不含缺失依赖项的 Fabric 对话框 |
 | `-IgnoreModIds <id1,id2,...>` | 在兼容性清理中忽略指定的模组 ID |
@@ -124,6 +126,8 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 ```powershell
 .\checker.ps1             # 完整检查（包括本地化）
 .\checker.ps1 -NoLocales  # 跳过本地化检查
+.\checker.ps1 -NoPester   # 跳过 Pester 测试
+.\checker.ps1 .\scripts\Shared-FileOps.ps1  # 仅检查指定文件/路径
 ```
 
 缺失 Python 时的行为：
@@ -171,7 +175,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 - 仅限 Windows (使用 Win32 API 进行窗口 management)
 - 诊断需要多次启动游戏 —— 对于大型整合包，这可能需要相当长的时间
 - 遇到大规模不兼容冲突簇时，可能会出现运行不稳定或诊断过早停止的情况
-- 恢复阶段目前处于实验阶段，默认情况下是禁用的
+- 恢复阶段目前处于实验阶段，但默认启用（`[Stages].EnableRecovery=true`）
 
 ## 支持
 
