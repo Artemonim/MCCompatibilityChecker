@@ -626,6 +626,39 @@ function Write-FabricMissingDependencyMessage {
   Write-Host ("Requiring mods: {0}" -f $requiring) -ForegroundColor Gray
 }
 
+function Test-UpdatePromptHasThreeChoices {
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$PromptLines = @()
+  )
+
+  if (-not $PromptLines -or $PromptLines.Count -eq 0) { return $false }
+
+  $hasYes = $false
+  $hasNo = $false
+  $hasCancel = $false
+  foreach ($rawLine in @($PromptLines)) {
+    $line = [string]$rawLine
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $trimmed = $line.Trim().ToLowerInvariant()
+    if (-not $hasYes -and $trimmed -match "^(yes|да)\b") {
+      $hasYes = $true
+      continue
+    }
+    if (-not $hasNo -and $trimmed -match "^(no|нет)\b") {
+      $hasNo = $true
+      continue
+    }
+    if (-not $hasCancel -and $trimmed -match "^(cancel|отмена)\b") {
+      $hasCancel = $true
+      continue
+    }
+  }
+
+  return ($hasYes -and $hasNo -and $hasCancel)
+}
+
 function Request-UpdateFallbackDecision {
   param(
     [Parameter(Mandatory = $true)]
@@ -636,13 +669,17 @@ function Request-UpdateFallbackDecision {
     [string]$DialogTitle = "User action required"
   )
 
-  $prompt = @($PromptLines | ForEach-Object { [string]$_ } | Where-Object { $null -ne $_ }) -join [Environment]::NewLine
+  $normalizedPromptLines = @($PromptLines | ForEach-Object { [string]$_ } | Where-Object { $null -ne $_ })
+  $prompt = $normalizedPromptLines -join [Environment]::NewLine
   $localeTag = [string](Get-McccCurrentLocale)
   $isRuLocale = $false
   if (-not [string]::IsNullOrWhiteSpace($localeTag)) {
     $isRuLocale = $localeTag.Trim().ToLowerInvariant().StartsWith("ru")
   }
 
+  $hasThreeWayPrompt = Test-UpdatePromptHasThreeChoices -PromptLines $normalizedPromptLines
+  $dialogYesLabel = if ($isRuLocale) { "Да" } else { "Yes" }
+  $dialogNoLabel = if ($isRuLocale) { "Нет" } else { "No" }
   $dialogEliminateLabel = if ($isRuLocale) { "Устранить" } else { "Eliminate" }
   $dialogCancelLabel = if ($isRuLocale) { "Отмена" } else { "Cancel" }
   $consoleFallbackPrompt = if ($isRuLocale) { "Запустить стандартный пайплайн? (y/n)" } else { "Run standard pipeline? (y/n)" }
@@ -680,25 +717,42 @@ function Request-UpdateFallbackDecision {
     $promptLabel.Text = $prompt
     $form.Controls.Add($promptLabel)
 
-    $eliminateButton = New-Object System.Windows.Forms.Button
-    $eliminateButton.Text = $dialogEliminateLabel
-    $eliminateButton.Width = 120
-    $eliminateButton.Height = 32
-    $eliminateButton.Left = 496
-    $eliminateButton.Top = 252
-    $eliminateButton.DialogResult = [System.Windows.Forms.DialogResult]::Yes
-    $form.Controls.Add($eliminateButton)
-
+    $primaryButton = New-Object System.Windows.Forms.Button
+    $primaryButton.Width = 120
+    $primaryButton.Height = 32
+    $primaryButton.Top = 252
+    $primaryButton.DialogResult = [System.Windows.Forms.DialogResult]::Yes
     $cancelButton = New-Object System.Windows.Forms.Button
-    $cancelButton.Text = $dialogCancelLabel
     $cancelButton.Width = 120
     $cancelButton.Height = 32
-    $cancelButton.Left = 624
     $cancelButton.Top = 252
+    $cancelButton.Text = $dialogCancelLabel
+    $cancelButton.Left = 624
     $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::No
+
+    if ($hasThreeWayPrompt) {
+      $primaryButton.Text = $dialogYesLabel
+      $primaryButton.Left = 368
+
+      $noButton = New-Object System.Windows.Forms.Button
+      $noButton.Text = $dialogNoLabel
+      $noButton.Width = 120
+      $noButton.Height = 32
+      $noButton.Left = 496
+      $noButton.Top = 252
+      $noButton.DialogResult = [System.Windows.Forms.DialogResult]::No
+      $form.Controls.Add($noButton)
+
+      $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    } else {
+      $primaryButton.Text = $dialogEliminateLabel
+      $primaryButton.Left = 496
+    }
+
+    $form.Controls.Add($primaryButton)
     $form.Controls.Add($cancelButton)
 
-    $form.AcceptButton = $eliminateButton
+    $form.AcceptButton = $primaryButton
     $form.CancelButton = $cancelButton
 
     $result = $form.ShowDialog()
@@ -1543,10 +1597,12 @@ if ($newOnlyCandidates.Count -gt 0) {
     exit 0
   }
 
-  Write-UpdateStage -Name "Final compatibility check"
-  Write-Host "Switching to standard compatibility pipeline for final validation of new-only mods." -ForegroundColor Cyan
-  $standardExitCode = Invoke-StandardPipeline
-  exit $standardExitCode
+  if ($activeRollbackByJar.Count -gt 0) {
+    Write-UpdateStage -Name "Final compatibility check"
+    Write-Host "Switching to standard compatibility pipeline for final validation of new-only mods." -ForegroundColor Cyan
+    $standardExitCode = Invoke-StandardPipeline
+    exit $standardExitCode
+  }
 }
 
 if ($DryRun) {
