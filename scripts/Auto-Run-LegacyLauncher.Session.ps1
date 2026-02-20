@@ -249,36 +249,18 @@ function Invoke-PostSessionOutcomeDialogCleanup {
 
 # * Capture click offsets from current cursor position once, before the run, if not provided.
 if (($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) -or $PrintCursorOffset) {
-  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
-    -ExePath $LauncherExePath `
-    -ExeArguments $LauncherArguments `
+  $offsetResult = Resolve-LauncherPlayClickOffset -LauncherTitlePattern $LauncherWindowTitlePattern `
+    -LauncherExePath $LauncherExePath `
+    -LauncherArguments $LauncherArguments `
     -AppendAutoLaunch $effectiveAutoLaunch `
-    -TimeoutSeconds $LauncherWindowTimeoutSeconds `
-    -IsDryRun ([bool]$DryRun) `
-    -ShowWaitMessage $true
-  while ($null -eq $launcherWindow) {
-    Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds) -ForegroundColor Yellow
-    Start-Sleep -Seconds $PollIntervalSeconds
-    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherWindowTitlePattern `
-      -ExePath $LauncherExePath `
-      -ExeArguments $LauncherArguments `
-      -AppendAutoLaunch $effectiveAutoLaunch `
-      -TimeoutSeconds $LauncherWindowTimeoutSeconds `
-      -IsDryRun ([bool]$DryRun) `
-      -ShowWaitMessage $true
-  }
-  [void][MCCompatWin32]::SetForegroundWindow($launcherWindow.Handle)
-  Start-Sleep -Milliseconds 150
-
-  $offsets = Get-CursorOffsetRelativeToWindow -Handle $launcherWindow.Handle
-  Write-Host ("Captured cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY) -ForegroundColor Gray
-  if ($PlayClickOffsetX -lt 0 -or $PlayClickOffsetY -lt 0) {
-    $PlayClickOffsetX = $offsets.OffsetX
-    $PlayClickOffsetY = $offsets.OffsetY
-    Write-Host ("Using captured offsets for Play click: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY) -ForegroundColor Cyan
-  } else {
-    Write-Host ("Using provided Play click offsets: X={0}, Y={1}" -f $PlayClickOffsetX, $PlayClickOffsetY) -ForegroundColor Cyan
-  }
+    -LauncherWindowTimeoutSeconds $LauncherWindowTimeoutSeconds `
+    -PollIntervalSeconds $PollIntervalSeconds `
+    -CurrentPlayClickOffsetX $PlayClickOffsetX `
+    -CurrentPlayClickOffsetY $PlayClickOffsetY `
+    -PrintProvidedOffsetMessage ([bool]$PrintCursorOffset) `
+    -IsDryRun ([bool]$DryRun)
+  $PlayClickOffsetX = [int]$offsetResult.PlayClickOffsetX
+  $PlayClickOffsetY = [int]$offsetResult.PlayClickOffsetY
 }
 
 $sessionIsolationFastForwardJarNames = @()
@@ -369,8 +351,6 @@ while ($true) {
     -ButtonNames $PlayButtonNames `
     -ClickOffsetX $PlayClickOffsetX `
     -ClickOffsetY $PlayClickOffsetY `
-    -EnableEnterFallback $UseEnterFallback `
-    -AllowBroadSearch ([bool]$EnableBroadUiSearch) `
     -IsDryRun ([bool]$DryRun)
 
   $launchStart = Get-Date

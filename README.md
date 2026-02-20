@@ -114,6 +114,38 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 | `-AutoHandleFabricDialog <bool>` | Авто-маршрутизация Fabric-диалогов без missing deps в debug pipeline |
 | `-IgnoreModIds <id1,id2,...>` | Игнорировать указанные mod id в compatibility cleanup |
 | `-Profile <name>` | Применить профиль из `[Profile:<name>]` в `config.ini` / `config.local.ini` |
+| `-Update <path>` | Режим обновления: обрабатывает якорный `.jar` из `StorageModsDir` и все `.jar` новее/равные по `LastWriteTime` |
+
+## Режим обновления (`-Update`)
+
+Запуск:
+```powershell
+.\run.ps1 -Update "D:\ModsStorage\SomeMod-1.5.0.jar"
+```
+
+Что делает режим:
+- На старте выполняет проверочный запуск игры.
+- Если сразу получен crash/no-launch: показывает модальный выбор `Устранить / Отмена`.
+  - `Устранить` -> запускает стандартный пайплайн `Auto-Run-LegacyLauncher.ps1`.
+  - `Отмена` -> завершает update-режим без изменений.
+- Если получен Fabric-диалог с missing dependencies: показывает модальный выбор `Устранить / Отмена`.
+  - `Устранить` -> запускает стандартный пайплайн `Auto-Run-LegacyLauncher.ps1`.
+  - `Отмена` -> завершает update-режим без изменений.
+- Берёт из `StorageModsDir` якорный файл и все `.jar` с `LastWriteTime >= anchor`.
+- Делит кандидаты на 2 группы:
+  - `replaceable` — для мода найдена старая версия (в `StorageModsDir` и/или `GameModsDir`), значит есть rollback.
+  - `new-only` — старых версий не найдено.
+- Сначала применяет только `replaceable`-батч:
+  - старые версии переносит/бэкапит в `Updated/<MinecraftVersion>`,
+  - в игре удаляет старые версии и копирует новые.
+- После `replaceable`-батча делает post-check:
+  - прицельный rollback по логам,
+  - затем rollback-наслоение (1, 2, 4, ...),
+  - затем минимизацию (по одной старой версии), чтобы оставить минимально нужный набор.
+- Затем добавляет `new-only`-батч (моды без доступного rollback).
+- После `new-only`-батча выполняется post-check запуска:
+  - при неуспешном запуске предлагается переход в стандартный пайплайн `Auto-Run-LegacyLauncher.ps1`,
+  - при успешном запуске без активного rollback-набора update-режим завершается без дополнительного финального перезапуска.
 
 ## Проверка скриптов и локализаций
 
@@ -142,6 +174,7 @@ Install-Module PSScriptAnalyzer -Scope CurrentUser
 ├── checker.ps1              # Линтер + проверка локализаций
 ├── scripts/
 │   ├── Auto-Run-LegacyLauncher.ps1      # Оркестратор: запуск, мониторинг, цикл
+│   ├── Auto-Run-LegacyLauncher.Update.ps1 # Режим обновления (anchor + newer jars)
 │   ├── Check-Mod-Compatibility.ps1      # Базовый Анализ
 │   ├── Analyze-MixinErrors.ps1          # Mixin-анализ
 │   ├── Layer-Mods.ps1                   # Наслоение

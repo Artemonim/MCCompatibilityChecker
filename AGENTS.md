@@ -29,6 +29,11 @@ Known logs in `%APPDATA%\.tlauncher` (example absolute path: `C:\Users\Artem\App
 - `legacy/Minecraft/game/crash-reports/crash-YYYY-MM-DD_HH.MM.SS-(client|server).txt` - needed for hard crashes of client/server with stack traces and crash context.
 - `legacy/Minecraft/game/debug/disconnect-YYYY-MM-DD_HH.MM.SS-client.txt` - needed for multiplayer disconnect diagnostics (kicks, timeouts, handshake/protocol mismatches).
 
+Repository logs (inside this repo):
+- `MCCC.log` - PowerShell transcript of the current session, useful when sharing reproduction steps or showing what commands were run locally.
+- `legacy.log` - launcher actions that relocate culprit mods between storage and the `.tlauncher` legacy folder, shows mod filenames touched during troubleshooting.
+- `logs/compat-report-*.json` - compatibility checker output for past runs; review the most recent timestamped file for the latest report.
+
 Console color classification (PowerShell):
 - Green: success/completion (e.g., recovery finished, no issues found).
 - Cyan: stage headers, progress, neutral informational steps.

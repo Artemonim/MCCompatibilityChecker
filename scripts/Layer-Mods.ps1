@@ -107,12 +107,6 @@ If true, Timeout outcome is only treated as success when game start is detected.
 .PARAMETER BinaryLinearThreshold
 Falls back to linear once the candidate set is at or below this size during binary refinement.
 
-.PARAMETER UseEnterFallback
-If true, sends ENTER when play element is not found.
-
-.PARAMETER EnableBroadUiSearch
-If true, enables broad UI Automation fallback search.
-
 .PARAMETER CrashWindowTitlePatterns
 Crash dialog title fragments.
 
@@ -295,12 +289,6 @@ param(
 
   [Parameter(Mandatory = $false)]
   [int]$BinaryLinearThreshold = 1,
-
-  [Parameter(Mandatory = $false)]
-  [bool]$UseEnterFallback = $true,
-
-  [Parameter(Mandatory = $false)]
-  [bool]$EnableBroadUiSearch = $false,
 
   [Parameter(Mandatory = $false)]
   [string[]]$CrashWindowTitlePatterns = @("Something broke"),

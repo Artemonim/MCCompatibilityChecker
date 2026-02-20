@@ -380,6 +380,75 @@ function Start-LauncherIfNeeded {
   return $started
 }
 
+function Resolve-LauncherPlayClickOffset {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$LauncherTitlePattern,
+    [Parameter(Mandatory = $false)]
+    [string]$LauncherExePath = "",
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyCollection()]
+    [string[]]$LauncherArguments = @(),
+    [Parameter(Mandatory = $false)]
+    [bool]$AppendAutoLaunch = $false,
+    [Parameter(Mandatory = $true)]
+    [int]$LauncherWindowTimeoutSeconds,
+    [Parameter(Mandatory = $true)]
+    [int]$PollIntervalSeconds,
+    [Parameter(Mandatory = $true)]
+    [int]$CurrentPlayClickOffsetX,
+    [Parameter(Mandatory = $true)]
+    [int]$CurrentPlayClickOffsetY,
+    [Parameter(Mandatory = $false)]
+    [bool]$PrintProvidedOffsetMessage = $false,
+    [Parameter(Mandatory = $false)]
+    [bool]$IsDryRun = $false
+  )
+
+  $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherTitlePattern `
+    -ExePath $LauncherExePath `
+    -ExeArguments $LauncherArguments `
+    -AppendAutoLaunch $AppendAutoLaunch `
+    -TimeoutSeconds $LauncherWindowTimeoutSeconds `
+    -IsDryRun $IsDryRun `
+    -ShowWaitMessage $true
+  while ($null -eq $launcherWindow) {
+    Write-Host ("Launcher window not found. Waiting {0}s..." -f $PollIntervalSeconds) -ForegroundColor Yellow
+    Start-Sleep -Seconds $PollIntervalSeconds
+    $launcherWindow = Start-LauncherIfNeeded -TitlePattern $LauncherTitlePattern `
+      -ExePath $LauncherExePath `
+      -ExeArguments $LauncherArguments `
+      -AppendAutoLaunch $AppendAutoLaunch `
+      -TimeoutSeconds $LauncherWindowTimeoutSeconds `
+      -IsDryRun $IsDryRun `
+      -ShowWaitMessage $true
+  }
+
+  [void][MCCompatWin32]::SetForegroundWindow($launcherWindow.Handle)
+  Start-Sleep -Milliseconds 150
+
+  $offsets = Get-CursorOffsetRelativeToWindow -Handle $launcherWindow.Handle
+  Write-Host ("Captured cursor offsets: X={0}, Y={1}" -f $offsets.OffsetX, $offsets.OffsetY) -ForegroundColor Gray
+
+  $playClickOffsetX = [int]$CurrentPlayClickOffsetX
+  $playClickOffsetY = [int]$CurrentPlayClickOffsetY
+  if ($playClickOffsetX -lt 0 -or $playClickOffsetY -lt 0) {
+    $playClickOffsetX = [int]$offsets.OffsetX
+    $playClickOffsetY = [int]$offsets.OffsetY
+    Write-Host ("Using captured offsets for Play click: X={0}, Y={1}" -f $playClickOffsetX, $playClickOffsetY) -ForegroundColor Cyan
+  } elseif ($PrintProvidedOffsetMessage) {
+    Write-Host ("Using provided Play click offsets: X={0}, Y={1}" -f $playClickOffsetX, $playClickOffsetY) -ForegroundColor Cyan
+  }
+
+  return [pscustomobject]@{
+    LauncherWindow = $launcherWindow
+    CapturedOffsetX = [int]$offsets.OffsetX
+    CapturedOffsetY = [int]$offsets.OffsetY
+    PlayClickOffsetX = $playClickOffsetX
+    PlayClickOffsetY = $playClickOffsetY
+  }
+}
+
 function Invoke-LauncherPlay {
   param(
     [Parameter(Mandatory = $true)]
@@ -390,10 +459,6 @@ function Invoke-LauncherPlay {
     [int]$ClickOffsetX,
     [Parameter(Mandatory = $true)]
     [int]$ClickOffsetY,
-    [Parameter(Mandatory = $true)]
-    [bool]$EnableEnterFallback,
-    [Parameter(Mandatory = $true)]
-    [bool]$AllowBroadSearch,
     [Parameter(Mandatory = $false)]
     [int]$PreClickDelayMs = 0,
     [Parameter(Mandatory = $false)]
@@ -406,94 +471,15 @@ function Invoke-LauncherPlay {
     Start-Sleep -Milliseconds $PreClickDelayMs
   }
 
-  # * Prefer offset click to avoid UI Automation hangs.
-  if ($ClickOffsetX -ge 0 -and $ClickOffsetY -ge 0) {
-    Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY) -ForegroundColor Cyan
-    Invoke-ClickRelativeToWindow -Handle $LauncherHandle -OffsetX $ClickOffsetX -OffsetY $ClickOffsetY -IsDryRun $IsDryRun
-    return
-  }
-  $root = [System.Windows.Automation.AutomationElement]::FromHandle($LauncherHandle)
-  if ($null -eq $root) {
-    throw "Failed to access launcher automation element."
+  if ($ClickOffsetX -lt 0 -or $ClickOffsetY -lt 0) {
+    throw "Play click requires explicit offsets. Set -PlayClickOffsetX and -PlayClickOffsetY."
   }
 
-  # * Strict search: Button control type + exact Name.
-  foreach ($buttonName in $ButtonNames) {
-    if ([string]::IsNullOrWhiteSpace($buttonName)) { continue }
-    $condition = New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Button
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        $buttonName
-      ))
-    )
+  # * Keep optional button-name input for compatibility with existing call sites.
+  $null = $ButtonNames
 
-    $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-    if ($null -ne $button) {
-      $invokePattern = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern]
-      if ($null -ne $invokePattern) {
-        if ($IsDryRun) {
-          Write-Host ("DRYRUN would click Play button: {0}" -f $buttonName) -ForegroundColor Gray
-        } else {
-          $invokePattern.Invoke()
-        }
-        return
-      }
-    }
-  }
-
-  if ($EnableEnterFallback) {
-    Write-Host "Play element not found via UI Automation. Using ENTER fallback." -ForegroundColor Cyan
-    [void][MCCompatWin32]::SetForegroundWindow($LauncherHandle)
-    Start-Sleep -Milliseconds 150
-    if ($IsDryRun) {
-      Write-Host "DRYRUN would send ENTER to launcher window." -ForegroundColor Gray
-    } else {
-      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-    }
-    return
-  }
-
-  # * Optional broad fallback (can be slow on some launchers).
-  if ($AllowBroadSearch) {
-    Write-Host "Using broad UI Automation search fallback for Play element." -ForegroundColor Cyan
-    $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Button
-    )
-    $allButtons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
-    foreach ($element in $allButtons) {
-      $name = $element.Current.Name
-      if ([string]::IsNullOrWhiteSpace($name)) { continue }
-      foreach ($buttonName in $ButtonNames) {
-        if (Test-TitleMatch -Title $name -Pattern $buttonName) {
-          $invokePattern = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) -as [System.Windows.Automation.InvokePattern]
-          if ($null -ne $invokePattern) {
-            if ($IsDryRun) {
-              Write-Host ("DRYRUN would click Play element: {0}" -f $name) -ForegroundColor Gray
-            } else {
-              $invokePattern.Invoke()
-            }
-            return
-          }
-          $legacyPattern = $element.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern) -as [System.Windows.Automation.LegacyIAccessiblePattern]
-          if ($null -ne $legacyPattern) {
-            if ($IsDryRun) {
-              Write-Host ("DRYRUN would activate element: {0}" -f $name) -ForegroundColor Gray
-            } else {
-              $legacyPattern.DoDefaultAction()
-            }
-            return
-          }
-        }
-      }
-    }
-  }
-
-  throw ("Play element not found. Set -PlayClickOffsetX/Y or enable Enter fallback. Names tried: {0}" -f ($ButtonNames -join ", "))
+  Write-Host ("Clicking Play by offsets: X={0}, Y={1}" -f $ClickOffsetX, $ClickOffsetY) -ForegroundColor Cyan
+  Invoke-ClickRelativeToWindow -Handle $LauncherHandle -OffsetX $ClickOffsetX -OffsetY $ClickOffsetY -IsDryRun $IsDryRun
 }
 
 function Invoke-WindowClose {

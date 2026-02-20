@@ -31,8 +31,6 @@ function Write-ErrorDump {
     $lines.Add(("PlayClickOffsetY={0}" -f $PlayClickOffsetY))
     $lines.Add(("CrashCloseClickOffsetX={0}" -f $CrashCloseClickOffsetX))
     $lines.Add(("CrashCloseClickOffsetY={0}" -f $CrashCloseClickOffsetY))
-    $lines.Add(("UseEnterFallback={0}" -f $UseEnterFallback))
-    $lines.Add(("EnableBroadUiSearch={0}" -f $EnableBroadUiSearch))
     $lines.Add(("WaitForGameExitSeconds={0}" -f $WaitForGameExitSeconds))
     $lines.Add(("GameProcessNames={0}" -f ($GameProcessNames -join ",")))
     $lines.Add(("MoveRetryCount={0}" -f $MoveRetryCount))

@@ -211,9 +211,13 @@
     "  -LauncherExePath <path> " = "  -LauncherExePath <path> "
     "  -NoLegacy               " = "  -NoLegacy               "
     "  -Profile <name>         " = "  -Profile <name>         "
+    "  -Update <path>          " = "  -Update <path>          "
     "  -UseLinearIsolation     " = "  -UseLinearIsolation     "
     "  -Verbose                " = "  -Verbose                "
+    "  .\run.ps1 -Update <path-in-storage> [launcher/options]`n" = "  .\run.ps1 -Update <path-in-storage> [launcher/options]`n"
     "  .\run.ps1 [-LauncherExePath <path>] [-NoLegacy] [-GameLegacy] [-DryRun] [-Verbose] [-HelpFull]`n" = "  .\run.ps1 [-LauncherExePath <path>] [-NoLegacy] [-GameLegacy] [-DryRun] [-Verbose] [-HelpFull]`n"
+    ": Run update mode for the anchor file and newer jars in StorageModsDir." = ": Режим обновления от якорного файла и всех более новых jar из StorageModsDir."
+    "`n[Update] {0}" = "`n[Обновление] {0}"
     "  Adding batch of {0} mod(s): {1}" = "  Добавляю батч из {0} мод(ов): {1}"
     "  Batch clean after dep restore. Remaining: {0}" = "  Батч чист после восстановления зависимостей. Осталось: {0}"
     "  Batch clean. Remaining: {0}" = "  Батч чист. Осталось: {0}"
@@ -539,6 +543,12 @@
     "Mixin Analysis"    = "Mixin-анализ"
     "Layering"          = "Наслоение"
     "Isolation"         = "Изоляция"
+    "Candidate classification" = "Классификация кандидатов"
+    "Apply replaceable batch" = "Применение заменяемого батча"
+    "Post-replaceable launch check" = "Проверка запуска после заменяемого батча"
+    "Apply new-only batch" = "Применение батча новых модов"
+    "Post new-only launch check" = "Проверка запуска после батча новых модов"
+    "Final compatibility check" = "Финальная проверка совместимости"
   }
   Ui = @{
     CrashWindowTitlePatterns = @(

@@ -128,13 +128,6 @@ If set, uses the legacy linear isolation (one mod per attempt) instead of expone
 .PARAMETER BinaryLinearThreshold
 When binary refinement is active, falls back to linear once the remaining candidate set is at or below this size.
 
-.PARAMETER UseEnterFallback
-If true, sends ENTER when play element is not found.
-
-.PARAMETER EnableBroadUiSearch
-If true, enables a broad UI Automation fallback search which can be slow on some launcher builds.
-Disabled by default to avoid hangs; prefer -PlayClickOffsetX/-PlayClickOffsetY or Enter fallback.
-
 .PARAMETER PrintCursorOffset
 If set, captures current mouse offsets relative to the launcher window and prints them.
 If PlayClickOffsetX/Y are not set, uses the captured offsets for click.
@@ -322,14 +315,6 @@ param(
   # * When binary refinement is active, switch to linear at or below this count.
   [Parameter(Mandatory = $false)]
   [int]$BinaryLinearThreshold = 8,
-
-  # * If true, sends ENTER when play element is not found.
-  [Parameter(Mandatory = $false)]
-  [bool]$UseEnterFallback = $true,
-
-  # * Enables a broad UI Automation fallback search (can be slow).
-  [Parameter(Mandatory = $false)]
-  [bool]$EnableBroadUiSearch = $false,
 
   # * If set, prints current mouse offsets relative to the launcher window and uses them for click.
   [Parameter(Mandatory = $false)]

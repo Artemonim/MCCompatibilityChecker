@@ -33,13 +33,6 @@ Optional click offset (pixels) relative to the top-left of the launcher window.
 .PARAMETER PlayClickOffsetY
 Optional click offset (pixels) relative to the top-left of the launcher window.
 
-.PARAMETER UseEnterFallback
-If true, sends ENTER when play element is not found.
-
-.PARAMETER EnableBroadUiSearch
-If true, enables a broad UI Automation fallback search which can be slow on some launcher builds.
-Disabled by default to avoid hangs; prefer -PlayClickOffsetX/-PlayClickOffsetY or Enter fallback.
-
 .PARAMETER PrintCursorOffset
 If set, captures current mouse offsets relative to the launcher window and prints them.
 If PlayClickOffsetX/Y are not set, uses the captured offsets for click.
@@ -180,14 +173,6 @@ param(
 
   [Parameter(Mandatory = $false)]
   [int]$PlayClickOffsetY = -1,
-
-  # * If true, sends ENTER when play element is not found.
-  [Parameter(Mandatory = $false)]
-  [bool]$UseEnterFallback = $true,
-
-  # * Enables a broad UI Automation fallback search (can be slow).
-  [Parameter(Mandatory = $false)]
-  [bool]$EnableBroadUiSearch = $false,
 
   # * If set, prints current mouse offsets relative to the launcher window and uses them for click.
   [Parameter(Mandatory = $false)]
@@ -340,6 +325,10 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$DryRun,
 
+  # * Internal: reuse an already running transcript (for update-mode fallback chaining).
+  [Parameter(Mandatory = $false)]
+  [switch]$ContinueTranscript,
+
   # * Show detailed help and exit.
   [Parameter(Mandatory = $false)]
   [switch]$Help
@@ -392,11 +381,13 @@ $autoRestoreExitCode = 0
 
 try {
   if ($enableTranscript) {
-    if (Test-Path -LiteralPath $transcriptLogPath) {
-      Remove-Item -LiteralPath $transcriptLogPath -Force -ErrorAction Stop
+    if (-not $ContinueTranscript) {
+      if (Test-Path -LiteralPath $transcriptLogPath) {
+        Remove-Item -LiteralPath $transcriptLogPath -Force -ErrorAction Stop
+      }
+      Start-Transcript -Path $transcriptLogPath -Force | Out-Null
+      $transcriptStarted = $true
     }
-    Start-Transcript -Path $transcriptLogPath -Force | Out-Null
-    $transcriptStarted = $true
   }
 
   # * Write session header to legacy.log (append-only, session-divided).
@@ -435,8 +426,6 @@ $profileTypeMap = @{
   PlayClickOffsetY = "int"
   PlayClickDelayMs = "int"
   PlayClickMaxAttempts = "int"
-  UseEnterFallback = "bool"
-  EnableBroadUiSearch = "bool"
   CrashWindowTitlePatterns = "string[]"
   FabricWindowTitlePatterns = "string[]"
   CrashCloseClickOffsetX = "int"
