@@ -165,6 +165,12 @@ By default, isolated mods are moved to the `Legacy` folder inside `StorageModsDi
 
 The `-NoLegacy` flag deletes mods permanently. The `-GameLegacy` flag additionally saves a copy in the game folder.
 
+## Update Mode Post-Check
+
+After applying the `new-only` batch, update mode performs another launch check:
+- if the launch fails it offers switching to `Auto-Run-LegacyLauncher.ps1` for further verification/isolation,
+- if the launch succeeds and no rollback versions are in use, update mode ends without an extra final run.
+
 ## Final Summary Report
 
 Upon completion, the script outputs a report: execution time, list of culprits by stage, restored mods (if Recovery was used), and the current list of isolated mods.

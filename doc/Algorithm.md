@@ -50,7 +50,9 @@ A separate scenario for batch updating mods from `StorageModsDir` starting from 
 
 5. Applying `new-only` and final verification:
 - After `replaceable` stabilization, `new-only` mods are added (no old version rollback available for them).
-- Update mode then automatically switches to the standard pipeline (`Auto-Run-LegacyLauncher.ps1`) for final verification and isolation of problematic new mods.
+- After `new-only`, a post-launch check runs:
+  - on failure it offers switching to the standard pipeline (`Auto-Run-LegacyLauncher.ps1`),
+  - on success with no active rollback set, update mode ends without an extra final launch.
 
 ## Stage 1: Baseline Analysis
 
